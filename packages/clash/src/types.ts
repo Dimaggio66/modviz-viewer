@@ -1,0 +1,263 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+import type { AABB } from '@ifc-lite/spatial';
+
+export type { AABB };
+
+/** A 3-component vector `[x, y, z]`. */
+export type Vec3 = [number, number, number];
+
+/** A 4×4 transform, column-major, length 16. */
+export type Mat4 = readonly number[];
+
+/**
+ * What a rule looks for between two solids:
+ * - `hard`      interpenetration (penetration depth beyond tolerance)
+ * - `clearance` separated but within the required gap
+ */
+export type ClashMode = 'hard' | 'clearance';
+
+/** How a detected clash is classified. `touch` is suppressed unless opted in. */
+export type ClashStatus = 'hard' | 'clearance' | 'touch';
+
+export type ClashSeverity = 'critical' | 'major' | 'minor' | 'info';
+
+/**
+ * A representation-agnostic element fed to the clash core.
+ *
+ * Identity is deliberately split: a durable `key` (IfcGUID / USD prim path) for
+ * persistence, BCF, dedup and lifecycle; and a runtime `ref` (federated globalId
+ * / expressId) for selection and coloring in a renderer.
+ *
+ * `positions`/`indices` are world-frame triangles (the geometry-pipeline frame,
+ * Y-up, RTC-shifted). `transform` is identity unless positions are kept local.
+ */
+export interface ClashElement {
+  key: string;
+  ref: number;
+  model: string;
+  tag: string;
+  name?: string;
+  storey?: string;
+  bounds: AABB;
+  positions: Float32Array;
+  indices: Uint32Array;
+  transform?: Mat4;
+}
+
+/** The element identity carried on a `Clash` (no geometry). */
+export interface ClashElementRef {
+  key: string;
+  ref: number;
+  model: string;
+  tag: string;
+  name?: string;
+}
+
+/** A single detection rule. Omit `b` for a self-clash within selection `a`. */
+export interface ClashRule {
+  id: string;
+  name: string;
+  /** Selector for set A (e.g. `IfcDuct*|IfcPipe*`, `!IfcSpace`). */
+  a: string;
+  /** Selector for set B. Omitted ⇒ self-clash within A. */
+  b?: string;
+  mode: ClashMode;
+  /** Touching band (m). Defaults to the run-level tolerance. */
+  tolerance?: number;
+  /** Required gap (m) for `clearance` mode. */
+  clearance?: number;
+  /** Explicit severity; otherwise inferred from the discipline matrix. */
+  severity?: ClashSeverity;
+  /** Emit `touch`-classified results instead of suppressing them. */
+  reportTouch?: boolean;
+}
+
+/** A set of rules run together (Navisworks-style clash matrix). */
+export interface ClashMatrix {
+  rules: ClashRule[];
+}
+
+export interface ClashProgress {
+  phase: 'broad' | 'narrow';
+  rule: string;
+  done: number;
+  total: number;
+}
+
+/** A precomputed set of element-`key` pairs to skip (voids/hosts/assemblies). */
+export type ExclusionSet = Set<string>;
+
+export interface ClashSettings {
+  /** Default touching band (m). */
+  tolerance?: number;
+  /** Apply `exclusions` (voids/hosts/assemblies). Default true. */
+  excludeVoidsAndHosts?: boolean;
+  /** Pair-exclusion set from an adapter. */
+  exclusions?: ExclusionSet;
+  /**
+   * Safety cap on candidate pairs per rule, reported in `result.truncated`.
+   * This is a **TS-backend guardrail**: the WASM kernel runs every candidate pair
+   * in Rust and does not truncate, so when the cap would bite it returns the
+   * COMPLETE (uncapped) clash set rather than a truncated one. Use `backend:'ts'`
+   * when a deterministic cap matters. Defaults to unlimited.
+   */
+  maxCandidatePairs?: number;
+  /**
+   * Cancels the run: it rejects with an `AbortError` `DOMException` instead of
+   * finishing.
+   *
+   * The TS backend checks it every 256 candidate pairs, and yields to the event
+   * loop at the first such checkpoint past ~50 ms of held thread time (then
+   * every ~50 ms after), rechecking immediately on the way back. So an abort
+   * raised from a timer or a UI handler stops the work in progress rather than
+   * merely refusing to start it — with one bound worth knowing: those handlers
+   * can only run during a yield, so a run that finishes inside the first ~50 ms
+   * never returns to the event loop and cannot observe an abort raised after it
+   * began. Cancellation is for runs long enough to be worth cancelling.
+   *
+   * (The WASM backend runs a whole rule inside one uninterruptible Rust call,
+   * so there it takes effect between rules.)
+   */
+  signal?: AbortSignal;
+  onProgress?: (p: ClashProgress) => void;
+}
+
+/**
+ * How a clash's `distance` was obtained — the two are NOT interchangeable and
+ * were indistinguishable in the output before this field existed.
+ *
+ * - `'mesh'` — measured on the triangle meshes. For `clearance` it is the
+ *   exact triangle-to-triangle gap. For `touch` it is usually that same exact
+ *   gap, with one exception: a pair whose every candidate depth falls below
+ *   the pair's f32 precision floor also reports `touch`, with `distance: 0`
+ *   and `distanceKind: 'mesh'` — there the 0 is a CLASSIFICATION (the
+ *   surfaces are flush to within what the f32 source coordinates can
+ *   represent; nothing is measurably penetrating), not a measured gap.
+ *   For a hard clash it is the exact
+ *   box-box penetration depth (minimum translation distance along a
+ *   separating axis, Gottschalk), certified only when BOTH elements are —
+ *   within tolerance — rectangular boxes (`obb.ts`); this replaced an
+ *   earlier "deepest crossing-triangle vertex" probe that was a sampling
+ *   artifact, converging to 0 as a mesh was retessellated instead of to the
+ *   true depth (PR #2536).
+ * - `'estimate'` — read off the two element AABBs: the smallest overlapping box
+ *   dimension. Reported for a hard clash whenever the narrow phase could not
+ *   certify a box-box depth. That happens in four shapes, all common in real
+ *   models: either element is not (confirmed) a box; surfaces that only
+ *   coincide (stacked layers sharing a footprint); one solid modelled wholly
+ *   inside another; and a member piercing clean through the other — even
+ *   when BOTH are boxes, because the box-box minimum-translation-distance is
+ *   then dominated by the piercing member's own extent along the shared
+ *   axis, not by the material it actually crossed, and is withheld from
+ *   `'mesh'` for exactly that reason. The value is then a property of the two
+ *   BOXES, not of the solids — it can equal an element's own thickness rather
+ *   than how far the two actually interpenetrate. Treat it as an indication of
+ *   scale, not as a measurement.
+ */
+export type ClashDistanceKind = 'mesh' | 'estimate';
+
+export interface Clash {
+  /** Stable id: derived from the two durable keys + rule id. */
+  id: string;
+  a: ClashElementRef;
+  b: ClashElementRef;
+  rule: string;
+  status: ClashStatus;
+  /** Signed: `<0` penetration depth, `>0` gap. */
+  distance: number;
+  /**
+   * Provenance of `distance`. The engine always sets it; it is optional only so
+   * that a clash rehydrated from a run recorded before this field existed stays
+   * assignable — absent means "unknown", never "measured".
+   */
+  distanceKind?: ClashDistanceKind;
+  /** True contact point (hard) or closest-point midpoint (clearance/touch). */
+  point: Vec3;
+  /** Overlap region (hard) or closest-segment box (clearance/touch). */
+  bounds: AABB;
+  severity: ClashSeverity;
+}
+
+/**
+ * A coordinator's REVIEW state for a clash — deliberately distinct from the
+ * detection-classification `Clash.status` (`hard`/`clearance`/`touch`). This is
+ * the human triage a project team applies: not every detected clash needs a fix
+ * (some are already resolved, some are accepted). Persisted per clash (keyed by
+ * the durable `clashReviewKey`) and mapped to a BCF topic status on export.
+ * (#1468)
+ */
+export type ClashReviewStatus = 'open' | 'resolved' | 'accepted';
+
+/** All review statuses, in workflow order (least → most resolved). */
+export const CLASH_REVIEW_STATUSES: readonly ClashReviewStatus[] = ['open', 'resolved', 'accepted'];
+
+/** The default state of a clash that has never been reviewed. */
+export const DEFAULT_CLASH_REVIEW_STATUS: ClashReviewStatus = 'open';
+
+/** A single clash's review: status plus an optional free-text coordination note. */
+export interface ClashReview {
+  status: ClashReviewStatus;
+  /** Optional coordinator comment. Empty/absent when none. */
+  comment?: string;
+  /** Epoch-ms of the last edit — lets a merge keep the newest entry. */
+  updatedAt?: number;
+}
+
+export interface ClashSummary {
+  total: number;
+  byRule: Record<string, number>;
+  byTypePair: Record<string, number>;
+  bySeverity: Record<ClashSeverity, number>;
+  byStorey?: Record<string, number>;
+}
+
+/**
+ * How many elements a rule's selectors actually matched in THIS model, before
+ * any geometry test ran. `matchedB` is `null` for a self-clash rule (no `b`
+ * selector). A rule with `matchedA === 0` or `matchedB === 0` never compared a
+ * single pair — its selector simply doesn't describe anything in this model
+ * (e.g. an MEP selector run against an infrastructure model).
+ */
+export interface ClashRuleCoverage {
+  rule: string;
+  matchedA: number;
+  matchedB: number | null;
+}
+
+export interface ClashResult {
+  clashes: Clash[];
+  summary: ClashSummary;
+  /** Present only when a cap dropped work — never silent. */
+  truncated?: { reason: string; droppedPairs: number };
+  rulesRun: ClashRule[];
+  /**
+   * Selector match coverage for every rule in `rulesRun`, in the same order.
+   * This is the raw signal for distinguishing "ran and found nothing" from
+   * "no rule matched anything in this model" — see
+   * {@link classifyRuleCoverage} for the presentation-facing classification.
+   * Populated by every engine-produced result (`runClash`, `findDuplicates`);
+   * optional only so hand-built `ClashResult` fixtures in tests don't need it.
+   */
+  ruleCoverage?: ClashRuleCoverage[];
+  settings: { tolerance: number; excludeVoidsAndHosts: boolean };
+}
+
+/** A cluster of related clashes — the unit of a single BCF topic (Phase 2). */
+export interface ClashGroup {
+  id: string;
+  title: string;
+  members: Clash[];
+  bounds: AABB;
+  representativePoint: Vec3;
+  severity: ClashSeverity;
+  discipline?: string;
+  storey?: string;
+}
+
+export const DEFAULT_CLASH_SETTINGS = {
+  tolerance: 0.002,
+  excludeVoidsAndHosts: true,
+} as const;

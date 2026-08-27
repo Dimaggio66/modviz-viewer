@@ -1,0 +1,13 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-10 10 220 170" role="img" aria-label="ModViz">
+  <polygon points="0,40 40,20 80,40 40,60" fill="#3fc2b8"/>
+  <polygon points="0,40 40,60 40,150 0,130" fill="#2aa9a0"/>
+  <polygon points="40,60 80,40 80,130 40,150" fill="#16302b"/>
+  <polygon points="120,40 160,20 200,40 160,60" fill="#2c3f63"/>
+  <polygon points="120,40 160,60 160,150 120,130" fill="#1b2a4a"/>
+  <polygon points="160,60 200,40 200,130 160,150" fill="#12203a"/>
+  <polygon points="0,130 40,150 40,165 0,145" fill="#1f8079"/>
+  <polygon points="160,150 200,130 200,145 160,165" fill="#12203a"/>
+</svg>

@@ -1,0 +1,197 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+import { useMemo, useRef, useState, useEffect } from 'react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { Separator } from '@/components/ui/separator';
+import { formatNumber, formatBytes } from '@/lib/utils';
+import { useViewerStore } from '@/store';
+import { useIfc } from '@/hooks/useIfc';
+import { useWebGPU } from '@/hooks/useWebGPU';
+import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
+import { FlavorDialog } from '@/components/extensions/FlavorDialog';
+import { createStatusBarStatsAccumulator } from './statusBarStats.js';
+
+export function StatusBar() {
+  const { loading, geometryResult, ifcDataStore } = useIfc();
+  const progress = useViewerStore((s) => s.progress);
+  const error = useViewerStore((s) => s.error);
+  const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
+  const activeStreamCanceller = useViewerStore((s) => s.activeStreamCanceller);
+  const webgpu = useWebGPU();
+
+  const [fps, setFps] = useState(60);
+  const [memory, setMemory] = useState(0);
+  const [flavorDialogOpen, setFlavorDialogOpen] = useState(false);
+  /** Deep-link from Command Palette → "Manage flavors…". */
+  const flavorDialogRequested = useViewerStore((s) => s.flavorDialogRequested);
+  const setFlavorDialogRequested = useViewerStore((s) => s.setFlavorDialogRequested);
+  useEffect(() => {
+    if (flavorDialogRequested) {
+      setFlavorDialogOpen(true);
+      setFlavorDialogRequested(false);
+    }
+  }, [flavorDialogRequested, setFlavorDialogRequested]);
+
+  // FPS counter (simplified)
+  useEffect(() => {
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let animationId: number;
+
+    const measureFps = () => {
+      frameCount++;
+      const currentTime = performance.now();
+
+      if (currentTime - lastTime >= 1000) {
+        setFps(frameCount);
+        frameCount = 0;
+        lastTime = currentTime;
+      }
+
+      animationId = requestAnimationFrame(measureFps);
+    };
+
+    animationId = requestAnimationFrame(measureFps);
+    return () => cancelAnimationFrame(animationId);
+  }, []);
+
+  // Memory usage (if available)
+  useEffect(() => {
+    const updateMemory = () => {
+      // Avoid `as any` per repo TypeScript rules — narrow to a concrete shape.
+      // `performance.memory` is Chromium-only and absent from lib.dom.
+      type PerformanceWithMemory = Performance & {
+        memory?: { usedJSHeapSize: number };
+      };
+      const memoryInfo = (performance as PerformanceWithMemory).memory;
+      if (memoryInfo) {
+        setMemory(memoryInfo.usedJSHeapSize);
+      }
+    };
+
+    updateMemory();
+    const interval = setInterval(updateMemory, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // PERF: geometryResult is a NEW object on every streaming batch commit
+  // (dataSlice.ts appendGeometryBatch), so this memo's dependency never
+  // hits during a stream — it re-derives stats every commit. A full O(meshes
+  // + entityIds) rescan there made a 16.7K-mesh stream spend ~524ms total in
+  // this memo alone (30 commits, allocating a `Set` per merged mesh on EVERY
+  // commit — not just the new ones). The accumulator below tracks how many
+  // meshes it has already folded in (by array identity + length) and only
+  // scans meshes appended since the last call — `geometryResult.meshes` is
+  // the same array reference mutated in place across a stream, so this is
+  // safe; see statusBarStats.ts for the full identity contract.
+  const statsAccRef = useRef(createStatusBarStatsAccumulator());
+  const stats = useMemo(
+    () => statsAccRef.current.update(geometryResult),
+    [geometryResult],
+  );
+
+  const visibleElements = useMemo(() => {
+    if (selectedStoreys.size === 0 || !ifcDataStore?.spatialHierarchy) {
+      return stats.elements;
+    }
+    // Count elements from all selected storeys
+    let count = 0;
+    for (const storeyId of selectedStoreys) {
+      const storeyElements = ifcDataStore.spatialHierarchy.byStorey.get(storeyId);
+      if (storeyElements) {
+        count += storeyElements.length;
+      }
+    }
+    return count || stats.elements;
+  }, [selectedStoreys, ifcDataStore, stats.elements]);
+
+  return (
+    <div className="viewer-statusbar h-7 px-3 border-t bg-muted/30 flex items-center justify-between text-xs text-muted-foreground">
+      {/* Left: Status */}
+      <div className="flex items-center gap-3">
+        {loading ? (
+          <span className="text-primary">{progress?.phase || 'Loading...'}</span>
+        ) : error ? (
+          <span className="text-destructive">{error}</span>
+        ) : (
+          <span>Ready</span>
+        )}
+        {/* Cancel button — only visible while a long-running stream
+            (LAS/LAZ/PLY/PCD/E57) is in flight. The loader hooks
+            register/clear the canceller around `await ingest.done`. */}
+        {activeStreamCanceller && (
+          <button
+            type="button"
+            onClick={() => activeStreamCanceller()}
+            className="px-2 py-0.5 rounded border border-destructive/40 text-destructive text-[10px] uppercase tracking-wider hover:bg-destructive hover:text-destructive-foreground transition-colors"
+            title="Cancel the active point cloud stream"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+
+      {/* Center: Model Stats */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-1.5">
+          <Boxes className="h-3.5 w-3.5" />
+          <span>
+            {formatNumber(visibleElements)}
+            {selectedStoreys.size > 0 && stats.elements !== visibleElements && (
+              <span className="opacity-60"> / {formatNumber(stats.elements)}</span>
+            )}
+            {' '}elements
+          </span>
+        </div>
+
+        <Separator orientation="vertical" className="h-3.5" />
+
+        <div className="flex items-center gap-1.5">
+          <Triangle className="h-3.5 w-3.5" />
+          <span>{formatNumber(stats.triangles)} tris</span>
+        </div>
+      </div>
+
+      {/* Right: Performance */}
+      <div className="flex items-center gap-3">
+        <span className={fps < 30 ? 'text-destructive' : fps < 50 ? 'text-yellow-500' : ''}>
+          {fps} FPS
+        </span>
+
+        {memory > 0 && (
+          <>
+            <Separator orientation="vertical" className="h-3.5" />
+            <span>{formatBytes(memory)}</span>
+          </>
+        )}
+
+        <Separator orientation="vertical" className="h-3.5" />
+
+        <div className="flex items-center gap-1">
+          {webgpu.checking ? (
+            <Loader2 className="h-3.5 w-3.5 text-zinc-400 animate-spin" />
+          ) : webgpu.supported ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+          ) : (
+            <AlertCircle className="h-3.5 w-3.5 text-[#f7768e]" />
+          )}
+          <span className={!webgpu.supported && !webgpu.checking ? 'text-[#f7768e]' : ''}>
+            {webgpu.checking ? 'Checking...' : webgpu.supported ? 'WebGPU' : 'No WebGPU'}
+          </span>
+        </div>
+
+        <Separator orientation="vertical" className="h-3.5" />
+
+        <FlavorIndicator onClick={() => setFlavorDialogOpen(true)} />
+
+        <Separator orientation="vertical" className="h-3.5" />
+
+        <span className="opacity-60">v0.07</span>
+      </div>
+
+      <FlavorDialog open={flavorDialogOpen} onClose={() => setFlavorDialogOpen(false)} />
+    </div>
+  );
+}

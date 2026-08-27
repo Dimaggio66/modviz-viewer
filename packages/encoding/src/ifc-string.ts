@@ -1,0 +1,177 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Decode IFC STEP encoded strings.
+ * Handles:
+ * - \X2\XXXX\X0\ - Unicode hex encoding (e.g., \X2\00E4\X0\ -> a with umlaut)
+ * - \X4\XXXXXXXX\X0\ - Unicode 4-byte hex for chars outside BMP
+ * - \X\XX\ - ISO-8859-1 hex encoding
+ * - \S\X - Extended ASCII with escape
+ * - \P..\ - Code page switches (supported as directives and removed)
+ * - \\ - one literal backslash (ISO 10303-21 doubles the reverse solidus)
+ *
+ * The \\ pair is collapsed AFTER the directive arms: a directive immediately
+ * followed by an escaped backslash ends in three backslashes
+ * (`\X2\00FC\X0\` + `\\`), so collapsing pairs in a pre-pass would eat the
+ * directive's own terminator and leave an unterminated `\X2\`.
+ *
+ * This handles only backslash escapes. The '' doubled-quote escape is collapsed
+ * by the STEP tokenizer's consumers (they strip surrounding quotes and
+ * un-double), so decoding must not touch quotes or it would double-collapse.
+ */
+export function decodeIfcString(str: string): string {
+  if (!str || typeof str !== 'string') return str;
+
+  let result = '';
+  let i = 0;
+
+  while (i < str.length) {
+    if (str[i] !== '\\') {
+      result += str[i];
+      i += 1;
+      continue;
+    }
+
+    // Handle code page directives like \PA\, \PB\, ... by consuming them.
+    if (str[i + 1] === 'P' && str[i + 3] === '\\') {
+      i += 4;
+      continue;
+    }
+
+    // Handle \S\X where the value is the code point of X plus 128. Read X as a
+    // whole code point (advancing past a surrogate pair) so a malformed
+    // multi-byte X stays in parity with the Rust decoder instead of leaving a
+    // dangling surrogate.
+    if (str[i + 1] === 'S' && str[i + 2] === '\\' && i + 3 < str.length) {
+      const cp = str.codePointAt(i + 3)!;
+      result += String.fromCodePoint(cp + 128);
+      i += 3 + (cp > 0xFFFF ? 2 : 1);
+      continue;
+    }
+
+    // Handle \X\HH (8-bit value from ISO 10646 row 0 / ISO-8859-1 overlap).
+    if (str[i + 1] === 'X' && str[i + 2] === '\\' && i + 5 <= str.length) {
+      const hex = str.slice(i + 3, i + 5);
+      if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+        result += String.fromCharCode(parseInt(hex, 16));
+        i += 5;
+        continue;
+      }
+    }
+
+    // Handle \X2\....\X0\ (UTF-16 hex code units, 4 chars each).
+    if (str.startsWith('\\X2\\', i)) {
+      const end = str.indexOf('\\X0\\', i + 4);
+      if (end !== -1) {
+        const hex = str.slice(i + 4, end);
+        if (hex.length % 4 === 0 && /^[0-9A-Fa-f]+$/.test(hex)) {
+          // Decode the payload as UTF-16 code units WITH pair awareness: a
+          // surrogate pair split across two 4-hex groups combines into one
+          // code point, while a LONE surrogate becomes U+FFFD - matching the
+          // Rust decoder's String::from_utf16_lossy so both parse paths yield
+          // identical strings (an unpaired surrogate would silently turn into
+          // U+FFFD at the first re-encode anyway).
+          const units: number[] = [];
+          for (let j = 0; j < hex.length; j += 4) {
+            units.push(parseInt(hex.slice(j, j + 4), 16));
+          }
+          for (let k = 0; k < units.length; k++) {
+            const u = units[k];
+            if (u >= 0xD800 && u <= 0xDBFF && k + 1 < units.length
+              && units[k + 1] >= 0xDC00 && units[k + 1] <= 0xDFFF) {
+              result += String.fromCharCode(u, units[k + 1]);
+              k += 1;
+            } else if (u >= 0xD800 && u <= 0xDFFF) {
+              result += '�';
+            } else {
+              result += String.fromCharCode(u);
+            }
+          }
+          i = end + 4;
+          continue;
+        }
+      }
+    }
+
+    // Handle \X4\........\X0\ (Unicode scalar values, 8 hex digits each).
+    if (str.startsWith('\\X4\\', i)) {
+      const end = str.indexOf('\\X0\\', i + 4);
+      if (end !== -1) {
+        const hex = str.slice(i + 4, end);
+        if (hex.length % 8 === 0 && /^[0-9A-Fa-f]+$/.test(hex)) {
+          for (let j = 0; j < hex.length; j += 8) {
+            const cp = parseInt(hex.slice(j, j + 8), 16);
+            // Guard the scalar: an 8-hex value above the Unicode maximum
+            // (0x10FFFF) makes String.fromCodePoint throw a RangeError - on
+            // the columnar batch-name path that throw propagated uncaught and
+            // aborted the whole model load. Surrogate values (0xD800-0xDFFF)
+            // are not scalar values either (fromCodePoint would produce an
+            // unpaired surrogate); the Rust decoder's char::from_u32 rejects
+            // both cases, so emit U+FFFD for both to keep the paths in parity.
+            const isScalar = Number.isInteger(cp) && cp >= 0 && cp <= 0x10FFFF
+              && !(cp >= 0xD800 && cp <= 0xDFFF);
+            result += isScalar ? String.fromCodePoint(cp) : '�';
+          }
+          i = end + 4;
+          continue;
+        }
+      }
+    }
+
+    // Handle \\ - one literal backslash. Checked after the directive arms so a
+    // `\X0\`/`\X\` terminator adjacent to an escaped backslash is consumed by
+    // its own directive first, never paired with the escape that follows it.
+    if (str[i + 1] === '\\') {
+      result += '\\';
+      i += 2;
+      continue;
+    }
+
+    // Unknown escape sequence: keep the backslash and move on.
+    result += str[i];
+    i += 1;
+  }
+
+  return result;
+}
+
+/**
+ * Encode a Unicode string to IFC STEP string escapes.
+ *
+ * - Printable ASCII (32..126) is kept as-is.
+ * - 8-bit values are encoded as \X\HH.
+ * - BMP values are encoded as \X2\HHHH\X0\.
+ * - Non-BMP values are encoded as \X4\HHHHHHHH\X0\.
+ */
+export function encodeIfcString(str: string): string {
+  if (!str || typeof str !== 'string') return str;
+
+  let encoded = '';
+  for (const ch of str) {
+    const codePoint = ch.codePointAt(0);
+    if (codePoint === undefined) {
+      continue;
+    }
+
+    if (codePoint >= 32 && codePoint <= 126 && ch !== '\\') {
+      encoded += ch;
+      continue;
+    }
+
+    if (codePoint <= 0xFF) {
+      encoded += `\\X\\${codePoint.toString(16).toUpperCase().padStart(2, '0')}`;
+      continue;
+    }
+
+    if (codePoint <= 0xFFFF) {
+      encoded += `\\X2\\${codePoint.toString(16).toUpperCase().padStart(4, '0')}\\X0\\`;
+      continue;
+    }
+
+    encoded += `\\X4\\${codePoint.toString(16).toUpperCase().padStart(8, '0')}\\X0\\`;
+  }
+
+  return encoded;
+}

@@ -1,0 +1,186 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * @ifc-lite/create — IFC creation from scratch
+ *
+ * Build valid IFC4 STEP files programmatically with building elements,
+ * geometry, property sets, and element quantities.
+ *
+ * Element coordinates are STOREY-RELATIVE: every `addIfcXxx(storeyId, …)`
+ * chains the product's `IfcLocalPlacement` to that storey's placement, which
+ * is where `Elevation` is applied. Pass `Z = 0` for something standing on the
+ * storey floor, whatever the storey's elevation is.
+ *
+ * ```ts
+ * import { IfcCreator } from '@ifc-lite/create';
+ *
+ * const creator = new IfcCreator({ Name: 'My Project' });
+ * const storey = creator.addIfcBuildingStorey({ Name: 'Ground Floor', Elevation: 0 });
+ * creator.addIfcWall(storey, {
+ *   Start: [0, 0, 0], End: [5, 0, 0],
+ *   Thickness: 0.2, Height: 3,
+ * });
+ * const { content } = creator.toIfc();
+ * ```
+ */
+
+export { IfcCreator } from './ifc-creator.js';
+
+// In-store builders — emit elements into an existing parsed IfcDataStore
+// via a `StoreEditor` overlay (closes the merge-roundtrip gap from #592).
+export { addColumnToStore, type ColumnInStoreParams, type ColumnBuildResult } from './in-store/column.js';
+export { addWallToStore, type WallInStoreParams, type WallBuildResult } from './in-store/wall.js';
+export { addSlabToStore, type SlabInStoreParams, type SlabRectangleParams, type SlabPolygonParams, type SlabBuildResult } from './in-store/slab.js';
+export { addBeamToStore, type BeamInStoreParams, type BeamBuildResult } from './in-store/beam.js';
+export { addDoorToStore, type DoorInStoreParams, type DoorBuildResult } from './in-store/door.js';
+export { addWindowToStore, type WindowInStoreParams, type WindowBuildResult } from './in-store/window.js';
+export { addSpaceToStore, type SpaceInStoreParams, type SpaceRectangleParams, type SpacePolygonParams, type SpaceBuildResult } from './in-store/space.js';
+export {
+  addSpatialZonesToStore,
+  spatialZonesSupported,
+  type SpatialZoneInput,
+  type SpatialZoneInStoreParams,
+  type SpatialZoneBuildResult,
+  type SpatialZoneType,
+} from './in-store/spatial-zone.js';
+export {
+  applyStylesInStore,
+  collectLeafRepresentationItems,
+  type ApplyStyleOptions,
+  type ApplyStyleResult,
+  type StyleBatch,
+  type SurfaceStyleColor,
+} from './in-store/apply-style.js';
+export { addRoofToStore, type RoofInStoreParams, type RoofRectangleParams, type RoofPolygonParams, type RoofBuildResult } from './in-store/roof.js';
+export { addPlateToStore, type PlateInStoreParams, type PlateRectangleParams, type PlatePolygonParams, type PlateBuildResult } from './in-store/plate.js';
+export { addMemberToStore, type MemberInStoreParams, type MemberBuildResult } from './in-store/member.js';
+export { resolveSpatialAnchor } from './in-store/resolve-anchor.js';
+export type { SpatialAnchor } from './in-store/anchor.js';
+export {
+  duplicateInStore,
+  type SourceAttributes,
+  type DuplicateInStoreOptions,
+  type DuplicateBuildResult,
+  type Vec3 as DuplicateVec3,
+} from './in-store/duplicate.js';
+export { resolveDuplicateSource } from './in-store/resolve-source.js';
+export {
+  detectEnclosedAreas,
+  type Vec2 as AutoSpaceVec2,
+  type Segment as AutoSpaceSegment,
+  type DetectedSpace,
+  type DetectOptions as AutoSpaceDetectOptions,
+} from './in-store/auto-space-detect.js';
+export {
+  extractWallSegmentsForStorey,
+  existingSpaceFootprintsByStorey,
+  type OverlayWallReader,
+  type WallExtractionResult,
+} from './in-store/extract-walls.js';
+export {
+  generateSpacesFromWalls,
+  offsetRoomFootprint,
+  GENERATED_SPACE_OBJECTTYPE,
+  type GenerateSpacesOptions,
+  type GenerateSpacesResult,
+  type BoundaryMode,
+} from './in-store/generate-spaces.js';
+export {
+  generateSpaces,
+  listStoreys,
+  type GenerateSpacesAllOptions,
+  type GenerateSpacesAllResult,
+  type GenerateSpacesStoreyResult,
+  type StoreyInfo,
+} from './in-store/generate-spaces-all.js';
+
+export type {
+  // Geometry primitives
+  Point3D,
+  Point2D,
+  Placement3D,
+  RectangleProfile,
+  ArbitraryProfile,
+  CircleProfile,
+  CircleHollowProfile,
+  IShapeProfile,
+  LShapeProfile,
+  TShapeProfile,
+  UShapeProfile,
+  CShapeProfile,
+  RectangleHollowProfile,
+  ProfileDef,
+  RectangularOpening,
+
+  // Generic element creation (low-level API)
+  GenericElementParams,
+  AxisElementParams,
+
+  // Element parameters
+  ElementAttributes,
+  WallParams,
+  SlabParams,
+  ColumnParams,
+  BeamParams,
+  StairParams,
+  RoofParams,
+  GableRoofParams,
+  WallDoorParams,
+  WallWindowParams,
+  DoorParams,
+  WindowParams,
+  RampParams,
+  RailingParams,
+  PlateParams,
+  MemberParams,
+  FootingParams,
+  PileParams,
+  SpaceParams,
+  CurtainWallParams,
+  FurnishingParams,
+  ProxyParams,
+
+  // Properties & quantities
+  PropertyType,
+  PropertyDef,
+  PropertySetDef,
+  QuantityKind,
+  QuantityDef,
+  QuantitySetDef,
+
+  // Materials
+  MaterialLayerDef,
+  MaterialDef,
+
+  // Spatial structure
+  ProjectParams,
+  SiteParams,
+  BuildingParams,
+  StoreyParams,
+
+  // Scheduling / 4D (IfcWorkSchedule, IfcTask, IfcRelSequence)
+  // Canonical IFC-prefixed names are preferred; legacy short names are kept
+  // as aliases for existing callers.
+  IfcWorkScheduleParams,
+  IfcWorkPlanParams,
+  IfcTaskParams,
+  IfcRelSequenceParams,
+  IfcWorkScheduleType,
+  IfcTaskPredefinedType,
+  IfcTaskDurationType,
+  IfcRelSequenceType,
+  WorkScheduleParams,
+  WorkPlanParams,
+  TaskParams,
+  SequenceParams,
+  WorkScheduleType,
+  TaskPredefinedType,
+  TaskDurationType,
+  SequenceType,
+
+  // Results
+  CreatedEntity,
+  CreateResult,
+} from './types.js';

@@ -1,0 +1,1714 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Lens panel — rule-based 3D filtering and coloring
+ *
+ * Shows saved lens presets and allows activating/deactivating them.
+ * Users can create, edit, and delete custom lenses with full rule editing.
+ * Supports both manual rule-based lenses and auto-color lenses that
+ * automatically color entities by distinct values of any IFC data column.
+ * When a lens is active, a color legend displays the matched rules/values.
+ * Unmatched entities are ghosted (semi-transparent) for visual context.
+ *
+ * All dropdowns are populated dynamically from the loaded model data
+ * via discoveredLensData (IFC types, property sets, quantity sets,
+ * classification systems, materials). No hardcoded IFC class lists.
+ */
+
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X, EyeOff, Palette, Check, Plus, Trash2, Pencil, Copy, Save, Download, Upload, Sparkles, ArrowUpDown, GripVertical } from 'lucide-react';
+import { discoverDataSources, LENS_OPERATORS } from '@ifc-lite/lens';
+import type { LensOperator } from '@ifc-lite/lens';
+import { SearchableSelect } from './SearchableSelect';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
+import { downloadFile } from '@/lib/export/download';
+import { toast } from '@/components/ui/toast';
+import { tourAnchor, TOUR_ANCHORS, lensCardAnchor } from '@/lib/tours/anchors';
+import { useViewerStore } from '@/store';
+import { useLens } from '@/hooks/useLens';
+import { createLensDataProvider } from '@/lib/lens';
+import {
+  buildAutoColorLensToSave, moveItem, cloneCriteria, cloneLensRules, isCompoundCriteria,
+  deriveRuleName, compoundCriteriaSummary, isRuleValid,
+} from './lens-editor-utils';
+import { importLensFile } from './lens-import';
+import { planLensHiddenSync, ruleIsolationOwnsChannel } from './lens-visibility-ownership';
+import type { Lens, LensRule, LensCriteria, AutoColorSpec, AutoColorLegendEntry, DiscoveredLensData } from '@/store/slices/lensSlice';
+import {
+  LENS_PALETTE, ENTITY_ATTRIBUTE_NAMES, AUTO_COLOR_SOURCES,
+} from '@/store/slices/lensSlice';
+
+/** Stable empty set for the hidden-sync effect when no lens is active. */
+const EMPTY_LENS_HIDDEN: ReadonlySet<number> = new Set<number>();
+
+/** Format large counts compactly: 1234 → "1.2k" */
+function formatCount(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+
+/**
+ * Human-readable label for every {@link LensOperator}, for the operator
+ * `<select>`s below. Every value LENS_OPERATORS exports must appear here -
+ * an operator missing from an option list falls back to the browser's
+ * first-option default on render (`selectedIndex` -1/0 depending on the
+ * engine), silently misdisplaying a rule whose value the engine still
+ * honours correctly. See the `and`/`or` compound criteria-type selector
+ * above for the identical defect class this PR already fixed once.
+ */
+const OPERATOR_LABELS: Record<LensOperator, string> = {
+  exists: 'Exists',
+  equals: 'Equals',
+  contains: 'Contains',
+  ne: 'Not Equal',
+  gt: '>',
+  gte: '>=',
+  lt: '<',
+  lte: '<=',
+};
+
+/** Human-readable label for source / criteria types (shared) */
+const TYPE_LABELS: Record<string, string> = {
+  ifcType: 'IFC Class',
+  attribute: 'Attribute',
+  property: 'Property',
+  quantity: 'Quantity',
+  classification: 'Classification',
+  material: 'Material',
+  model: 'Model',
+  group: 'Zone / Group',
+};
+
+interface LensPanelProps {
+  onClose?: () => void;
+}
+
+// ─── Rule display (read-only, clickable for isolation) ──────────────────────
+
+const RuleRow = memo(function RuleRow({
+  rule,
+  count,
+  isIsolated,
+  onClick,
+}: {
+  rule: LensRule;
+  count: number;
+  isIsolated?: boolean;
+  onClick?: () => void;
+}) {
+  const isEmpty = count === 0;
+  const isClickable = !!onClick && !isEmpty;
+
+  return (
+    <div
+      className={cn(
+        'group/row relative flex items-center gap-2 pl-3 pr-3 py-1.5 text-xs',
+        'border-l-2 transition-[border-color,background-color] duration-100',
+        !rule.enabled && 'opacity-40',
+        !isIsolated && !isEmpty && 'border-l-transparent',
+        isClickable && 'cursor-pointer hover:border-l-primary/70 hover:bg-zinc-100/80 dark:hover:bg-zinc-700/40',
+        isIsolated && 'border-l-primary bg-primary/8 dark:bg-primary/15',
+        isEmpty && 'border-l-transparent opacity-50 cursor-default',
+      )}
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onClick={(e) => { if (isClickable) { e.stopPropagation(); onClick(); } }}
+      onKeyDown={(e) => { if (isClickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(); } }}
+      title={isClickable ? 'Click to isolate / show only this group' : isEmpty ? 'No matching entities' : undefined}
+    >
+      <div
+        className={cn(
+          'w-3 h-3 rounded-sm flex-shrink-0 ring-1 ring-black/10 dark:ring-white/20',
+          isEmpty && 'grayscale',
+        )}
+        style={{ backgroundColor: rule.color }}
+      />
+      <span className={cn(
+        'flex-1 truncate font-medium',
+        isIsolated
+          ? 'text-zinc-900 dark:text-zinc-50'
+          : isEmpty
+            ? 'text-zinc-400 dark:text-zinc-600'
+            : 'text-zinc-900 dark:text-zinc-50',
+      )}>
+        {rule.name}
+      </span>
+      {isIsolated && (
+        <span className="text-[10px] uppercase tracking-wider font-bold text-primary">
+          isolated
+        </span>
+      )}
+      <span className={cn(
+        'text-[10px] tabular-nums font-mono min-w-[2ch] text-right',
+        isEmpty
+          ? 'text-zinc-300 dark:text-zinc-700'
+          : 'text-zinc-400 dark:text-zinc-500',
+      )}>
+        {isEmpty ? '—' : formatCount(count)}
+      </span>
+    </div>
+  );
+});
+
+// ─── Auto-color legend row (read-only, clickable for isolation) ─────────────
+
+const AutoColorRow = memo(function AutoColorRow({
+  entry,
+  isIsolated,
+  onClick,
+}: {
+  entry: AutoColorLegendEntry;
+  isIsolated?: boolean;
+  onClick?: () => void;
+}) {
+  const isEmpty = entry.count === 0;
+  const isClickable = !!onClick && !isEmpty;
+
+  return (
+    <div
+      className={cn(
+        'group/row relative flex items-center gap-2 pl-3 pr-3 py-1.5 text-xs',
+        'border-l-2 transition-[border-color,background-color] duration-100',
+        !isIsolated && !isEmpty && 'border-l-transparent',
+        isClickable && 'cursor-pointer hover:border-l-primary/70 hover:bg-zinc-100/80 dark:hover:bg-zinc-700/40',
+        isIsolated && 'border-l-primary bg-primary/8 dark:bg-primary/15',
+        isEmpty && 'border-l-transparent opacity-50 cursor-default',
+      )}
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onClick={(e) => { if (isClickable) { e.stopPropagation(); onClick(); } }}
+      onKeyDown={(e) => { if (isClickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(); } }}
+      title={isClickable ? 'Click to isolate / show only this value' : undefined}
+    >
+      <div
+        className="w-3 h-3 rounded-sm flex-shrink-0 ring-1 ring-black/10 dark:ring-white/20"
+        style={{ backgroundColor: entry.color }}
+      />
+      <span
+        className={cn(
+          'flex-1 truncate font-medium text-zinc-900 dark:text-zinc-50',
+          // Absence buckets ("No classification", "Not in this system") are
+          // synthetic - not a value read off the model - so they're set in
+          // italics to read as a category rather than a classification code,
+          // while staying otherwise identical (same swatch shape, same
+          // clickable/isolate behavior) so they don't look broken or special.
+          entry.isAbsent && 'italic text-zinc-600 dark:text-zinc-300',
+        )}
+      >
+        {entry.name}
+      </span>
+      {isIsolated && (
+        <span className="text-[10px] uppercase tracking-wider font-bold text-primary">
+          isolated
+        </span>
+      )}
+      <span className="text-[10px] tabular-nums font-mono min-w-[2ch] text-right text-zinc-400 dark:text-zinc-500">
+        {formatCount(entry.count)}
+      </span>
+    </div>
+  );
+});
+
+// ─── Rule editor (inline editing with criteria type selector) ────────────────
+
+export function RuleEditor({
+  rule,
+  index,
+  onChange,
+  onRemove,
+  onDuplicate,
+  discovered,
+  onRequestDiscovery,
+  isDragging,
+  isDragOver,
+  dropEdge,
+  onDragStart,
+  onDragEnter,
+  onDragEnd,
+  onDrop,
+  onMove,
+}: {
+  rule: LensRule;
+  index: number;
+  onChange: (patch: Partial<LensRule>) => void;
+  onRemove: () => void;
+  /** Clone this rule (criteria/action/color) directly below it. (#1460) */
+  onDuplicate: () => void;
+  discovered: DiscoveredLensData | null;
+  onRequestDiscovery: (categories: { properties?: boolean; quantities?: boolean; classifications?: boolean; materials?: boolean }) => void;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  /** Which edge of this row shows the drop indicator (matches where the rule lands). */
+  dropEdge?: 'top' | 'bottom';
+  onDragStart?: (index: number) => void;
+  onDragEnter?: (index: number) => void;
+  onDragEnd?: () => void;
+  onDrop?: (index: number) => void;
+  /** Reorder a rule (drag or keyboard). When set, the grip handle is interactive. */
+  onMove?: (from: number, to: number) => void;
+}) {
+  const criteriaType = rule.criteria.type;
+  // Property / quantity / classification each need TWO selectors (set + name),
+  // which the cramped criteria-type row can't show legibly. They get their own
+  // full-width rows below so the dropdowns (and their menus) are readable. (#1403)
+  const isMultiField = criteriaType === 'property' || criteriaType === 'quantity' || criteriaType === 'classification';
+  // The panel does not yet offer authoring compound ('and'/'or') criteria -
+  // only the JSON import path can produce one. Render it as a read-only
+  // summary instead of falling through the leaf-only editor below (which
+  // would show nothing at all, or - worse - let the type selector rewrite it
+  // into a leaf and silently destroy the imported rule).
+  const isCompound = isCompoundCriteria(rule.criteria);
+  const loadedModels = useViewerStore((s) => s.models);
+  const modelOptions = useMemo(
+    () => Array.from(loadedModels.values()).sort((a, b) => a.name.localeCompare(b.name)),
+    [loadedModels],
+  );
+  const resolveModelName = useCallback(
+    (modelId: string) => modelOptions.find(m => m.id === modelId)?.name,
+    [modelOptions],
+  );
+  const compoundSummary = useMemo(
+    () => (isCompound ? compoundCriteriaSummary(rule.criteria, resolveModelName) : null),
+    [isCompound, rule.criteria, resolveModelName],
+  );
+
+  // Trigger lazy discovery when user selects a criteria type that needs it
+  useEffect(() => {
+    if (!discovered) return;
+    if (criteriaType === 'property' && !discovered.propertySets) {
+      onRequestDiscovery({ properties: true });
+    } else if (criteriaType === 'quantity' && !discovered.quantitySets) {
+      onRequestDiscovery({ quantities: true });
+    } else if (criteriaType === 'classification' && !discovered.classificationSystems) {
+      onRequestDiscovery({ classifications: true });
+    } else if (criteriaType === 'material' && !discovered.materials) {
+      onRequestDiscovery({ materials: true });
+    }
+  }, [criteriaType, discovered, onRequestDiscovery]);
+
+  // Auto-populate the single available model so the selector-hidden branch
+  // doesn't leave a model rule permanently invalid.
+  useEffect(() => {
+    if (criteriaType !== 'model') return;
+    if (modelOptions.length !== 1) return;
+    if (rule.criteria.modelId) return;
+    const updated = { ...rule.criteria, modelId: modelOptions[0].id };
+    onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+    // deriveRuleName is a stable import; resolveModelName is memoized on
+    // modelOptions, already a dependency here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [criteriaType, modelOptions, rule.criteria, onChange]);
+
+  // Derived lists from discovered data
+  const ifcClasses = useMemo(() => discovered?.classes ?? [], [discovered]);
+  const psetNames = useMemo((): string[] => {
+    if (!discovered?.propertySets) return [];
+    return Array.from(discovered.propertySets.keys()).sort();
+  }, [discovered]);
+  const selectedPsetProps = useMemo(() => {
+    if (!discovered?.propertySets || !rule.criteria.propertySet) return [];
+    return discovered.propertySets.get(rule.criteria.propertySet) ?? [];
+  }, [discovered, rule.criteria.propertySet]);
+  const qsetNames = useMemo((): string[] => {
+    if (!discovered?.quantitySets) return [];
+    return Array.from(discovered.quantitySets.keys()).sort();
+  }, [discovered]);
+  const selectedQsetQuants = useMemo(() => {
+    if (!discovered?.quantitySets || !rule.criteria.quantitySet) return [];
+    return discovered.quantitySets.get(rule.criteria.quantitySet) ?? [];
+  }, [discovered, rule.criteria.quantitySet]);
+  const classificationSystems = useMemo(() => discovered?.classificationSystems ?? [], [discovered]);
+  const materialNames = useMemo(() => discovered?.materials ?? [], [discovered]);
+
+  const handleCriteriaTypeChange = (newType: LensCriteria['type']) => {
+    // Defense in depth: this panel never authors a compound criteria, so a
+    // switch INTO 'and'/'or' has no field-initialization branch below (it
+    // would produce a bare `{ type: newType }`, discarding any existing
+    // `conditions`). The type selector is `disabled` for a compound rule so
+    // this normally can't fire in the first place - but a compound rule's
+    // own type is deliberately still selected as the current `<option>`, so
+    // a same-value re-select event (however triggered) must be a no-op, not
+    // a silent reset of `conditions`.
+    if (isCompoundCriteria({ type: newType })) return;
+    const base: LensCriteria = { type: newType };
+    switch (newType) {
+      case 'ifcType':
+        base.ifcType = '';
+        break;
+      case 'attribute':
+        base.attributeName = 'Name';
+        base.operator = 'contains';
+        base.attributeValue = '';
+        break;
+      case 'property':
+        base.propertySet = '';
+        base.propertyName = '';
+        base.operator = 'contains';
+        base.propertyValue = '';
+        break;
+      case 'quantity':
+        base.quantitySet = '';
+        base.quantityName = '';
+        base.operator = 'exists';
+        break;
+      case 'classification':
+        base.classificationSystem = '';
+        base.classificationCode = '';
+        break;
+      case 'material':
+        base.materialName = '';
+        break;
+      case 'model':
+        base.modelId = modelOptions.length === 1 ? modelOptions[0].id : '';
+        break;
+      case 'group':
+        base.groupName = '';
+        break;
+    }
+    onChange({ criteria: base, name: rule.name === 'New Rule' ? TYPE_LABELS[newType] : rule.name });
+  };
+
+  const selectClass = 'text-xs px-1.5 py-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 rounded-sm';
+  const inputClass = 'text-xs px-1.5 py-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 rounded-sm';
+
+  return (
+    <div
+      className={cn(
+        // The drop indicator sits on the edge the rule will actually land on
+        // (bottom when dragging down, top when dragging up) so the highlight
+        // matches the result. Both edges reserve 2px so rows never reflow. (#1403)
+        'px-2 py-1.5 space-y-1 border-y-2 border-transparent transition-[border-color,opacity]',
+        isDragOver && (dropEdge === 'bottom' ? 'border-b-primary' : 'border-t-primary'),
+        isDragging && 'opacity-40',
+      )}
+      onDragOver={onDrop ? (e) => { e.preventDefault(); onDragEnter?.(index); } : undefined}
+      onDrop={onDrop ? (e) => { e.preventDefault(); onDrop(index); } : undefined}
+    >
+      <div className="flex items-center gap-1.5">
+        {/* Reorder handle — drag, or focus and use arrow keys. Always occupies
+            its column (invisible when there's nothing to reorder) so single- and
+            multi-rule editors indent identically. Order is priority: first
+            matching rule wins. (#1403) */}
+        <span
+          draggable={!!onMove}
+          onDragStart={onMove ? (e) => {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', String(index));
+            onDragStart?.(index);
+          } : undefined}
+          onDragEnd={onMove ? () => onDragEnd?.() : undefined}
+          onKeyDown={onMove ? (e) => {
+            if (e.key === 'ArrowUp') { e.preventDefault(); onMove(index, index - 1); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); onMove(index, index + 1); }
+          } : undefined}
+          role={onMove ? 'button' : undefined}
+          tabIndex={onMove ? 0 : undefined}
+          aria-label={onMove ? 'Reorder rule: drag, or press arrow up or down' : undefined}
+          title={onMove ? 'Drag to reorder (or arrow keys)' : undefined}
+          className={cn(
+            'flex-shrink-0 -ml-1 rounded-sm',
+            onMove
+              ? 'cursor-grab active:cursor-grabbing text-zinc-300 hover:text-zinc-500 dark:text-zinc-600 dark:hover:text-zinc-400 focus:outline-none focus-visible:ring-1 focus-visible:ring-primary'
+              : 'invisible',
+          )}
+        >
+          <GripVertical className="h-3.5 w-3.5" />
+        </span>
+        <input
+          type="color"
+          value={rule.color}
+          onChange={(e) => onChange({ color: e.target.value })}
+          className="w-6 h-6 cursor-pointer border-0 p-0 bg-transparent flex-shrink-0 rounded"
+        />
+        {/* Criteria type selector. Disabled for a compound ('and'/'or')
+            criteria - the panel does not author compounds, so the leaf-type
+            options are withheld entirely (not just visually discouraged):
+            switching this dropdown replaces `criteria` wholesale via
+            handleCriteriaTypeChange, which would silently rewrite an
+            imported compound rule into an unrelated leaf. Disabling keeps
+            the same control in the same slot (matching every other criteria
+            type) rather than swapping in a different element. */}
+        <select
+          value={criteriaType}
+          onChange={(e) => handleCriteriaTypeChange(e.target.value as LensCriteria['type'])}
+          disabled={isCompound}
+          aria-label={isCompound ? 'Compound criteria type (read-only, imported)' : 'Criteria type'}
+          title={isCompound ? 'Compound rules are imported read-only; this panel does not yet support editing them.' : undefined}
+          className={cn(
+            selectClass,
+            isMultiField ? 'flex-1 min-w-0' : 'w-[90px]',
+            isCompound && 'opacity-70 cursor-not-allowed',
+          )}
+        >
+          {isCompound ? (
+            <option value={criteriaType}>{criteriaType.toUpperCase()}</option>
+          ) : (
+            Object.entries(TYPE_LABELS).map(([val, label]) => (
+              <option key={val} value={val}>{label}</option>
+            ))
+          )}
+        </select>
+
+        {/* Compound ('and'/'or') criteria: read-only summary - see the type
+            selector comment above for why this isn't an editor. */}
+        {compoundSummary && (
+          <span
+            className="flex-1 min-w-0 text-xs text-zinc-500 dark:text-zinc-400 truncate"
+            title={compoundSummary.detail}
+          >
+            {compoundSummary.label}
+          </span>
+        )}
+
+        {/* IFC Class: searchable dropdown from discovered classes */}
+        {criteriaType === 'ifcType' && (
+          <SearchableSelect
+            value={rule.criteria.ifcType ?? ''}
+            options={ifcClasses}
+            onChange={(ifcType) => {
+              onChange({
+                criteria: { ...rule.criteria, ifcType },
+                name: ifcType ? ifcType.replace('Ifc', '') : rule.name,
+              });
+            }}
+            placeholder="Class..."
+            className="flex-1 min-w-0"
+            displayFn={(v) => v.replace('Ifc', '')}
+          />
+        )}
+
+        {/* Attribute: dropdown for name, text input for value */}
+        {criteriaType === 'attribute' && (
+          <>
+            <select
+              value={rule.criteria.attributeName ?? 'Name'}
+              onChange={(e) => {
+                const updated = { ...rule.criteria, attributeName: e.target.value };
+                onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+              }}
+              className={cn(selectClass, 'w-[80px]')}
+            >
+              {ENTITY_ATTRIBUTE_NAMES.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+            <input
+              type="text"
+              value={rule.criteria.attributeValue ?? ''}
+              onChange={(e) => {
+                const updated = { ...rule.criteria, attributeValue: e.target.value };
+                onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+              }}
+              placeholder="value..."
+              className={cn(inputClass, 'flex-1 min-w-0')}
+            />
+          </>
+        )}
+
+        {/* property / quantity / classification render their selectors on
+            full-width rows below (see isMultiField) for legibility. */}
+
+        {/* Material: searchable dropdown from discovered materials */}
+        {criteriaType === 'material' && (
+          <SearchableSelect
+            value={rule.criteria.materialName ?? ''}
+            options={materialNames}
+            onChange={(mat) => {
+              const updated = { ...rule.criteria, materialName: mat };
+              onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+            }}
+            placeholder="Material..."
+            className="flex-1 min-w-0"
+          />
+        )}
+
+        {/* Model: dropdown from loaded federated models */}
+        {criteriaType === 'model' && (
+          modelOptions.length <= 1 ? (
+            <span className="flex-1 min-w-0 text-xs text-zinc-400 dark:text-zinc-500 truncate">
+              {modelOptions.length === 0 ? 'No models loaded' : modelOptions[0]?.name ?? 'Model'}
+            </span>
+          ) : (
+            <select
+              value={rule.criteria.modelId ?? ''}
+              onChange={(e) => {
+                const modelId = e.target.value;
+                const updated = { ...rule.criteria, modelId };
+                onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+              }}
+              className={cn(selectClass, 'flex-1 min-w-0')}
+            >
+              <option value="">Model...</option>
+              {modelOptions.map(m => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          )
+        )}
+
+        {/* Zone / Group: substring match on the zone name (blank = any zone) */}
+        {criteriaType === 'group' && (
+          <input
+            type="text"
+            value={rule.criteria.groupName ?? ''}
+            onChange={(e) => {
+              const updated = { ...rule.criteria, groupName: e.target.value };
+              onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+            }}
+            placeholder="Zone / group name (blank = any)"
+            className={cn(inputClass, 'flex-1 min-w-0')}
+          />
+        )}
+
+        <button
+          onClick={onDuplicate}
+          className="text-zinc-400 hover:text-primary dark:text-zinc-500 dark:hover:text-primary p-0.5 flex-shrink-0"
+          title="Duplicate rule"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          onClick={onRemove}
+          className="text-zinc-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400 p-0.5 flex-shrink-0"
+          title="Remove rule"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {/* Full-width selector rows for property: pset + property name (#1403) */}
+      {criteriaType === 'property' && (
+        <div className="space-y-1 pl-[30px]">
+          <SearchableSelect
+            value={rule.criteria.propertySet ?? ''}
+            options={psetNames}
+            onChange={(pset) => onChange({ criteria: { ...rule.criteria, propertySet: pset, propertyName: '' } })}
+            placeholder="Property set..."
+            className="w-full"
+          />
+          <SearchableSelect
+            value={rule.criteria.propertyName ?? ''}
+            options={selectedPsetProps}
+            onChange={(prop) => {
+              const updated = { ...rule.criteria, propertyName: prop };
+              onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+            }}
+            placeholder="Property..."
+            className="w-full"
+          />
+        </div>
+      )}
+
+      {/* Full-width selector rows for quantity: qset + quantity name (#1403) */}
+      {criteriaType === 'quantity' && (
+        <div className="space-y-1 pl-[30px]">
+          <SearchableSelect
+            value={rule.criteria.quantitySet ?? ''}
+            options={qsetNames}
+            onChange={(qset) => onChange({ criteria: { ...rule.criteria, quantitySet: qset, quantityName: '' } })}
+            placeholder="Quantity set..."
+            className="w-full"
+          />
+          <SearchableSelect
+            value={rule.criteria.quantityName ?? ''}
+            options={selectedQsetQuants}
+            onChange={(qty) => {
+              const updated = { ...rule.criteria, quantityName: qty };
+              onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+            }}
+            placeholder="Quantity..."
+            className="w-full"
+          />
+        </div>
+      )}
+
+      {/* Full-width selector rows for classification: system + code (#1403) */}
+      {criteriaType === 'classification' && (
+        <div className="space-y-1 pl-[30px]">
+          <SearchableSelect
+            value={rule.criteria.classificationSystem ?? ''}
+            options={classificationSystems}
+            onChange={(sys) => onChange({ criteria: { ...rule.criteria, classificationSystem: sys } })}
+            placeholder="System..."
+            className="w-full"
+          />
+          <input
+            type="text"
+            value={rule.criteria.classificationCode ?? ''}
+            onChange={(e) => {
+              const updated = { ...rule.criteria, classificationCode: e.target.value };
+              onChange({ criteria: updated, name: deriveRuleName(updated, resolveModelName) });
+            }}
+            placeholder="Code..."
+            className={cn(inputClass, 'w-full')}
+          />
+        </div>
+      )}
+
+      {/* Second row: operator + value for property/quantity/attribute */}
+      {(criteriaType === 'property' || criteriaType === 'quantity') && (
+        <div className="flex items-center gap-1.5 pl-[30px]">
+          <select
+            value={rule.criteria.operator ?? 'exists'}
+            onChange={(e) => onChange({ criteria: { ...rule.criteria, operator: e.target.value as LensCriteria['operator'] } })}
+            className={cn(selectClass, 'w-[80px]')}
+          >
+            {LENS_OPERATORS.map((op) => (
+              <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
+            ))}
+          </select>
+          {rule.criteria.operator && rule.criteria.operator !== 'exists' && (
+            <input
+              type="text"
+              value={
+                criteriaType === 'property'
+                  ? (rule.criteria.propertyValue ?? '')
+                  : (rule.criteria.quantityValue ?? '')
+              }
+              onChange={(e) => {
+                const key = criteriaType === 'property' ? 'propertyValue' : 'quantityValue';
+                onChange({ criteria: { ...rule.criteria, [key]: e.target.value } });
+              }}
+              placeholder="Value..."
+              className={cn(inputClass, 'flex-1 min-w-0')}
+            />
+          )}
+          <select
+            value={rule.action}
+            onChange={(e) => onChange({ action: e.target.value as LensRule['action'] })}
+            className={cn(selectClass, 'w-[72px]')}
+          >
+            <option value="colorize">Color</option>
+            <option value="transparent">Transp</option>
+            <option value="hide">Hide</option>
+          </select>
+        </div>
+      )}
+
+      {/* Action selector for simple types */}
+      {criteriaType !== 'property' && criteriaType !== 'quantity' && (
+        <div className="flex items-center gap-1.5 pl-[30px]">
+          {criteriaType === 'attribute' && (
+            <select
+              value={rule.criteria.operator ?? 'contains'}
+              onChange={(e) => onChange({ criteria: { ...rule.criteria, operator: e.target.value as LensCriteria['operator'] } })}
+              className={cn(selectClass, 'w-[80px]')}
+            >
+              {LENS_OPERATORS.map((op) => (
+                <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
+              ))}
+            </select>
+          )}
+          <select
+            value={rule.action}
+            onChange={(e) => onChange({ action: e.target.value as LensRule['action'] })}
+            className={cn(selectClass, 'w-[72px]')}
+          >
+            <option value="colorize">Color</option>
+            <option value="transparent">Transp</option>
+            <option value="hide">Hide</option>
+          </select>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Lens editor (create/edit mode) ─────────────────────────────────────────
+
+function LensEditor({
+  initial,
+  onSave,
+  onCancel,
+  discovered,
+  onRequestDiscovery,
+}: {
+  initial: Lens;
+  onSave: (lens: Lens) => void;
+  onCancel: () => void;
+  discovered: DiscoveredLensData | null;
+  onRequestDiscovery: (categories: { properties?: boolean; quantities?: boolean; classifications?: boolean; materials?: boolean }) => void;
+}) {
+  const [name, setName] = useState(initial.name);
+  // Deep-clone each rule's criteria on entry - `initial` may be the SAME
+  // object the store (or a `duplicateLens` copy) is currently holding, so a
+  // shallow `{ ...r }` would leave a compound rule's `conditions` array
+  // aliased with it.
+  const [rules, setRules] = useState<LensRule[]>(() => cloneLensRules(initial.rules));
+  // Drag-to-reorder state. Rule order is meaningful: the engine applies the
+  // first matching rule per entity, so order = priority. (#1403)
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+  const moveRule = (from: number, to: number) => {
+    setRules((prev) => moveItem(prev, from, to));
+  };
+
+  const handleDrop = (to: number) => {
+    setRules((prev) => (dragIndex === null ? prev : moveItem(prev, dragIndex, to)));
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  // Unique rule id: a random suffix (not the array length) so add / duplicate /
+  // remove interleaving within one millisecond can never collide React keys. (#1460)
+  const newRuleId = () => `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const addRule = () => {
+    const colorIndex = rules.length % LENS_PALETTE.length;
+    setRules([...rules, {
+      id: newRuleId(),
+      name: 'New Rule',
+      enabled: true,
+      criteria: { type: 'ifcType', ifcType: '' },
+      action: 'colorize',
+      color: LENS_PALETTE[colorIndex],
+    }]);
+  };
+
+  const updateRule = (index: number, patch: Partial<LensRule>) => {
+    setRules(rules.map((r, i) => i === index ? { ...r, ...patch } : r));
+  };
+
+  const removeRule = (index: number) => {
+    setRules(rules.filter((_, i) => i !== index));
+  };
+
+  // Clone a rule's criteria/action/color directly below it, so building many
+  // similar rules (e.g. one value per color) doesn't restart the selectors each
+  // time. Deep-copies criteria (recursively, for a compound's nested
+  // conditions) and assigns a fresh unique id. (#1460)
+  const duplicateRule = (index: number) => {
+    setRules((prev) => {
+      const src = prev[index];
+      if (!src) return prev;
+      const copy: LensRule = {
+        ...src,
+        id: newRuleId(),
+        criteria: cloneCriteria(src.criteria),
+      };
+      const next = [...prev];
+      next.splice(index + 1, 0, copy);
+      return next;
+    });
+  };
+
+  const handleSave = () => {
+    const validRules = rules.filter(isRuleValid);
+    if (!name.trim() || validRules.length === 0) return;
+    onSave({ ...initial, name: name.trim(), rules: validRules });
+  };
+
+  const canSave = name.trim().length > 0 && rules.some(isRuleValid);
+
+  return (
+    <div className="border-2 border-primary bg-white dark:bg-zinc-900 rounded-sm">
+      {/* Name input */}
+      <div className="px-3 pt-3 pb-2">
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Lens name..."
+          className="w-full px-2 py-1.5 text-xs font-bold uppercase tracking-wider bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 rounded-sm placeholder:normal-case placeholder:font-normal placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+          autoFocus
+        />
+      </div>
+
+      {/* Rules */}
+      <div className="border-t border-zinc-200 dark:border-zinc-700 py-1 bg-zinc-50/50 dark:bg-zinc-800/50">
+        {rules.map((rule, i) => (
+          <RuleEditor
+            key={rule.id}
+            rule={rule}
+            index={i}
+            onChange={(patch) => updateRule(i, patch)}
+            onRemove={() => removeRule(i)}
+            onDuplicate={() => duplicateRule(i)}
+            discovered={discovered}
+            onRequestDiscovery={onRequestDiscovery}
+            isDragging={dragIndex === i}
+            isDragOver={dragOverIndex === i && dragIndex !== null && dragIndex !== i}
+            // Indicator edge matches where moveItem lands the rule: a downward
+            // drag (source above target) lands below the hovered row. (#1403)
+            dropEdge={dragIndex !== null && dragIndex < i ? 'bottom' : 'top'}
+            onDragStart={rules.length > 1 ? setDragIndex : undefined}
+            onDragEnter={setDragOverIndex}
+            onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
+            onDrop={handleDrop}
+            onMove={rules.length > 1 ? moveRule : undefined}
+          />
+        ))}
+
+        <button
+          onClick={addRule}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary hover:text-primary/80 w-full"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add Rule
+        </button>
+      </div>
+
+      {/* Actions */}
+      <div className="flex gap-1.5 p-2 border-t border-zinc-200 dark:border-zinc-700">
+        <Button
+          variant="default"
+          size="sm"
+          className="flex-1 h-7 text-[10px] uppercase tracking-wider rounded-sm"
+          onClick={handleSave}
+          disabled={!canSave}
+        >
+          <Save className="h-3 w-3 mr-1" />
+          Save
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-[10px] uppercase tracking-wider rounded-sm"
+          onClick={onCancel}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Auto-color lens editor ─────────────────────────────────────────────────
+
+export function AutoColorEditor({
+  initial,
+  onSave,
+  onCancel,
+  discovered,
+  onRequestDiscovery,
+}: {
+  initial: { id?: string; name: string; autoColor: AutoColorSpec };
+  onSave: (lens: Lens) => void;
+  onCancel: () => void;
+  discovered: DiscoveredLensData | null;
+  onRequestDiscovery: (categories: { properties?: boolean; quantities?: boolean; classifications?: boolean; materials?: boolean }) => void;
+}) {
+  const [name, setName] = useState(initial.name);
+  const [source, setSource] = useState<AutoColorSpec['source']>(initial.autoColor.source);
+  const [psetName, setPsetName] = useState(initial.autoColor.psetName ?? '');
+  const [propertyName, setPropertyName] = useState(initial.autoColor.propertyName ?? '');
+  // Opt-in "unclassified bucket" toggle (#unclassified-bucket) - meaningless
+  // outside `source: 'classification'`, so it's only rendered there. Not
+  // reset on source change like psetName/propertyName: if the user flips
+  // away from classification and back, restoring their choice is friendlier
+  // than silently discarding it, and the flag is dropped from the saved
+  // spec entirely when the source isn't classification (see handleSave).
+  const [includeUnclassified, setIncludeUnclassified] = useState(initial.autoColor.includeUnclassified ?? false);
+
+  const needsPset = source === 'property' || source === 'quantity' || source === 'classification';
+  const needsPropertyName = source === 'attribute' || source === 'property' || source === 'quantity';
+
+  // Trigger lazy discovery when source changes to a category that needs it
+  useEffect(() => {
+    if (!discovered) return;
+    if (source === 'property' && !discovered.propertySets) {
+      onRequestDiscovery({ properties: true });
+    } else if (source === 'quantity' && !discovered.quantitySets) {
+      onRequestDiscovery({ quantities: true });
+    } else if (source === 'material' && !discovered.materials) {
+      onRequestDiscovery({ materials: true });
+    } else if (source === 'classification' && !discovered.classificationSystems) {
+      onRequestDiscovery({ classifications: true });
+    }
+  }, [source, discovered, onRequestDiscovery]);
+
+  // Dynamic options from discovered data
+  const psetOptions = useMemo(() => {
+    if (!discovered) return [];
+    if (source === 'quantity') return discovered.quantitySets ? Array.from(discovered.quantitySets.keys()).sort() : [];
+    if (source === 'classification') return discovered.classificationSystems ?? [];
+    return discovered.propertySets ? Array.from(discovered.propertySets.keys()).sort() : [];
+  }, [discovered, source]);
+
+  const propertyOptions = useMemo(() => {
+    if (!discovered) return [];
+    if (source === 'property') return discovered.propertySets?.get(psetName) ?? [];
+    if (source === 'quantity') return discovered.quantitySets?.get(psetName) ?? [];
+    return [];
+  }, [discovered, source, psetName]);
+
+  const handleSave = () => {
+    if (!name.trim()) return;
+    if (needsPset && !psetName.trim()) return;
+    if (needsPropertyName && !propertyName.trim()) return;
+
+    const autoColor: AutoColorSpec = { source };
+    if (needsPset) autoColor.psetName = psetName.trim();
+    if (needsPropertyName) autoColor.propertyName = propertyName.trim();
+    // Only emitted when true, on a classification source: unset/false must
+    // reproduce the pre-existing ghosting behaviour exactly (see
+    // AutoColorSpec.includeUnclassified in @ifc-lite/lens), and the flag is
+    // meaningless on any other source.
+    if (source === 'classification' && includeUnclassified) autoColor.includeUnclassified = true;
+
+    onSave(buildAutoColorLensToSave(
+      initial,
+      { name: name.trim(), autoColor },
+      () => `lens-auto-${Date.now()}`,
+    ));
+  };
+
+  const canSave = name.trim().length > 0
+    && (!needsPset || psetName.trim().length > 0)
+    && (!needsPropertyName || propertyName.trim().length > 0);
+
+  const selectClass = 'text-xs px-1.5 py-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 rounded-sm';
+
+  return (
+    <div className="border-2 border-primary bg-white dark:bg-zinc-900 rounded-sm">
+      <div className="px-3 pt-3 pb-2">
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Auto-color lens name..."
+          className="w-full px-2 py-1.5 text-xs font-bold uppercase tracking-wider bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-900 dark:text-zinc-100 rounded-sm placeholder:normal-case placeholder:font-normal placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+          autoFocus
+        />
+      </div>
+
+      <div className="border-t border-zinc-200 dark:border-zinc-700 px-3 py-2 space-y-2 bg-zinc-50/50 dark:bg-zinc-800/50">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+          <Sparkles className="h-3 w-3" />
+          <span>Auto-color by distinct values</span>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <label className="text-[10px] uppercase tracking-wider text-zinc-500 w-[50px]">Source</label>
+          <select
+            value={source}
+            onChange={(e) => {
+              const s = e.target.value as AutoColorSpec['source'];
+              setSource(s);
+              setPsetName('');
+              setPropertyName('');
+              if (!name || name.startsWith('Color by ')) {
+                setName(`Color by ${TYPE_LABELS[s]}`);
+              }
+            }}
+            className={cn(selectClass, 'flex-1')}
+          >
+            {AUTO_COLOR_SOURCES.map(s => (
+              <option key={s} value={s}>{TYPE_LABELS[s]}</option>
+            ))}
+          </select>
+        </div>
+
+        {needsPset && (
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] uppercase tracking-wider text-zinc-500 w-[50px]">
+              {source === 'property' ? 'Pset' : source === 'classification' ? 'System' : 'Qset'}
+            </label>
+            <SearchableSelect
+              value={psetName}
+              options={psetOptions}
+              onChange={(v) => { setPsetName(v); setPropertyName(''); }}
+              placeholder={source === 'property' ? 'Select property set...' : source === 'classification' ? 'Select system...' : 'Select quantity set...'}
+              className="flex-1"
+            />
+          </div>
+        )}
+
+        {needsPropertyName && (
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] uppercase tracking-wider text-zinc-500 w-[50px]">Name</label>
+            {source === 'attribute' ? (
+              <select
+                value={propertyName}
+                onChange={(e) => setPropertyName(e.target.value)}
+                className={cn(selectClass, 'flex-1')}
+              >
+                <option value="">Select...</option>
+                {ENTITY_ATTRIBUTE_NAMES.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            ) : (
+              <SearchableSelect
+                value={propertyName}
+                options={propertyOptions}
+                onChange={setPropertyName}
+                placeholder={source === 'property' ? 'Select property...' : 'Select quantity...'}
+                className="flex-1"
+              />
+            )}
+          </div>
+        )}
+
+        {source === 'classification' && (
+          <label className="flex items-center justify-between gap-2 cursor-pointer pt-0.5">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Show unclassified</span>
+            <input
+              type="checkbox"
+              checked={includeUnclassified}
+              onChange={(e) => setIncludeUnclassified(e.target.checked)}
+              className="accent-primary"
+            />
+          </label>
+        )}
+      </div>
+
+      <div className="flex gap-1.5 p-2 border-t border-zinc-200 dark:border-zinc-700">
+        <Button
+          variant="default"
+          size="sm"
+          className="flex-1 h-7 text-[10px] uppercase tracking-wider rounded-sm"
+          onClick={handleSave}
+          disabled={!canSave}
+        >
+          <Save className="h-3 w-3 mr-1" />
+          Save
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-[10px] uppercase tracking-wider rounded-sm"
+          onClick={onCancel}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Lens card (read-only display) ──────────────────────────────────────────
+
+function LensCard({
+  lens,
+  isActive,
+  onToggle,
+  onEdit,
+  onDuplicate,
+  onDelete,
+  isolatedRuleId,
+  onIsolateRule,
+  ruleCounts,
+  autoColorLegend,
+}: {
+  lens: Lens;
+  isActive: boolean;
+  onToggle: (id: string) => void;
+  onEdit?: (lens: Lens) => void;
+  onDuplicate?: (id: string) => void;
+  onDelete?: (id: string) => void;
+  isolatedRuleId?: string | null;
+  onIsolateRule?: (ruleId: string) => void;
+  ruleCounts?: Map<string, number>;
+  autoColorLegend?: AutoColorLegendEntry[];
+}) {
+  const isAutoColor = !!lens.autoColor;
+  const enabledRuleCount = lens.rules.filter(r => r.enabled).length;
+  const [legendSort, setLegendSort] = useState<'count' | 'name-asc' | 'name-desc'>('count');
+
+  const legendToShow = useMemo(() => {
+    if (!isAutoColor || !autoColorLegend) return undefined;
+    if (legendSort === 'count') return autoColorLegend; // already sorted by count desc from engine
+    const sorted = [...autoColorLegend];
+    if (legendSort === 'name-asc') sorted.sort((a, b) => a.name.localeCompare(b.name));
+    else sorted.sort((a, b) => b.name.localeCompare(a.name));
+    return sorted;
+  }, [isAutoColor, autoColorLegend, legendSort]);
+
+  const cycleLegendSort = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLegendSort(prev => prev === 'count' ? 'name-asc' : prev === 'name-asc' ? 'name-desc' : 'count');
+  }, []);
+
+  const sortLabel = legendSort === 'count' ? 'Count' : legendSort === 'name-asc' ? 'A→Z' : 'Z→A';
+
+  return (
+    <div
+      className={cn(
+        'border-2 transition-colors cursor-pointer group rounded-sm',
+        isActive
+          ? 'border-primary bg-white dark:bg-zinc-900'
+          : 'border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:border-zinc-400 dark:hover:border-zinc-500',
+      )}
+      onClick={() => onToggle(lens.id)}
+      {...tourAnchor(lensCardAnchor(lens.id))}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2">
+        <div className="flex items-center gap-2 min-w-0">
+          {isActive ? (
+            <Check className="h-3.5 w-3.5 text-primary flex-shrink-0" />
+          ) : isAutoColor ? (
+            <Sparkles className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 flex-shrink-0" />
+          ) : (
+            <Palette className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 flex-shrink-0" />
+          )}
+          <span className="text-xs font-bold uppercase tracking-wider text-zinc-900 dark:text-zinc-100 truncate">
+            {lens.name}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          {onDuplicate && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDuplicate(lens.id); }}
+              className="opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 p-0.5"
+              title={lens.builtin ? 'Duplicate into an editable copy' : 'Duplicate lens'}
+            >
+              <Copy className="h-3 w-3" />
+            </button>
+          )}
+          {onEdit && !lens.builtin && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(lens); }}
+              className="opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 p-0.5"
+              title="Edit lens"
+            >
+              <Pencil className="h-3 w-3" />
+            </button>
+          )}
+          {!lens.builtin && onDelete && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(lens.id); }}
+              className="opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400 p-0.5"
+              title="Delete lens"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          )}
+          <span className="text-[10px] text-zinc-500 dark:text-zinc-400 font-mono ml-1">
+            {isAutoColor
+              ? TYPE_LABELS[lens.autoColor!.source]
+              : `${enabledRuleCount} rules`}
+          </span>
+        </div>
+      </div>
+
+      {/* Auto-color legend (shown when active + auto-color lens) */}
+      {isActive && legendToShow && legendToShow.length > 0 && (
+        <div className="border-t border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60" {...tourAnchor(TOUR_ANCHORS.lensLegend)}>
+          <div className="flex items-center justify-between px-3 py-1 border-b border-zinc-200/60 dark:border-zinc-700/60">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-400 dark:text-zinc-500 font-medium">
+              {legendToShow.length} values
+            </span>
+            <button
+              onClick={cycleLegendSort}
+              className="flex items-center gap-0.5 text-[10px] uppercase tracking-wider text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300"
+              title="Sort legend entries"
+            >
+              <ArrowUpDown className="h-2.5 w-2.5" />
+              {sortLabel}
+            </button>
+          </div>
+          <div className="max-h-[220px] overflow-y-auto py-0.5">
+          {legendToShow.map(entry => (
+            <AutoColorRow
+              key={entry.id}
+              entry={entry}
+              isIsolated={isolatedRuleId === entry.id}
+              onClick={onIsolateRule ? () => onIsolateRule(entry.id) : undefined}
+            />
+          ))}
+          </div>
+        </div>
+      )}
+
+      {/* Rule-based color legend (shown when active + rule lens) */}
+      {isActive && !isAutoColor && (
+        <div className="border-t border-zinc-200 dark:border-zinc-700 py-0.5 bg-zinc-50 dark:bg-zinc-800/60" {...tourAnchor(TOUR_ANCHORS.lensLegend)}>
+          {lens.rules.map(rule => {
+            const count = ruleCounts?.get(rule.id) ?? 0;
+            return (
+              <RuleRow
+                key={rule.id}
+                rule={rule}
+                count={count}
+                isIsolated={isolatedRuleId === rule.id}
+                onClick={onIsolateRule ? () => onIsolateRule(rule.id) : undefined}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main panel ─────────────────────────────────────────────────────────────
+
+export function LensPanel({ onClose }: LensPanelProps) {
+  const { activeLensId, savedLenses } = useLens();
+  const setActiveLens = useViewerStore((s) => s.setActiveLens);
+  const createLens = useViewerStore((s) => s.createLens);
+  const updateLens = useViewerStore((s) => s.updateLens);
+  const deleteLens = useViewerStore((s) => s.deleteLens);
+  const duplicateLens = useViewerStore((s) => s.duplicateLens);
+  const importLenses = useViewerStore((s) => s.importLenses);
+  const exportLenses = useViewerStore((s) => s.exportLenses);
+  const hideEntities = useViewerStore((s) => s.hideEntities);
+  // Un-hide only the lens-owned ids (delta) instead of showAll(), which would
+  // also wipe the user's manual hides / isolation / class filter / ghost.
+  const showEntities = useViewerStore((s) => s.showEntities);
+  const isolateEntities = useViewerStore((s) => s.isolateEntities);
+  const clearIsolation = useViewerStore((s) => s.clearIsolation);
+  // Viewport's aggregation resolver (#2531): rule isolation runs a rule's
+  // matches through it so a geometry-less assembly isolates as its parts.
+  const cameraCallbacks = useViewerStore((s) => s.cameraCallbacks);
+  // Ownership bookkeeping lives in the STORE (not component state/refs) so a
+  // panel unmount/remount neither loses which hidden ids the lens owns nor
+  // strands a rule isolation it can no longer release.
+  const setLensAppliedHiddenIds = useViewerStore((s) => s.setLensAppliedHiddenIds);
+  const lensRuleIsolation = useViewerStore((s) => s.lensRuleIsolation);
+  const setLensRuleIsolation = useViewerStore((s) => s.setLensRuleIsolation);
+  // For footer stats — cheap primitive subscriptions
+  const lensColorMapSize = useViewerStore((s) => s.lensColorMap.size);
+  const lensHiddenIdsSize = useViewerStore((s) => s.lensHiddenIds.size);
+  const lensRuleCounts = useViewerStore((s) => s.lensRuleCounts);
+  const lensAutoColorLegend = useViewerStore((s) => s.lensAutoColorLegend);
+  // Discovered data from loaded models (classes = instant, rest = lazy)
+  const discoveredLensData = useViewerStore((s) => s.discoveredLensData);
+  const mergeDiscoveredData = useViewerStore((s) => s.mergeDiscoveredData);
+
+  // Track which categories are currently being discovered (prevent double-fire)
+  const discoveringRef = useRef(new Set<string>());
+
+  // Reset discovery flags when discoveredLensData changes (e.g. new model loaded)
+  useEffect(() => {
+    if (!discoveredLensData) {
+      discoveringRef.current.clear();
+    }
+  }, [discoveredLensData]);
+
+  /** Trigger lazy discovery for expensive data categories (psets, quantities, etc.) */
+  const handleRequestDiscovery = useCallback((categories: { properties?: boolean; quantities?: boolean; classifications?: boolean; materials?: boolean }) => {
+    // Skip categories already discovered or in-flight
+    const toDiscover: typeof categories = {};
+    const current = useViewerStore.getState().discoveredLensData;
+    if (!current) return;
+
+    if (categories.properties && !current.propertySets && !discoveringRef.current.has('properties')) {
+      toDiscover.properties = true;
+      discoveringRef.current.add('properties');
+    }
+    if (categories.quantities && !current.quantitySets && !discoveringRef.current.has('quantities')) {
+      toDiscover.quantities = true;
+      discoveringRef.current.add('quantities');
+    }
+    if (categories.classifications && !current.classificationSystems && !discoveringRef.current.has('classifications')) {
+      toDiscover.classifications = true;
+      discoveringRef.current.add('classifications');
+    }
+    if (categories.materials && !current.materials && !discoveringRef.current.has('materials')) {
+      toDiscover.materials = true;
+      discoveringRef.current.add('materials');
+    }
+
+    if (Object.keys(toDiscover).length === 0) return;
+
+    // Run discovery async to not block the UI
+    setTimeout(() => {
+      const { models, ifcDataStore } = useViewerStore.getState();
+      if (models.size === 0 && !ifcDataStore) return;
+      const provider = createLensDataProvider(models, ifcDataStore);
+      const result = discoverDataSources(provider, toDiscover);
+      mergeDiscoveredData(result);
+    }, 0);
+  }, [mergeDiscoveredData]);
+
+  // Editor state: null = not editing, Lens object = editing/creating
+  const [editingLens, setEditingLens] = useState<Lens | null>(null);
+  const [creatingAutoColor, setCreatingAutoColor] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Rule isolation applied by the lens (persisted in the store so it survives
+  // panel remounts). Only the ruleId is needed for the card highlight.
+  const isolatedRuleId = lensRuleIsolation?.ruleId ?? null;
+
+  /**
+   * Release the lens's rule isolation. Clears the shared isolation channel
+   * ONLY if the lens still owns it (the channel still holds exactly the ids
+   * the rule click applied) — if the user or the basket has isolated something
+   * else since, their isolation is left alone and only the stale claim drops.
+   */
+  const releaseRuleIsolation = useCallback(() => {
+    const state = useViewerStore.getState();
+    const isolation = state.lensRuleIsolation;
+    if (!isolation) return;
+    if (ruleIsolationOwnsChannel(state.isolatedEntities, isolation.entityIds)) {
+      clearIsolation();
+    }
+    setLensRuleIsolation(null);
+  }, [clearIsolation, setLensRuleIsolation]);
+
+  const handleToggle = useCallback((id: string) => {
+    // Release any rule-isolation this lens applied (both when turning it off
+    // and when switching to another lens). The sync effect below restores the
+    // lens-owned hidden ids — so no showAll(), which would nuke the user's
+    // own visibility.
+    releaseRuleIsolation();
+    if (activeLensId === id) {
+      setActiveLens(null);
+    } else {
+      setActiveLens(id);
+    }
+  }, [activeLensId, setActiveLens, releaseRuleIsolation]);
+
+  /** Click a rule/value row in the active lens to isolate matching entities */
+  const handleIsolateRule = useCallback((ruleId: string) => {
+    // Toggle off if clicking the already-isolated rule
+    if (useViewerStore.getState().lensRuleIsolation?.ruleId === ruleId) {
+      releaseRuleIsolation();
+      return;
+    }
+
+    // Look up entities matched by this specific rule/value
+    const matchingIds = useViewerStore.getState().lensRuleEntityIds.get(ruleId);
+    if (!matchingIds || matchingIds.length === 0) return;
+
+    // A geometry-less assembly (IfcElementAssembly, an IfcStair used as a
+    // container, ...) owns no mesh: its geometry hangs off the
+    // IfcRelAggregates parts, and the renderer resolves `isolatedEntities`
+    // against mesh ids directly (viewportUtils' buildRenderOptions ->
+    // `isolatedIds`). Isolating the bare matched id therefore blanks the view.
+    // Resolve through the Viewport channel #2531 added
+    // (`resolveHighlightIds`, backed by expandToGeometryBearingIds), exactly
+    // as SearchModal.text.tsx's commit and SearchModal.filter.tsx's "Isolate
+    // in 3D" (#2660) do: a geometry-bearing id passes through untouched and
+    // deduplicated, a geometry-less one is replaced by its geometry-bearing
+    // parts.
+    //
+    // The resolved ids are APPENDED to the raw matches, never substituted for
+    // them (#2680). The resolver bounds-checks against the type-visibility
+    // FILTERED mesh list, and TYPE_VISIBILITY_SEMANTIC_DEFAULTS starts
+    // `spaces`, `spatialZones`, `openings` and `virtualElements` all OFF
+    // (store/constants.ts) -- so a rule matching walls AND spaces (colouring
+    // spaces by area is an ordinary lens) resolves the walls, returns
+    // non-empty, and the spaces would silently drop out of the isolation set
+    // under replace semantics. Nothing looks wrong at first, because those
+    // types are hidden anyway; it goes wrong when the user turns spaces back
+    // on with the isolation still active and they stay hidden with no way to
+    // tell why. Carrying an id that owns no mesh is free: it simply never
+    // matches the renderer's whitelist. That also subsumes the
+    // nothing-resolved case (renderer not registered yet, or the whole match
+    // geometry-less), where the raw ids are all that is left -- and isolating
+    // an empty set would hide the ENTIRE model.
+    //
+    // #2660's second fallback -- walking IfcRelAggregates in the data store
+    // when the resolver comes back empty because the parts are HIDDEN types
+    // -- is deliberately not replicated here, and `expandFilterRowsThroughAggregation`
+    // does not fit anyway (it consumes filter-result rows, while a lens rule
+    // hands over globalIds). That fallback only pays off next to a
+    // type-visibility gate that flips the parts' toggles back on; the lens
+    // panel has no such gate, so isolating hidden-type parts would still
+    // render nothing. Adding one is a feature, not this fix.
+    const resolved = cameraCallbacks.resolveHighlightIds?.(matchingIds) ?? [];
+    const isolationIds = [...new Set([...resolved, ...matchingIds])];
+
+    // `isolateEntities` is a same-set TOGGLE (visibilitySlice.ts, `isolateEntities`): if
+    // the channel already holds exactly these ids it CLEARS instead of
+    // isolating. Switching from rule A to a rule B that lands on the SAME set
+    // would therefore un-isolate the model while the record below claims B
+    // owns an isolation that no longer exists -- and the next release, finding
+    // an empty channel, would disown it silently.
+    //
+    // This is PRE-EXISTING and the resolution above does not widen it: two
+    // rules whose criteria differ but whose matches coincide ("walls with a
+    // fire rating of 60" and "walls on level 2" over a model where those are
+    // the same walls) always collided this way, and appending the raw matches
+    // unconditionally keeps every other pair distinguishable -- an
+    // assembly-matching rule yields {assembly, ...parts} while a
+    // parts-matching rule yields {...parts}, sets that differ by the
+    // assembly's own id and cannot collapse onto each other.
+    //
+    // Release the channel first so the isolate call below always takes its
+    // isolate branch -- same
+    // `ruleIsolationOwnsChannel` set-equality predicate the teardown path uses,
+    // so both ends agree on when the channel holds a given set, and the
+    // re-isolate re-runs the un-hide the toggle branch would have skipped.
+    // Clicking the SAME rule again still un-isolates: that path returned above.
+    if (ruleIsolationOwnsChannel(useViewerStore.getState().isolatedEntities, isolationIds)) {
+      clearIsolation();
+    }
+    isolateEntities(isolationIds);
+    // Record ownership: rule id + the exact ids pushed into the channel, so a
+    // later release can verify the channel still holds what the lens applied.
+    // These MUST be the ids just isolated, not the raw matches: releaseRuleIsolation
+    // compares this record set-wise against the channel
+    // (ruleIsolationOwnsChannel), so recording the raw matches while pushing
+    // the expanded ones makes the lens disown its own isolation and the
+    // un-isolate click leaves the model stuck isolated.
+    setLensRuleIsolation({ ruleId, entityIds: [...isolationIds] });
+  }, [cameraCallbacks, clearIsolation, isolateEntities, releaseRuleIsolation, setLensRuleIsolation]);
+
+  // Safety net: if the lens got deactivated while the panel was unmounted
+  // (e.g. a flavor switch cleared activeLensId), a recorded rule isolation
+  // has no owner anymore — release it so the model isn't stuck isolated.
+  useEffect(() => {
+    if (activeLensId === null) releaseRuleIsolation();
+  }, [activeLensId, releaseRuleIsolation]);
+
+  const handleNewLens = useCallback(() => {
+    setCreatingAutoColor(false);
+    setEditingLens({
+      id: `lens-${Date.now()}`,
+      name: '',
+      rules: [],
+    });
+  }, []);
+
+  const handleNewAutoColorLens = useCallback(() => {
+    setEditingLens(null);
+    setCreatingAutoColor(true);
+  }, []);
+
+  // `lens` is the SAME object the store holds in `savedLenses` - a shallow
+  // `{ ...r }` per rule would still alias a compound rule's `conditions`
+  // array with the store's copy, so an edit-then-cancel-elsewhere sequence
+  // (or a future in-place mutation) could corrupt the saved lens.
+  const handleEditLens = useCallback((lens: Lens) => {
+    setEditingLens({ ...lens, rules: cloneLensRules(lens.rules) });
+  }, []);
+
+  /** Duplicate a lens (incl. a builtin) and open the editable copy for editing. */
+  const handleDuplicateLens = useCallback((id: string) => {
+    const result = duplicateLens(id);
+    if (!result.ok) {
+      toast.error(result.message);
+      return;
+    }
+    const copy = result.lens;
+    if (!copy) return;
+    setCreatingAutoColor(false);
+    setEditingLens({ ...copy, rules: cloneLensRules(copy.rules) });
+  }, [duplicateLens]);
+
+  const handleSaveLens = useCallback((lens: Lens) => {
+    const exists = savedLenses.some(l => l.id === lens.id);
+    const result = exists
+      ? updateLens(lens.id, { name: lens.name, rules: lens.rules, autoColor: lens.autoColor })
+      : createLens(lens);
+    if (!result.ok) {
+      // The store rejected the edit because it could not be persisted. Keep the
+      // editor open so the user's work is still there to retry or export,
+      // rather than closing over a lens that was never saved.
+      toast.error(result.message);
+      return;
+    }
+    setEditingLens(null);
+    setCreatingAutoColor(false);
+  }, [savedLenses, createLens, updateLens]);
+
+  const handleDeleteLens = useCallback((id: string) => {
+    if (activeLensId === id) {
+      // Deactivate first — the sync effect below un-hides the lens-owned
+      // hidden ids. Release only the lens's own rule-isolation, never a
+      // global showAll().
+      releaseRuleIsolation();
+      setActiveLens(null);
+    }
+    // A delete that could not be persisted is not applied: the lens stays in
+    // the list (merely deactivated, which is not persisted state anyway) so it
+    // cannot reappear out of nowhere on the next reload.
+    const result = deleteLens(id);
+    if (!result.ok) toast.error(result.message);
+  }, [activeLensId, setActiveLens, deleteLens, releaseRuleIsolation]);
+
+  // Sync the active lens's hidden ids into the GLOBAL hiddenEntities channel.
+  // planLensHiddenSync computes minimal show/hide deltas plus the ids the lens
+  // OWNS afterwards (only ids it newly hid — an id the user manually hid
+  // before or during the lens stays hidden after teardown). Ownership is
+  // persisted in the store so a panel remount re-runs this as a no-op instead
+  // of losing track of (or double-claiming) the lens's hides.
+  useEffect(() => {
+    const state = useViewerStore.getState();
+    const plan = planLensHiddenSync({
+      applied: state.lensAppliedHiddenIds,
+      hiddenEntities: state.hiddenEntities,
+      lensHiddenIds: activeLensId ? state.lensHiddenIds : EMPTY_LENS_HIDDEN,
+    });
+    if (plan.show.length > 0) showEntities(plan.show);
+    if (plan.hide.length > 0) hideEntities(plan.hide);
+    if (plan.nextApplied.length > 0 || state.lensAppliedHiddenIds.length > 0) {
+      setLensAppliedHiddenIds(plan.nextApplied);
+    }
+  }, [activeLensId, lensHiddenIdsSize, hideEntities, showEntities, setLensAppliedHiddenIds]);
+
+  const handleExport = useCallback(() => {
+    const data = exportLenses();
+    downloadFile(JSON.stringify(data, null, 2), 'lenses.json', 'application/json');
+  }, [exportLenses]);
+
+  const handleImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    // Upsert-by-id happens in the store (mergeImportedLenses), so this just
+    // hands it the parsed value normalized to an array. Re-importing an
+    // edited export updates lenses in place instead of no-op'ing. (#1403)
+    // `importLensFile` wires BOTH `FileReader#onload` and `#onerror` — a read
+    // that fails (removed/unreadable file) reports a failure here instead of
+    // never resolving at all (PR #2091 review).
+    void importLensFile(file, importLenses).then((result) => {
+      if (!result.ok) toast.error(result.message);
+    });
+  }, [importLenses]);
+
+  return (
+    <div className="h-full flex flex-col bg-white dark:bg-zinc-950">
+      {/* Header */}
+      <div className="flex items-center justify-between p-3 border-b-2 border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900">
+        <div className="flex items-center gap-2">
+          <Palette className="h-4 w-4 text-primary" />
+          <h2 className="font-bold uppercase tracking-wider text-xs text-zinc-900 dark:text-zinc-100">
+            Lens
+          </h2>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 rounded-sm"
+            onClick={handleExport}
+            title="Export lenses as JSON"
+          >
+            <Download className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 rounded-sm"
+            onClick={() => fileInputRef.current?.click()}
+            title="Import lenses from JSON"
+          >
+            <Upload className="h-3.5 w-3.5" />
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleImport}
+          />
+          {activeLensId && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-[10px] uppercase tracking-wider rounded-sm"
+              onClick={() => {
+                // Release the lens's own rule-isolation; the sync effect
+                // restores the lens-owned hidden ids. No showAll() — keep
+                // the user's hides.
+                releaseRuleIsolation();
+                setActiveLens(null);
+              }}
+              {...tourAnchor(TOUR_ANCHORS.lensClear)}
+            >
+              <EyeOff className="h-3 w-3 mr-1" />
+              Clear
+            </Button>
+          )}
+          {onClose && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 rounded-sm"
+              aria-label="Close"
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Lens list + editor */}
+      <div className="flex-1 overflow-auto p-3 space-y-2" {...tourAnchor(TOUR_ANCHORS.lensList)}>
+        {savedLenses.map(lens => (
+          editingLens?.id === lens.id ? (
+            editingLens.autoColor ? (
+              <AutoColorEditor
+                key={lens.id}
+                initial={{ id: editingLens.id, name: editingLens.name, autoColor: editingLens.autoColor }}
+                onSave={handleSaveLens}
+                onCancel={() => setEditingLens(null)}
+                discovered={discoveredLensData}
+                onRequestDiscovery={handleRequestDiscovery}
+              />
+            ) : (
+              <LensEditor
+                key={lens.id}
+                initial={editingLens}
+                onSave={handleSaveLens}
+                onCancel={() => setEditingLens(null)}
+                discovered={discoveredLensData}
+                onRequestDiscovery={handleRequestDiscovery}
+              />
+            )
+          ) : (
+            <LensCard
+              key={lens.id}
+              lens={lens}
+              isActive={activeLensId === lens.id}
+              onToggle={handleToggle}
+              onEdit={handleEditLens}
+              onDuplicate={handleDuplicateLens}
+              onDelete={handleDeleteLens}
+              isolatedRuleId={activeLensId === lens.id ? isolatedRuleId : null}
+              onIsolateRule={activeLensId === lens.id ? handleIsolateRule : undefined}
+              ruleCounts={activeLensId === lens.id ? lensRuleCounts : undefined}
+              autoColorLegend={activeLensId === lens.id ? lensAutoColorLegend : undefined}
+            />
+          )
+        ))}
+
+        {/* New lens editor (when creating rule-based lens) */}
+        {editingLens && !savedLenses.some(l => l.id === editingLens.id) && (
+          <LensEditor
+            initial={editingLens}
+            onSave={handleSaveLens}
+            onCancel={() => setEditingLens(null)}
+            discovered={discoveredLensData}
+            onRequestDiscovery={handleRequestDiscovery}
+          />
+        )}
+
+        {/* Auto-color editor (when creating auto-color lens) */}
+        {creatingAutoColor && (
+          <AutoColorEditor
+            initial={{ name: 'Color by IFC Class', autoColor: { source: 'ifcType' } }}
+            onSave={handleSaveLens}
+            onCancel={() => setCreatingAutoColor(false)}
+            discovered={discoveredLensData}
+            onRequestDiscovery={handleRequestDiscovery}
+          />
+        )}
+
+        {/* New lens buttons */}
+        {!editingLens && !creatingAutoColor && (
+          <div className="space-y-1.5">
+            <button
+              onClick={handleNewLens}
+              className="w-full border-2 border-dashed border-zinc-300 dark:border-zinc-600 hover:border-primary dark:hover:border-primary py-2.5 flex items-center justify-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-primary transition-colors rounded-sm"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New Rule Lens
+            </button>
+            <button
+              onClick={handleNewAutoColorLens}
+              className="w-full border-2 border-dashed border-zinc-300 dark:border-zinc-600 hover:border-primary dark:hover:border-primary py-2.5 flex items-center justify-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-primary transition-colors rounded-sm"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              New Auto-Color Lens
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Status footer */}
+      <div className="p-2 border-t-2 border-zinc-200 dark:border-zinc-800 text-[10px] uppercase tracking-wide text-zinc-600 dark:text-zinc-400 text-center bg-zinc-50 dark:bg-zinc-900 font-mono">
+        {activeLensId
+          ? `Active · ${lensColorMapSize} colored · ${lensHiddenIdsSize > 0 ? `${lensHiddenIdsSize} hidden` : 'ghosted'}`
+          : 'Click a lens to activate'}
+      </div>
+    </div>
+  );
+}

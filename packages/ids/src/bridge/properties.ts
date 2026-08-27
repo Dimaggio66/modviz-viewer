@@ -1,0 +1,312 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+import {
+  type IfcDataStore,
+  extractPropertiesOnDemand,
+  extractQuantitiesOnDemand,
+  extractTypePropertiesOnDemand,
+  extractTypeEntityOwnProperties,
+  extractAllEntityAttributes,
+  extractMaterialPropertiesForMaterialId,
+  mergeInheritedPropertySets,
+} from '@ifc-lite/parser';
+import { RelationshipType } from '@ifc-lite/data';
+
+import type { PropertySetInfo } from '../types.js';
+import { idsDataTypeForProperty, idsDataTypeForQuantity } from './data-types.js';
+import { applyUnitConversion } from './units.js';
+
+interface RawProp {
+  name: string;
+  value: unknown;
+  type: unknown;
+  values?: string[];
+  dataType?: string;
+}
+
+/**
+ * IDS treats `IfcElementQuantity` (Qto_*) and `IfcPropertySet` (Pset_*)
+ * uniformly — both surface as "property sets" with named values. The
+ * parser stores them in separate columnar tables, so we merge here.
+ *
+ * Surfaces three sources:
+ *   1. The instance's own property sets (IfcPropertySet via
+ *      IfcRelDefinesByProperties).
+ *   2. Predefined property sets (IfcDoorPanelProperties etc.) where
+ *      the entity's schema-defined attributes act as property names.
+ *   3. Inherited property sets from `IfcRelDefinesByType`.
+ *
+ * Length-typed properties are converted to base SI units per the
+ * project's `lengthUnitScale` so IDS literals (always in metres)
+ * compare correctly.
+ */
+export function collectAllPropertySets(
+  store: IfcDataStore,
+  expressId: number
+): PropertySetInfo[] {
+  const own: PropertySetInfo[] = [];
+  const scale = store.lengthUnitScale;
+
+  appendInstancePropertySets(store, expressId, scale, own);
+  appendQuantitySets(store, expressId, own);
+  appendPredefinedPropertySets(store, expressId, own);
+  appendMaterialOwnPropertySets(store, expressId, scale, own);
+
+  // Merged per property, not per set — see `mergeInheritedPropertySets`.
+  const out = mergeInheritedPropertySets(
+    own,
+    inheritedPropertySets(store, expressId, scale),
+  );
+
+  if (out.length === 0) {
+    appendTypeEntityOwnProperties(store, expressId, out);
+  }
+  return out;
+}
+
+function appendInstancePropertySets(
+  store: IfcDataStore,
+  expressId: number,
+  scale: number | undefined,
+  out: PropertySetInfo[]
+): void {
+  let props = store.properties?.getForEntity?.(expressId) as
+    | Array<{ name: string; properties: RawProp[] }>
+    | undefined;
+  if (!props || props.length === 0) {
+    props = extractPropertiesOnDemand(store, expressId) as Array<{
+      name: string;
+      properties: RawProp[];
+    }>;
+  }
+  if (!props || props.length === 0) return;
+
+  for (const pset of props) {
+    out.push({
+      name: pset.name,
+      properties: (pset.properties || []).map((p) => projectProperty(p, scale)),
+    });
+  }
+}
+
+function appendQuantitySets(
+  store: IfcDataStore,
+  expressId: number,
+  out: PropertySetInfo[]
+): void {
+  let quantities = store.quantities?.getForEntity?.(expressId);
+  if (!quantities || quantities.length === 0) {
+    quantities = extractQuantitiesOnDemand(store, expressId);
+  }
+  if (!quantities || quantities.length === 0) return;
+
+  for (const qset of quantities) {
+    out.push({
+      name: qset.name,
+      properties: (qset.quantities || []).map((q) => ({
+        name: q.name,
+        value: q.value,
+        dataType: idsDataTypeForQuantity(q.type),
+      })),
+    });
+  }
+}
+
+/**
+ * Predefined property-set entities (`IfcDoorPanelProperties`, …) are
+ * connected to elements via `IfcRelDefinesByProperties` like a normal
+ * pset, but their properties live as schema-defined ATTRIBUTES on the
+ * entity itself. Surface them as a pset whose name is the entity's
+ * `Name` and whose properties are the schema-defined attribute slots
+ * beyond Name/Description.
+ */
+function appendPredefinedPropertySets(
+  store: IfcDataStore,
+  expressId: number,
+  out: PropertySetInfo[]
+): void {
+  const psetIds =
+    store.relationships?.getRelated?.(
+      expressId,
+      RelationshipType.DefinesByProperties,
+      'inverse'
+    ) || [];
+
+  for (const psetId of psetIds) {
+    const ref = store.entityIndex?.byId?.get?.(psetId);
+    if (!ref) continue;
+    const tu = String((ref as { type?: unknown }).type).toUpperCase();
+    if (tu === 'IFCPROPERTYSET' || tu === 'IFCELEMENTQUANTITY') continue;
+    if (!tu.endsWith('PROPERTIES')) continue;
+
+    const allAttrs = extractAllEntityAttributes(store, psetId);
+    const psetNameAttr = allAttrs.find((a) => a.name === 'Name')?.value;
+    if (typeof psetNameAttr !== 'string' || !psetNameAttr) continue;
+    if (out.some((p) => p.name === psetNameAttr)) continue;
+
+    const properties = allAttrs
+      .filter(
+        (a) =>
+          a.name !== 'GlobalId' &&
+          a.name !== 'Name' &&
+          a.name !== 'Description' &&
+          a.value !== undefined &&
+          a.value !== ''
+      )
+      .map((a) => ({
+        name: a.name,
+        value: a.value,
+        // dataType intentionally left empty: without a per-attribute
+        // schema lookup we can't know if PanelOperation is IFCDOORPANELOPERATIONENUM
+        // vs anything else. The IDS dataType gate then no-ops for these slots.
+        dataType: '',
+      }));
+    if (properties.length > 0) out.push({ name: psetNameAttr, properties });
+  }
+}
+
+/**
+ * `IfcMaterialProperties` (IFC4+) / `IfcExtendedMaterialProperties`
+ * (IFC2X3) attach property sets directly to an `IfcMaterial`, not
+ * through `IfcRelDefinesByProperties` like every other pset. When the
+ * IDS applicability targets `IfcMaterial` itself (rather than an
+ * element that merely uses one), those material-owned psets are the
+ * ONLY property source available — without this, a property facet on
+ * `IfcMaterial` always reports the pset missing regardless of content.
+ *
+ * Gated on the entity's own type so this never runs for the much more
+ * common "element that has a material" shape; that path goes through
+ * the material facet, not this one.
+ */
+function appendMaterialOwnPropertySets(
+  store: IfcDataStore,
+  expressId: number,
+  scale: number | undefined,
+  out: PropertySetInfo[]
+): void {
+  if (resolveEntityTypeName(store, expressId)?.toUpperCase() !== 'IFCMATERIAL') return;
+
+  const groups = extractMaterialPropertiesForMaterialId(store, expressId);
+  for (const group of groups) {
+    for (const pset of group.psets) {
+      if (out.some((p) => p.name === pset.name)) continue;
+      out.push({
+        name: pset.name,
+        properties: pset.properties.map((p) => projectProperty(p as RawProp, scale)),
+      });
+    }
+  }
+}
+
+/**
+ * Raw IFC type name for an entity, falling back from the columnar
+ * entity table (which only summarises "interesting" types — resource
+ * -level entities like `IfcMaterial` resolve to `'Unknown'` there) to
+ * `entityIndex.byId`. Mirrors `createDataAccessor`'s `getEntityType`;
+ * duplicated rather than threaded through as a parameter because only
+ * this one caller needs a raw type check ahead of the accessor existing.
+ */
+function resolveEntityTypeName(store: IfcDataStore, expressId: number): string | undefined {
+  const fromTable = store.entities?.getTypeName?.(expressId);
+  if (fromTable && fromTable !== 'Unknown') return fromTable;
+  const entry = store.entityIndex?.byId?.get(expressId);
+  if (!entry) return undefined;
+  return typeof entry === 'object' && 'type' in entry ? String((entry as { type: unknown }).type) : undefined;
+}
+
+function inheritedPropertySets(
+  store: IfcDataStore,
+  expressId: number,
+  scale: number | undefined
+): PropertySetInfo[] {
+  // Source-backed extraction (WASM/columnar parse) first; it bails on stores
+  // with no `source` buffer — i.e. server-parsed stores — so fall back to the
+  // prebuilt property table keyed by the element's IfcTypeProduct id (issue
+  // #1787), mirroring the Lists adapter's server-path type fallback.
+  const inheritedPsets =
+    extractTypePropertiesOnDemand(store, expressId)?.properties ??
+    typePropertySetsFromTable(store, expressId);
+
+  return inheritedPsets.map((pset) => ({
+    name: pset.name,
+    properties: (pset.properties || []).map((p) => projectProperty(p as RawProp, scale)),
+  }));
+}
+
+/** Type-inherited property sets for server-parsed stores: resolve the element's
+ *  IfcTypeProduct via IfcRelDefinesByType, then read the prebuilt table for
+ *  that type id (server materialises type sets under the type's own id — see
+ *  serverDataModel's TYPEHASPROPERTYSETS merge). [] for WASM stores, which the
+ *  source-backed extractor already handled. */
+function typePropertySetsFromTable(
+  store: IfcDataStore,
+  expressId: number
+): Array<{ name: string; properties: RawProp[] }> {
+  // Server-parsed stores only — a WASM store has a `source` buffer and its type
+  // sets were already resolved by extractTypePropertiesOnDemand above, so this
+  // never runs there (no behaviour change on the WASM path).
+  if (store.source && store.source.length > 0) return [];
+  const typeIds =
+    store.relationships?.getRelated?.(
+      expressId,
+      RelationshipType.DefinesByType,
+      'inverse'
+    ) || [];
+  if (typeIds.length === 0) return [];
+  const psets = store.properties?.getForEntity?.(typeIds[0]);
+  return (psets ?? []) as unknown as Array<{ name: string; properties: RawProp[] }>;
+}
+
+function appendTypeEntityOwnProperties(
+  store: IfcDataStore,
+  expressId: number,
+  out: PropertySetInfo[]
+): void {
+  const typePsets = extractTypeEntityOwnProperties(store, expressId);
+  if (typePsets.length === 0) return;
+  for (const pset of typePsets) {
+    out.push({
+      name: pset.name,
+      properties: (pset.properties || []).map((p) => ({
+        name: p.name,
+        value: Array.isArray(p.value)
+          ? JSON.stringify(p.value)
+          : (p.value as string | number | boolean | null),
+        dataType: idsDataTypeForProperty(p.type as number | string | undefined),
+        ...(Array.isArray(p.values) && p.values.length > 0
+          ? { values: p.values }
+          : {}),
+      })),
+    });
+  }
+}
+
+/**
+ * Project a raw parser property record into the validator's
+ * `PropertySetInfo['properties'][number]` shape — applies unit
+ * conversion and resolves the IDS dataType. Multi-valued properties
+ * (lists, enumerations, table values) suppress dataType so the
+ * validator's dataType gate falls through to the value match.
+ */
+function projectProperty(
+  p: RawProp,
+  scale: number | undefined
+): PropertySetInfo['properties'][number] {
+  const hasMultiValue = Array.isArray(p.values) && p.values.length > 0;
+  const dataType =
+    p.dataType ??
+    (hasMultiValue ? undefined : idsDataTypeForProperty(p.type as number | string | undefined));
+  const baseValue = Array.isArray(p.value)
+    ? JSON.stringify(p.value)
+    : (p.value as string | number | boolean | null);
+  const baseValues = hasMultiValue ? (p.values as string[]) : undefined;
+  const converted = applyUnitConversion(baseValue, baseValues, dataType, scale);
+  return {
+    name: p.name,
+    value: converted.value,
+    dataType: dataType ?? '',
+    ...(converted.values ? { values: converted.values } : {}),
+  };
+}

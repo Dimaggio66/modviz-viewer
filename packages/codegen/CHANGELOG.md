@@ -1,0 +1,285 @@
+# @ifc-lite/codegen
+
+## 1.15.11
+
+### Patch Changes
+
+- [#3069](https://github.com/LTplus-AG/ifc-lite/pull/3069) [`f449776`](https://github.com/LTplus-AG/ifc-lite/commit/f4497765cb4e17828ff6ca6b52fb8a96caa2f81f) Thanks [@louistrue](https://github.com/louistrue)! - Stop the generated schema registry answering for `Object.prototype` members.
+  
+  `SCHEMA_REGISTRY.entities` is a plain object literal, so `in` and `obj[key]`
+  both reach the prototype chain. `getEntityMetadata('constructor')` returned
+  the `Object` constructor. Two exported guards were wrong as a result:
+  
+  - `isInstantiable('constructor')` was `true`. Its own docblock says it exists
+    to stop authoring code writing an abstract class into an exported file.
+  - `normalizeIfcTypeName` returned the string `"Object"` for `constructor`, and
+    `undefined` for `__proto__` from a signature declaring `string`.
+  
+  `isKnownType('constructor')` was already `false` and is unchanged. It is worth
+  naming, because the guard that reads as looser was the one answering correctly,
+  and the guard documented as the strict authoring boundary was the one letting
+  it through.
+  
+  `isKnownEntity` had the same defect and now delegates to `getEntityMetadata`
+  rather than repeating the lookup.
+  
+  The same generator emits a second registry with the same defect, also fixed:
+  `getTypeId('constructor')` returned the `Object` constructor from a signature
+  declaring `number | undefined`.
+- Updated dependencies [[`9359bc4`](https://github.com/LTplus-AG/ifc-lite/commit/9359bc488173585b2b90e124cc66dcf8292c4be9), [`f6febcc`](https://github.com/LTplus-AG/ifc-lite/commit/f6febcc2d4986e79b3c44d63853bb72a16475c65), [`00f6e79`](https://github.com/LTplus-AG/ifc-lite/commit/00f6e79c22641ff59bfb3327d910b04f9a164d8b), [`116a3e9`](https://github.com/LTplus-AG/ifc-lite/commit/116a3e94de753b95fa94b2d6c41a0171cd254729)]:
+  - @ifc-lite/data@3.4.1
+
+## 1.15.10
+
+### Patch Changes
+
+- [#2852](https://github.com/LTplus-AG/ifc-lite/pull/2852) [`3c5557b`](https://github.com/LTplus-AG/ifc-lite/commit/3c5557bad1dce0d0f27166184452353fded3209c) Thanks [@BIMvoice](https://github.com/BIMvoice)! - `generateAll()` named the IFC4X3 schema file as `IFC4X3_ADD2.exp`, but the
+  schema actually shipped in `schemas/` is `IFC4X3.exp`. The function does not
+  throw or exit non-zero when a named schema file is missing — it logs a
+  warning and moves on — so calling `generateAll()` silently produced only the
+  `ifc4/` output directory and skipped `ifc4x3/` entirely, with no error to
+  signal that a whole schema had gone missing.
+  
+  `generateAll()` is not exercised by any script in this repo (the package.json
+  `generate:ifc4x3` script calls the CLI directly with an explicit path), so the
+  mismatch was invisible here, but it is exported from the package's public API
+  for anyone using `@ifc-lite/codegen` as a library.
+  
+  Fixed the filename and added a regression test that runs `generateAll()`
+  against the real `schemas/` directory and asserts both output directories are
+  produced.
+- Updated dependencies [[`be6b43c`](https://github.com/LTplus-AG/ifc-lite/commit/be6b43c2b334811422c1cbfbea5d6e6d1b9a401d), [`6ce17fa`](https://github.com/LTplus-AG/ifc-lite/commit/6ce17fa903d38ab8ee3e6ebaf6da8453726d3ce2)]:
+  - @ifc-lite/data@3.4.0
+
+## 1.15.9
+
+### Patch Changes
+
+- [#2359](https://github.com/LTplus-AG/ifc-lite/pull/2359) [`7ee619f`](https://github.com/LTplus-AG/ifc-lite/commit/7ee619f8c6a7490982136d5677674f4f6355a568) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix two corrupted cells in the generated CRC32 lookup table (index 111 and 245), which were hand-typed literals that had silently drifted from the correct reflected CRC-32 (polynomial `0xEDB88320`) values. `packages/codegen` now renders this table from a single `buildCRC32Table()` source of truth in both its TypeScript and Rust templates instead of hand-typing a second copy, so the two cannot diverge again.
+
+  The 256-entry `TYPE_IDS` map shipped for every named entity in the schema was never affected — those ids are computed with the correct table at generation time. The corruption only affected `crc32Hash()` / `crc32_hash()` at runtime for entity keywords that are NOT in the map, i.e. the `IfcType::from_str` `Unknown(crc32_hash(...))` fallback reached for unrecognized/vendor-extension entity keywords, which could get a silently wrong stable id for names whose hash computation happened to touch one of the two corrupted cells.
+
+  `packages/codegen/generated/ifc4/type-ids.ts`, `packages/parser/src/generated/type-ids.ts`, `rust/core/src/generated/schema.rs`, and `packages/codegen/generated/ifc4x3/type-ids.ts` were all regenerated to correct the same two cells; each diff is exactly those two constants. The `ifc4x3` copy (see the companion changeset) is not imported by `packages/parser` or `rust/core`, so it had no runtime reader today, but it is a checked-in generated artifact and now matches the canonical table like the other three.
+
+  `formatCRC32TableLiteral()` now validates `perLine` and throws for a zero, negative, or non-integer value instead of silently producing a broken or extremely slow result. No caller passes a non-default `perLine` today, so this is a hardening of the exported helper's contract rather than a behavioral fix to generated output — with the default (`perLine = 6`), this hardening by itself leaves the four regenerated artifacts above unchanged.
+
+- [#2359](https://github.com/LTplus-AG/ifc-lite/pull/2359) [`7ee619f`](https://github.com/LTplus-AG/ifc-lite/commit/7ee619f8c6a7490982136d5677674f4f6355a568) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix a fourth checked-in copy of the corrupted CRC32 lookup table (index 111 and 245, see the earlier CRC32 table-corruption changeset) that the prior regeneration missed: `packages/codegen/generated/ifc4x3/type-ids.ts`. Its generator (`packages/codegen/src/type-ids-generator.ts`, run via `pnpm generate:ifc4x3`) already rendered the table from `formatCRC32TableLiteral()`/`buildCRC32Table()`, the single source of truth — the file itself simply hadn't been re-run after that fix landed, so it still shipped the two hand-typed-wrong cells.
+
+  This artifact is not imported by `packages/parser` or `rust/core` (unlike the sibling `generated/ifc4/type-ids.ts`, which is copied into `packages/parser/src/generated/`), so its `TYPE_IDS` map and its `crc32Hash()` runtime fallback were not reachable from any current runtime code path. Regenerating it corrects the checked-in artifact so it matches the canonical table and stays correct if it is ever consumed.
+
+  Regenerated diff is exactly the two constants (index 111 and 245), no unrelated churn. Added a test (`packages/codegen/test/type-ids-generator.test.ts`) that reads both checked-in `generated/ifc4/type-ids.ts` and `generated/ifc4x3/type-ids.ts` from disk and asserts their `CRC32_TABLE` matches `buildCRC32Table()` in all 256 cells, so a regenerated-but-not-committed (or committed-but-stale) artifact can't silently drift from the generator again.
+
+- Updated dependencies []:
+  - @ifc-lite/data@3.2.4
+
+## 1.15.8
+
+### Patch Changes
+
+- [#2202](https://github.com/LTplus-AG/ifc-lite/pull/2202) [`78842af`](https://github.com/LTplus-AG/ifc-lite/commit/78842af76d0c7534a202bad8e652bb45e66a412d) Thanks [@louistrue](https://github.com/louistrue)! - The Rust generator now emits the schema catalog and each entity's attribute names.
+
+  `IfcType::ALL` (re-exported as `ifc_lite_core::IFC_TYPES`) is every entity the
+  EXPRESS schema declares: the enum is exhaustive but not enumerable, so anything
+  reasoning about the whole schema previously had to re-parse the EXPRESS file or
+  scrape the generated source.
+
+  `attribute_names()` / `attribute_index(name)` come from the same inheritance-aware
+  walk the TypeScript generator uses, so a positional index can be looked up by name
+  instead of hardcoded with a comment beside it.
+
+  Also emits two attributes the committed Rust file carried but the generator never
+  produced, so regenerating no longer silently drops them.
+
+- Updated dependencies [[`befc108`](https://github.com/LTplus-AG/ifc-lite/commit/befc1083e377315231006352cb3fe95949e92b47)]:
+  - @ifc-lite/data@3.2.1
+
+## 1.15.7
+
+### Patch Changes
+
+- Updated dependencies [[`6792dd1`](https://github.com/LTplus-AG/ifc-lite/commit/6792dd11ad7049acb7329221ea8809d6333aefb7), [`22bffac`](https://github.com/LTplus-AG/ifc-lite/commit/22bffac737efa9bdd6ca583518f637593cb4d4bc), [`205a136`](https://github.com/LTplus-AG/ifc-lite/commit/205a136ee69e378ea01cd0d0a8a6dc81cf2fb08f)]:
+  - @ifc-lite/data@3.0.0
+
+## 1.15.6
+
+### Patch Changes
+
+- [#1691](https://github.com/LTplus-AG/ifc-lite/pull/1691) [`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a) Thanks [@louistrue](https://github.com/louistrue)! - Documentation moved to https://ifclite.dev/docs/ - README links and package homepage fields now point at the new home (the GitHub Pages site remains as a mirror whose canonical URLs point there).
+
+- Updated dependencies [[`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a)]:
+  - @ifc-lite/data@2.5.2
+
+## 1.15.5
+
+### Patch Changes
+
+- [#1676](https://github.com/LTplus-AG/ifc-lite/pull/1676) [`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39) Thanks [@louistrue](https://github.com/louistrue)! - Docs refresh: correct stale README claims and API samples against the current codebase; add READMEs to the ten published packages that shipped without one (cli, create, sdk, sandbox, lens, lists, embed-sdk, embed-protocol, encoding, viewer-core).
+
+- [#1678](https://github.com/LTplus-AG/ifc-lite/pull/1678) [`a90182b`](https://github.com/LTplus-AG/ifc-lite/commit/a90182bac110fdd4c15b8b51866e31deefc0378e) Thanks [@louistrue](https://github.com/louistrue)! - Package metadata hygiene: correct the @ifc-lite/codegen license field to MPL-2.0 (the source has always carried MPL headers; the MIT value was a scaffolding accident) and give it a files allowlist so the npm tarball ships dist, schemas, and README instead of the whole package directory. Add the missing publishConfig, homepage, and bugs fields to codegen, embed-protocol, embed-sdk, and wasm, and homepage/bugs to create-ifc-lite, matching the rest of the workspace.
+
+- Updated dependencies [[`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39)]:
+  - @ifc-lite/data@2.5.1
+
+## 1.15.4
+
+### Patch Changes
+
+- [#1151](https://github.com/LTplus-AG/ifc-lite/pull/1151) [`bfd9004`](https://github.com/LTplus-AG/ifc-lite/commit/bfd9004daa17f481a7b33b5c3c11f620e6cd894d) Thanks [@louistrue](https://github.com/louistrue)! - De-duplicate the STEP serializer into a single source of truth. The
+  schema-agnostic STEP serialization logic (`serializeValue`, `generateHeader`,
+  `parseStepValue`, `ref`/`enumVal`/`isEntityRef`/`isEnumValue`, and the
+  registry-injected `toStepLineWithRegistry` / `generateStepFileWithRegistry`)
+  previously existed as four hand-synced copies — the codegen template plus three
+  generated `serializers.ts` files — which had already silently drifted (the
+  runtime copy carried a `?? []` hardening the template lacked). It now lives once
+  in `@ifc-lite/data`; the per-schema bundles (parser runtime + codegen outputs)
+  are thin re-exports that only bind their own `SCHEMA_REGISTRY` to the
+  registry-coupled helpers, so the copies can never diverge again. A codegen test
+  asserts the generated bundle stays a thin re-export rather than re-inlining
+  logic.
+
+  Also fixes the broken `generate:ifc4` script (it pointed at a non-existent
+  `schemas/IFC4.exp`; the real file is `schemas/IFC4_ADD2_TC1.exp`). No public
+  behaviour change: `@ifc-lite/parser` re-exports the same serializer symbols as
+  before; `@ifc-lite/data` gains the shared primitives; `@ifc-lite/codegen` now
+  declares `@ifc-lite/data` as a dependency since the generated bundle imports it.
+
+- [#1143](https://github.com/LTplus-AG/ifc-lite/pull/1143) [`248f2c0`](https://github.com/LTplus-AG/ifc-lite/commit/248f2c09a4d61fa27dfeaba5511a2a641d4cd278) Thanks [@louistrue](https://github.com/louistrue)! - Preserve source IFC HEADER fields on round-trip export. Re-exporting an
+  imported file previously regenerated a fresh ifc-lite header, silently dropping
+  the source `FILE_DESCRIPTION` items (any `ViewDefinition [...]` label and vendor
+  identifier / coordinate-reference strings) and flattening the exact
+  `FILE_SCHEMA` token (e.g. `IFC4X3_ADD2` → `IFC4X3`, which some toolchains
+  reject).
+
+  The parser now captures the verbatim HEADER onto a new
+  `IfcDataStore.sourceHeader` (`IfcSourceHeader`, exported from `@ifc-lite/data`;
+  parser also exports `parseSourceHeader`), threaded through the worker transport.
+  `StepExporter` reproduces the source `FILE_DESCRIPTION` items and the exact
+  `FILE_SCHEMA` token when not converting schemas, falling back to parsing the
+  source bytes for cache-restored stores. Provenance stays honest:
+  `preprocessor_version` is set to `ifc-lite` while the source authoring tool is
+  kept as `originating_system`, and when mutations exist exactly one
+  `Re-exported by ifc-lite, N modification(s)` item is appended without removing
+  the source items. `generateHeader` now accepts description/author/organization
+  arrays plus a free-form schema token and STEP-escapes all fields; it also emits
+  a properly parenthesised `FILE_DESCRIPTION` list (the prior single-string form
+  was malformed STEP). Created-from-scratch (`IfcCreator`) and federated/merged
+  exports are unaffected — they keep their own provenance headers by design.
+
+- Updated dependencies [[`bfd9004`](https://github.com/LTplus-AG/ifc-lite/commit/bfd9004daa17f481a7b33b5c3c11f620e6cd894d), [`248f2c0`](https://github.com/LTplus-AG/ifc-lite/commit/248f2c09a4d61fa27dfeaba5511a2a641d4cd278), [`ddae2b0`](https://github.com/LTplus-AG/ifc-lite/commit/ddae2b0024f071d00f9e6e4b77e0be3965412ec3)]:
+  - @ifc-lite/data@2.1.0
+
+## 1.15.3
+
+### Patch Changes
+
+- [#946](https://github.com/LTplus-AG/ifc-lite/pull/946) [`6378998`](https://github.com/LTplus-AG/ifc-lite/commit/6378998ec146f7f9297ef5fcc5953b155fd6b5e0) Thanks [@louistrue](https://github.com/louistrue)! - Fix a batch of verified findings from a full-codebase review (security, correctness,
+  data-loss, and resource/memory leaks). Highlights:
+
+  **Security**
+
+  - collab-server: a malformed WebSocket frame no longer crashes the whole process
+    (decode is wrapped; a bad frame is rejected/audited instead of throwing).
+  - mcp: the local HTTP transport now validates `Host`/`Origin` and no longer sends a
+    wildcard `Access-Control-Allow-Origin`, closing a DNS-rebinding/CSRF hole; the
+    `AuthScope.modelIds` allowlist is now enforced at model resolution.
+  - server-bin: `extractZip` uses `execFileSync` (argv, no shell), removing command
+    injection via archive/destination paths.
+  - export / sdk / cli / mcp / lists / viewer CSV exporters now neutralize spreadsheet
+    formula injection (CWE-1236) consistently.
+  - create-ifc-lite: validates the project name (no path traversal) and drops the
+    unused `execSync`-based downloader.
+  - embed-sdk: inbound `postMessage` now validates `event.origin`.
+
+  **Correctness / data-loss**
+
+  - parser: `lengthUnitScale` survives the worker transport; the nested STEP list
+    parser is string-aware (commas/parens inside quoted values no longer mis-split).
+  - mutations: deleting a property from a session-created pset and replaying
+    `UPDATE_ATTRIBUTE` / `CREATE_PROPERTY_SET` mutations now work.
+  - export: merged-export ID remapping no longer rewrites `#N` inside quoted strings.
+  - drawing-2d: GPU section cutter triangle upload/readback use correct WGSL std-layout
+    offsets and strides.
+  - ifcx: cyclic children no longer abort the parse; spatial children round-trip; the
+    mesh transform guards a zero/non-finite homogeneous `w`.
+  - data / cache: a `NULL` string property value stays `null` instead of becoming `""`.
+  - pointcloud, bcf, server-client, query, viewer-core, viewer store/federation: assorted
+    decoding, federation-id, and selection-state fixes.
+
+  **Resource / memory leaks**
+
+  - geometry, query (DuckDB), renderer (GPU buffers), collab (federation presence),
+    sandbox (host log capture + runtime), mcp (clash mesh cache), server-bin (signal
+    listeners), and the viewer renderer on unmount now release resources deterministically.
+
+  **Hardening (apps, not published)**
+
+  - server: a dedicated `server-release` Cargo profile (`panic = "unwind"`) plus a
+    `CatchPanicLayer` contain a malformed-IFC parse panic to the offending request
+    instead of aborting the whole server.
+  - desktop (Tauri): a Content-Security-Policy is set, and unused `shell:*` /
+    `fs:allow-write|mkdir|remove` capabilities (and the unused shell plugin) are removed.
+
+  **Second pass** (additional verified findings)
+
+  - collab-server: S3 log load now follows `ListObjectsV2` pagination (no dropped frames);
+    awareness frames are size-capped + rate-limited; path-lock verify runs after role/rate-limit;
+    the blob route requires auth and `/metrics` can be token-gated.
+  - server-bin: downloaded binaries are SHA-256 verified against a release sidecar (fail-closed on
+    mismatch, warn-if-absent for older releases).
+  - extensions: inner-ring capability check fails _closed_ for unknown namespaces; signing
+    canonicalization is now injective (length-prefixed).
+  - correctness/leaks: mutations quantity type+unit preserved on replay; `findByProperty` boolean
+    comparisons; Parquet REAL columns kept as Float64; blob GC fail-safe on missing `uploadedAt`;
+    spatial-hierarchy + codegen cycle guards; BVH NaN edge; bSDD/playground caches bounded;
+    point-cloud GPU asset freed on federation error; mcp `parseColor` rejects non-hex; bcf/SVG/STEP
+    output escaping; and more.
+
+## 1.15.2
+
+### Patch Changes
+
+- [#494](https://github.com/louistrue/ifc-lite/pull/494) [`ec0d3a0`](https://github.com/louistrue/ifc-lite/commit/ec0d3a0e4c7f9eaeb26ab0a724fd76d955e52ac5) Thanks [@louistrue](https://github.com/louistrue)! - Remove recursive package `prebuild` hooks and run TypeScript via `pnpm exec` so workspace builds resolve correctly on Windows.
+
+## 1.15.1
+
+### Patch Changes
+
+- [#461](https://github.com/louistrue/ifc-lite/pull/461) [`6ce40dd`](https://github.com/louistrue/ifc-lite/commit/6ce40ddb0cace5f83c2438d2d4c4bd47703468f7) Thanks [@louistrue](https://github.com/louistrue)! - Clean up package build health for georeferencing work by fixing parser generation issues, making export tests resolve workspace packages reliably, removing build scripts that masked TypeScript failures, tightening workspace test/build scripts, productizing CLI LOD generation, centralizing IFC GUID utilities in encoding, and adding mutation test coverage for property editing flows.
+
+## 1.15.0
+
+### Minor Changes
+
+- [#354](https://github.com/louistrue/ifc-lite/pull/354) [`3f212f1`](https://github.com/louistrue/ifc-lite/commit/3f212f1e24b896cbc6ff63444c02635a1128ba3f) Thanks [@louistrue](https://github.com/louistrue)! - Replace hardcoded IFC schema with codegen from EXPRESS schema, adding full type entity support (776 entities)
+
+## 1.14.3
+
+## 1.14.2
+
+## 1.14.1
+
+## 1.14.0
+
+## 1.13.0
+
+## 1.12.0
+
+## 1.11.3
+
+## 1.11.1
+
+## 1.11.0
+
+## 1.10.0
+
+## 1.9.0
+
+## 1.8.0
+
+## 1.7.0
+
+## 1.2.1
+
+### Patch Changes
+
+- Version sync with @ifc-lite packages

@@ -1,0 +1,605 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * GLB (binary glTF) parser for loading pre-cached geometry
+ *
+ * Complements the GLTFExporter by enabling round-trip workflows:
+ * IFC -> GLB (export) -> GLB -> MeshData (import)
+ */
+
+import type { MeshData } from '@ifc-lite/geometry';
+import { safeUtf8Decode } from '@ifc-lite/data';
+
+// glTF 2.0 constants
+const GLB_MAGIC = 0x46546c67; // 'glTF'
+const GLB_VERSION = 2;
+const CHUNK_TYPE_JSON = 0x4e4f534a; // 'JSON'
+const CHUNK_TYPE_BIN = 0x004e4942; // 'BIN\0'
+
+// Component types
+const COMPONENT_BYTE = 5120;
+const COMPONENT_UNSIGNED_BYTE = 5121;
+const COMPONENT_SHORT = 5122;
+const COMPONENT_UNSIGNED_SHORT = 5123;
+const COMPONENT_UNSIGNED_INT = 5125;
+const COMPONENT_FLOAT = 5126;
+
+/** Parsed GLB structure */
+export interface ParsedGLB {
+  json: GLTFDocument;
+  bin: Uint8Array | null;
+}
+
+/** Mapping from IFC express ID to GLB node/mesh indices */
+export interface GLBMapping {
+  expressIdToNode: Map<number, number>;
+  expressIdToMesh: Map<number, number>;
+  nodeToExpressId: Map<number, number>;
+}
+
+// Minimal glTF type definitions for parsing
+interface GLTFDocument {
+  asset: { version: string; generator?: string };
+  scene?: number;
+  scenes?: Array<{ nodes?: number[] }>;
+  nodes?: GLTFNode[];
+  meshes?: GLTFMesh[];
+  materials?: GLTFMaterial[];
+  accessors?: GLTFAccessor[];
+  bufferViews?: GLTFBufferView[];
+  buffers?: GLTFBuffer[];
+}
+
+interface GLTFNode {
+  mesh?: number;
+  name?: string;
+  extras?: { expressId?: number };
+  children?: number[];
+  /** Node-local translation (xyz). The from-meshes exporter places all geometry
+   *  under a single translated root node, so this is composed down the hierarchy. */
+  translation?: number[];
+  /** Node-local column-major 4x4 (glTF convention). The from-bytes instanced
+   *  exporter places each shared-template occurrence with a node MATRIX (rotation +
+   *  translation); mutually exclusive with `translation` per the glTF spec. */
+  matrix?: number[];
+}
+
+interface GLTFMesh {
+  primitives: GLTFPrimitive[];
+  name?: string;
+}
+
+interface GLTFPrimitive {
+  attributes: {
+    POSITION: number;
+    NORMAL?: number;
+  };
+  indices?: number;
+  mode?: number;
+  material?: number;
+}
+
+interface GLTFMaterial {
+  pbrMetallicRoughness?: {
+    baseColorFactor?: [number, number, number, number] | number[];
+  };
+  alphaMode?: 'OPAQUE' | 'MASK' | 'BLEND';
+}
+
+interface GLTFAccessor {
+  bufferView: number;
+  byteOffset?: number;
+  componentType: number;
+  count: number;
+  type: 'SCALAR' | 'VEC2' | 'VEC3' | 'VEC4' | 'MAT2' | 'MAT3' | 'MAT4';
+  min?: number[];
+  max?: number[];
+}
+
+interface GLTFBufferView {
+  buffer: number;
+  byteOffset?: number;
+  byteLength: number;
+  byteStride?: number;
+  target?: number;
+}
+
+interface GLTFBuffer {
+  byteLength: number;
+  uri?: string;
+}
+
+/**
+ * Parse a GLB (binary glTF) file
+ *
+ * @param data - The GLB file as a Uint8Array
+ * @returns Parsed GLB with JSON document and binary buffer
+ * @throws Error if the GLB format is invalid
+ */
+export function parseGLB(data: Uint8Array): ParsedGLB {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+  // Validate header (12 bytes)
+  if (data.byteLength < 12) {
+    throw new Error('GLB file too small for header');
+  }
+
+  const magic = view.getUint32(0, true);
+  if (magic !== GLB_MAGIC) {
+    throw new Error(`Invalid GLB magic: expected 0x${GLB_MAGIC.toString(16)}, got 0x${magic.toString(16)}`);
+  }
+
+  const version = view.getUint32(4, true);
+  if (version !== GLB_VERSION) {
+    throw new Error(`Unsupported GLB version: ${version}`);
+  }
+
+  const totalLength = view.getUint32(8, true);
+  if (totalLength > data.byteLength) {
+    throw new Error(`GLB declared length ${totalLength} exceeds data length ${data.byteLength}`);
+  }
+
+  // Parse chunks
+  let offset = 12;
+  let json: GLTFDocument | null = null;
+  let bin: Uint8Array | null = null;
+
+  while (offset < totalLength) {
+    if (offset + 8 > totalLength) {
+      throw new Error('Incomplete chunk header');
+    }
+
+    const chunkLength = view.getUint32(offset, true);
+    const chunkType = view.getUint32(offset + 4, true);
+    offset += 8;
+
+    if (offset + chunkLength > totalLength) {
+      throw new Error('Chunk extends beyond file');
+    }
+
+    if (chunkType === CHUNK_TYPE_JSON) {
+      // Decode SAB-safe: the viewer streams large imports (>= 256 MB) into a
+      // SharedArrayBuffer (acquireFileBuffer), and `TextDecoder.decode` rejects any
+      // SharedArrayBuffer-backed view (a Spectre mitigation) with "...can't be a
+      // SharedArrayBuffer...". safeUtf8Decode copies the JSON chunk into a private
+      // (non-shared) scratch buffer on the SAB path, so re-importing a large GLB no
+      // longer throws. Only the small JSON chunk is copied; BIN stays zero-copy.
+      const jsonString = safeUtf8Decode(data, offset, offset + chunkLength);
+      json = JSON.parse(jsonString) as GLTFDocument;
+    } else if (chunkType === CHUNK_TYPE_BIN) {
+      bin = data.slice(offset, offset + chunkLength);
+    }
+
+    offset += chunkLength;
+  }
+
+  if (!json) {
+    throw new Error('GLB missing JSON chunk');
+  }
+
+  return { json, bin };
+}
+
+/**
+ * Extract mapping between IFC express IDs and GLB node/mesh indices
+ *
+ * This relies on the extras.expressId property set during export.
+ *
+ * @param gltf - Parsed glTF document
+ * @returns Mapping between express IDs and node/mesh indices
+ */
+export function extractGLBMapping(gltf: GLTFDocument): GLBMapping {
+  const expressIdToNode = new Map<number, number>();
+  const expressIdToMesh = new Map<number, number>();
+  const nodeToExpressId = new Map<number, number>();
+
+  if (!gltf.nodes) {
+    return { expressIdToNode, expressIdToMesh, nodeToExpressId };
+  }
+
+  for (let nodeIdx = 0; nodeIdx < gltf.nodes.length; nodeIdx++) {
+    const node = gltf.nodes[nodeIdx];
+    const expressId = node.extras?.expressId;
+
+    if (expressId !== undefined) {
+      expressIdToNode.set(expressId, nodeIdx);
+      nodeToExpressId.set(nodeIdx, expressId);
+
+      if (node.mesh !== undefined) {
+        expressIdToMesh.set(expressId, node.mesh);
+      }
+    }
+  }
+
+  return { expressIdToNode, expressIdToMesh, nodeToExpressId };
+}
+
+/**
+ * Get the byte size for a glTF component type
+ */
+function getComponentSize(componentType: number): number {
+  switch (componentType) {
+    case COMPONENT_BYTE:
+    case COMPONENT_UNSIGNED_BYTE:
+      return 1;
+    case COMPONENT_SHORT:
+    case COMPONENT_UNSIGNED_SHORT:
+      return 2;
+    case COMPONENT_UNSIGNED_INT:
+    case COMPONENT_FLOAT:
+      return 4;
+    default:
+      throw new Error(`Unknown component type: ${componentType}`);
+  }
+}
+
+/**
+ * Get the number of components for an accessor type
+ */
+function getComponentCount(type: string): number {
+  switch (type) {
+    case 'SCALAR':
+      return 1;
+    case 'VEC2':
+      return 2;
+    case 'VEC3':
+      return 3;
+    case 'VEC4':
+      return 4;
+    case 'MAT2':
+      return 4;
+    case 'MAT3':
+      return 9;
+    case 'MAT4':
+      return 16;
+    default:
+      throw new Error(`Unknown accessor type: ${type}`);
+  }
+}
+
+/**
+ * Read accessor data as a typed array
+ */
+function readAccessorData(
+  gltf: GLTFDocument,
+  bin: Uint8Array,
+  accessorIdx: number
+): Float32Array | Uint32Array | Uint16Array | Uint8Array {
+  const accessor = gltf.accessors?.[accessorIdx];
+  if (!accessor) {
+    throw new Error(`Accessor ${accessorIdx} not found`);
+  }
+
+  const bufferView = gltf.bufferViews?.[accessor.bufferView];
+  if (!bufferView) {
+    throw new Error(`BufferView ${accessor.bufferView} not found`);
+  }
+
+  const componentSize = getComponentSize(accessor.componentType);
+  const componentCount = getComponentCount(accessor.type);
+  const elementSize = componentSize * componentCount;
+  const byteStride = bufferView.byteStride ?? elementSize;
+
+  const bufferOffset = (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+
+  // `accessor.count` comes straight from the (untrusted) GLB JSON chunk and
+  // is REQUIRED by the glTF spec, but nothing here enforced that at runtime:
+  // a missing/non-numeric `count` makes it `undefined`/NaN, and `NaN * x` is
+  // NaN. Every arithmetic bounds comparison below (`< 0`, `> bin.byteLength`)
+  // is false against NaN, so the bounds check was silently bypassed rather
+  // than rejecting the malformed accessor. Control then fell through to a
+  // typed-array constructor built from that same NaN count, which coerces to
+  // an element count of 0 (ToIndex(NaN) === 0) — producing a silently EMPTY
+  // mesh reported as a successful import instead of throwing.
+  if (!Number.isInteger(accessor.count) || accessor.count < 0) {
+    throw new Error(`GLB: accessor ${accessorIdx} has an invalid count: ${accessor.count}`);
+  }
+
+  // Bounds-check the full byte range this accessor claims against the actual
+  // BIN chunk BEFORE slicing/constructing anything. `accessor.count` /
+  // `byteOffset` come straight from the (untrusted) GLB JSON chunk; without
+  // this, `bin.slice()` below silently CLAMPS on a truncated/malformed BIN
+  // (fewer bytes than asked), and the typed-array constructor that follows
+  // still requests the ORIGINALLY declared element count against that
+  // shorter buffer — a raw `RangeError: Invalid typed array length` (or
+  // "range consisting of offset and length are out of bounds", depending on
+  // engine) escapes instead of a diagnosable domain error.
+  const neededBytes = byteStride === elementSize
+    ? accessor.count * elementSize
+    : accessor.count > 0
+      ? (accessor.count - 1) * byteStride + elementSize
+      : 0;
+  if (bufferOffset < 0 || neededBytes < 0 || bufferOffset + neededBytes > bin.byteLength) {
+    throw new Error(
+      `GLB: accessor ${accessorIdx} reads bytes [${bufferOffset}, ${bufferOffset + neededBytes}) ` +
+      `but the BIN chunk is only ${bin.byteLength} bytes`,
+    );
+  }
+
+  // If data is tightly packed, we can use a view directly
+  if (byteStride === elementSize) {
+    const byteLength = accessor.count * elementSize;
+    const slice = bin.slice(bufferOffset, bufferOffset + byteLength);
+
+    switch (accessor.componentType) {
+      case COMPONENT_FLOAT:
+        return new Float32Array(slice.buffer, slice.byteOffset, accessor.count * componentCount);
+      case COMPONENT_UNSIGNED_INT:
+        return new Uint32Array(slice.buffer, slice.byteOffset, accessor.count * componentCount);
+      case COMPONENT_UNSIGNED_SHORT:
+        return new Uint16Array(slice.buffer, slice.byteOffset, accessor.count * componentCount);
+      case COMPONENT_UNSIGNED_BYTE:
+        return slice;
+      default:
+        throw new Error(`Unsupported component type for reading: ${accessor.componentType}`);
+    }
+  }
+
+  // Handle strided data
+  const result =
+    accessor.componentType === COMPONENT_FLOAT
+      ? new Float32Array(accessor.count * componentCount)
+      : accessor.componentType === COMPONENT_UNSIGNED_INT
+        ? new Uint32Array(accessor.count * componentCount)
+        : accessor.componentType === COMPONENT_UNSIGNED_SHORT
+          ? new Uint16Array(accessor.count * componentCount)
+          : new Uint8Array(accessor.count * componentCount);
+
+  const dataView = new DataView(bin.buffer, bin.byteOffset, bin.byteLength);
+
+  for (let i = 0; i < accessor.count; i++) {
+    const elementOffset = bufferOffset + i * byteStride;
+    for (let c = 0; c < componentCount; c++) {
+      const byteOffset = elementOffset + c * componentSize;
+      let value: number;
+
+      switch (accessor.componentType) {
+        case COMPONENT_FLOAT:
+          value = dataView.getFloat32(byteOffset, true);
+          break;
+        case COMPONENT_UNSIGNED_INT:
+          value = dataView.getUint32(byteOffset, true);
+          break;
+        case COMPONENT_UNSIGNED_SHORT:
+          value = dataView.getUint16(byteOffset, true);
+          break;
+        case COMPONENT_UNSIGNED_BYTE:
+          value = dataView.getUint8(byteOffset);
+          break;
+        default:
+          throw new Error(`Unsupported component type: ${accessor.componentType}`);
+      }
+
+      result[i * componentCount + c] = value;
+    }
+  }
+
+  return result;
+}
+
+/** Column-major 4x4 (glTF node-transform convention). */
+type Mat4 = number[];
+
+const MAT4_IDENTITY: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** Column-major 4x4 multiply `a * b`. */
+function mat4Mul(a: Mat4, b: Mat4): Mat4 {
+  const out = new Array<number>(16);
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + row] * b[col * 4 + k];
+      out[col * 4 + row] = s;
+    }
+  }
+  return out;
+}
+
+/** A node's local transform: its `matrix` (column-major) or a translation matrix. */
+function nodeLocalMat4(nd: GLTFNode): Mat4 {
+  if (Array.isArray(nd.matrix) && nd.matrix.length === 16) return nd.matrix;
+  const t = nd.translation;
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, t?.[0] ?? 0, t?.[1] ?? 0, t?.[2] ?? 0, 1];
+}
+
+/** True when a 4x4's upper-left 3x3 is the identity (within epsilon) — i.e. the
+ *  node carries pure translation, so vertices need no rotation/scale baking. */
+function linearIsIdentity(m: Mat4): boolean {
+  const e = 1e-6;
+  return (
+    Math.abs(m[0] - 1) < e && Math.abs(m[1]) < e && Math.abs(m[2]) < e &&
+    Math.abs(m[4]) < e && Math.abs(m[5] - 1) < e && Math.abs(m[6]) < e &&
+    Math.abs(m[8]) < e && Math.abs(m[9]) < e && Math.abs(m[10] - 1) < e
+  );
+}
+
+/**
+ * Parse GLB geometry into MeshData format
+ *
+ * @param gltf - Parsed glTF document
+ * @param bin - Binary buffer from GLB
+ * @returns Array of MeshData objects
+ */
+export function parseGLBToMeshData(gltf: GLTFDocument, bin: Uint8Array): MeshData[] {
+  const meshes: MeshData[] = [];
+  const mapping = extractGLBMapping(gltf);
+
+  if (!gltf.nodes || !gltf.meshes) {
+    return meshes;
+  }
+
+  // Compose each node's world transform down the hierarchy as a column-major 4x4.
+  // The exporter parents every element node under one translated root (placement
+  // rides that root; vertices are scene-centre-relative). The from-meshes path uses
+  // pure node TRANSLATIONS; the from-bytes INSTANCED path places each shared-template
+  // occurrence with a node MATRIX (rotation + translation). We compose the full 4x4
+  // so both round-trip: the translation rides each mesh as `MeshData.origin` (kept
+  // out of the f32 buffer for georef precision) and any rotation/scale is baked into
+  // the small, local imported vertices below.
+  const nodeWorldM = new Map<number, Mat4>();
+  {
+    const seen = new Set<number>();
+    const roots = gltf.scenes?.[gltf.scene ?? 0]?.nodes ?? gltf.nodes.map((_, i) => i);
+    const walk = (idx: number, parent: Mat4): void => {
+      const nd = gltf.nodes?.[idx];
+      if (!nd || seen.has(idx)) return; // guard against malformed cycles
+      seen.add(idx);
+      const world = mat4Mul(parent, nodeLocalMat4(nd));
+      nodeWorldM.set(idx, world);
+      for (const c of nd.children ?? []) walk(c, world);
+    };
+    for (const r of roots) walk(r, MAT4_IDENTITY);
+    // Extraction below iterates ALL nodes, not just scene-reachable ones. Walk any
+    // node the scene roots didn't reach (disconnected components) as its own root so
+    // every mesh node gets a composed transform — never silently emitted in local space.
+    for (let i = 0; i < gltf.nodes.length; i++) {
+      if (!seen.has(i)) walk(i, MAT4_IDENTITY);
+    }
+  }
+
+  const DEFAULT_COLOR: [number, number, number, number] = [0.8, 0.8, 0.8, 1.0];
+
+  const resolveMaterialColor = (
+    materialIdx: number | undefined,
+  ): [number, number, number, number] => {
+    if (materialIdx === undefined) return [...DEFAULT_COLOR];
+    const material = gltf.materials?.[materialIdx];
+    const factor = material?.pbrMetallicRoughness?.baseColorFactor;
+    if (!Array.isArray(factor) || factor.length < 3) return [...DEFAULT_COLOR];
+    const r = factor[0], g = factor[1], b = factor[2];
+    const a = factor.length >= 4 ? factor[3] : 1.0;
+    if (
+      typeof r !== 'number' || !Number.isFinite(r) ||
+      typeof g !== 'number' || !Number.isFinite(g) ||
+      typeof b !== 'number' || !Number.isFinite(b) ||
+      typeof a !== 'number' || !Number.isFinite(a)
+    ) {
+      return [...DEFAULT_COLOR];
+    }
+    return [r, g, b, a];
+  };
+
+  for (let nodeIdx = 0; nodeIdx < gltf.nodes.length; nodeIdx++) {
+    const node = gltf.nodes[nodeIdx];
+    if (node.mesh === undefined) continue;
+
+    const mesh = gltf.meshes[node.mesh];
+    if (!mesh || !mesh.primitives.length) continue;
+
+    const expressId = mapping.nodeToExpressId.get(nodeIdx) ?? nodeIdx;
+
+    // Process each primitive (typically one per mesh from our exporter)
+    for (const primitive of mesh.primitives) {
+      // Skip non-triangle primitives (mode 4 = TRIANGLES, undefined defaults to TRIANGULAR)
+      if (primitive.mode !== undefined && primitive.mode !== 4) {
+        continue;
+      }
+
+      const posAccessorIdx = primitive.attributes.POSITION;
+      const normAccessorIdx = primitive.attributes.NORMAL;
+      const idxAccessorIdx = primitive.indices;
+
+      if (posAccessorIdx === undefined) continue;
+
+      // Read position data
+      const positions = readAccessorData(gltf, bin, posAccessorIdx);
+      if (!(positions instanceof Float32Array)) {
+        throw new Error('Position data must be Float32');
+      }
+
+      // Read normal data (optional, generate if missing)
+      let normals: Float32Array;
+      if (normAccessorIdx !== undefined) {
+        const normData = readAccessorData(gltf, bin, normAccessorIdx);
+        if (!(normData instanceof Float32Array)) {
+          throw new Error('Normal data must be Float32');
+        }
+        normals = normData;
+      } else {
+        // Generate flat normals if none provided
+        normals = new Float32Array(positions.length);
+      }
+
+      // Read index data (optional for non-indexed geometry)
+      let indices: Uint32Array;
+      if (idxAccessorIdx !== undefined) {
+        const idxData = readAccessorData(gltf, bin, idxAccessorIdx);
+        if (idxData instanceof Float32Array) {
+          throw new Error('Index data cannot be Float32');
+        }
+        // Convert to Uint32Array if needed
+        indices =
+          idxData instanceof Uint32Array ? idxData : new Uint32Array(idxData);
+      } else {
+        // Non-indexed: generate sequential indices
+        indices = new Uint32Array(positions.length / 3);
+        for (let i = 0; i < indices.length; i++) {
+          indices[i] = i;
+        }
+      }
+
+      // Apply the node's composed world transform. The TRANSLATION rides each mesh
+      // as `MeshData.origin` (world = origin + position) and is kept OUT of the f32
+      // vertex buffer: the exporter emits scene-centre-relative vertices precisely so
+      // a georeferenced placement (~1e6 m) does not re-snap every vertex to a ~0.5 m
+      // grid (the #1446 round-trip corruption); the renderer folds `origin` (#1114).
+      // Any ROTATION/SCALE (a from-bytes instanced occurrence's node MATRIX) is baked
+      // into the small, local vertices + normals here — MeshData has a translation
+      // origin channel but no rotation channel, so honoring the matrix means rotating
+      // the imported geometry, which stays f32-precise because the vertices are local.
+      const m = nodeWorldM.get(nodeIdx) ?? MAT4_IDENTITY;
+      const t: [number, number, number] = [m[12], m[13], m[14]];
+      let outPositions = positions;
+      let outNormals = normals;
+      if (!linearIsIdentity(m)) {
+        outPositions = new Float32Array(positions.length);
+        for (let i = 0; i + 2 < positions.length; i += 3) {
+          const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+          outPositions[i] = m[0] * x + m[4] * y + m[8] * z;
+          outPositions[i + 1] = m[1] * x + m[5] * y + m[9] * z;
+          outPositions[i + 2] = m[2] * x + m[6] * y + m[10] * z;
+        }
+        outNormals = new Float32Array(normals.length);
+        for (let i = 0; i + 2 < normals.length; i += 3) {
+          const x = normals[i], y = normals[i + 1], z = normals[i + 2];
+          const nx = m[0] * x + m[4] * y + m[8] * z;
+          const ny = m[1] * x + m[5] * y + m[9] * z;
+          const nz = m[2] * x + m[6] * y + m[10] * z;
+          const len = Math.hypot(nx, ny, nz) || 1;
+          outNormals[i] = nx / len;
+          outNormals[i + 1] = ny / len;
+          outNormals[i + 2] = nz / len;
+        }
+      }
+      const origin: [number, number, number] | undefined =
+        t[0] !== 0 || t[1] !== 0 || t[2] !== 0 ? t : undefined;
+
+      meshes.push({
+        expressId,
+        positions: outPositions,
+        normals: outNormals,
+        indices,
+        color: resolveMaterialColor(primitive.material),
+        ...(origin ? { origin } : {}),
+      });
+    }
+  }
+
+  return meshes;
+}
+
+/**
+ * Convenience function to parse GLB directly to MeshData
+ *
+ * @param data - GLB file as Uint8Array
+ * @returns Array of MeshData objects
+ */
+export function loadGLBToMeshData(data: Uint8Array): MeshData[] {
+  const { json, bin } = parseGLB(data);
+  if (!bin) {
+    throw new Error('GLB has no binary buffer');
+  }
+  return parseGLBToMeshData(json, bin);
+}

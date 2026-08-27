@@ -1,0 +1,875 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Core types for @ifc-lite/sdk
+ *
+ * These types define the public API surface of the SDK.
+ * External tools (ifc-scripts, ifc-flow) depend on these types.
+ */
+
+import type {
+  GenerateSpacesAllOptions,
+  GenerateSpacesAllResult,
+  StoreyInfo,
+  ApplyStyleOptions,
+  ApplyStyleResult,
+  SurfaceStyleColor,
+} from '@ifc-lite/create';
+
+// ============================================================================
+// Entity References
+// ============================================================================
+
+/** Reference to a specific entity within a federated model set */
+export interface EntityRef {
+  modelId: string;
+  expressId: number;
+}
+
+/** Serialized entity ref for transport (e.g., "arch:42") */
+export type EntityRefString = string;
+
+/** NOTE: `apps/viewer/src/store/types.ts` carries a second implementation of
+ *  `entityRefToString`/`stringToEntityRef` with a SENTINEL contract
+ *  (`{ modelId: '', expressId: -1 }`) and a FIRST-colon split. Deliberate,
+ *  not drift: the viewer decodes untrusted DOM/state strings on hot paths
+ *  and must not throw, whereas this is a published API where failing at the
+ *  corruption site is correct. Keep the two in step on *bugs*, not on
+ *  contract. */
+export function entityRefToString(ref: EntityRef): EntityRefString {
+  return `${ref.modelId}:${ref.expressId}`;
+}
+
+export function stringToEntityRef(s: EntityRefString): EntityRef {
+  // Split on the LAST colon: expressId is always purely numeric, so it
+  // never contains a colon itself, while modelId may (e.g. "proj:arch:5").
+  // Splitting on the first colon would misparse such modelIds.
+  const idx = s.lastIndexOf(':');
+  if (idx < 1) {
+    throw new Error(`Invalid EntityRefString: "${s}" — expected "modelId:expressId"`);
+  }
+  const idPart = s.slice(idx + 1);
+  // Reject empty/non-numeric expressId explicitly — Number('') is 0, which
+  // would otherwise silently decode a truncated ref like "arch:" to expressId 0.
+  if (!/^\d+$/.test(idPart)) {
+    throw new Error(`Invalid expressId in EntityRefString: "${s}"`);
+  }
+  const expressId = Number(idPart);
+  if (!Number.isFinite(expressId) || expressId < 0) {
+    throw new Error(`Invalid expressId in EntityRefString: "${s}"`);
+  }
+  return { modelId: s.slice(0, idx), expressId };
+}
+
+// ============================================================================
+// Model Types
+// ============================================================================
+
+export type SchemaVersion = 'IFC2X3' | 'IFC4' | 'IFC4X3' | 'IFC5';
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  /** Alias for schemaVersion — convenient for scripts and eval expressions. */
+  schema: SchemaVersion;
+  schemaVersion: SchemaVersion;
+  entityCount: number;
+  fileSize: number;
+  loadedAt: number;
+}
+
+export interface FileAttachmentInfo {
+  name: string;
+  type: string;
+  size: number;
+  rowCount?: number;
+  columns?: string[];
+  hasTextContent: boolean;
+}
+
+// ============================================================================
+// Entity Data (serializable — crosses sandbox/transport boundary)
+// ============================================================================
+
+export interface EntityData {
+  ref: EntityRef;
+  globalId: string;
+  name: string;
+  type: string;
+  description: string;
+  objectType: string;
+}
+
+export interface PropertySetData {
+  name: string;
+  globalId?: string;
+  properties: PropertyData[];
+}
+
+export interface PropertyData {
+  name: string;
+  type: number;
+  value: string | number | boolean | null;
+}
+
+export interface QuantitySetData {
+  name: string;
+  quantities: QuantityData[];
+}
+
+export interface QuantityData {
+  name: string;
+  type: number;
+  value: number;
+}
+
+export interface EntityAttributeData {
+  name: string;
+  value: string | number | boolean;
+}
+
+export interface ClassificationData {
+  system?: string;
+  identification?: string;
+  name?: string;
+  location?: string;
+  description?: string;
+  path?: string[];
+}
+
+export interface MaterialLayerData {
+  materialName?: string;
+  thickness?: number;
+  isVentilated?: boolean;
+  name?: string;
+  category?: string;
+}
+
+export interface MaterialProfileData {
+  materialName?: string;
+  name?: string;
+  category?: string;
+}
+
+export interface MaterialConstituentData {
+  materialName?: string;
+  name?: string;
+  fraction?: number;
+  category?: string;
+}
+
+export interface MaterialData {
+  type: 'Material' | 'MaterialLayerSet' | 'MaterialProfileSet' | 'MaterialConstituentSet' | 'MaterialList';
+  name?: string;
+  description?: string;
+  category?: string;
+  layers?: MaterialLayerData[];
+  profiles?: MaterialProfileData[];
+  constituents?: MaterialConstituentData[];
+  materials?: Array<{ name: string; category?: string }>;
+}
+
+export interface TypePropertiesData {
+  typeName: string;
+  typeId: number;
+  properties: PropertySetData[];
+}
+
+export interface DocumentData {
+  name?: string;
+  description?: string;
+  location?: string;
+  identification?: string;
+  purpose?: string;
+  intendedUse?: string;
+  revision?: string;
+  confidentiality?: string;
+}
+
+/**
+ * The related **objects** of an entity's structural relationships — never the
+ * `IfcRel*` entities themselves:
+ *
+ * - `voids` — the `IfcOpeningElement`s that void this element
+ *   (`IfcRelVoidsElement`, host → opening).
+ * - `fills` — the `IfcOpeningElement` this element fills
+ *   (`IfcRelFillsElement`, filler → opening).
+ * - `groups` — the `IfcZone` / `IfcGroup` / `IfcSystem` it is assigned to.
+ * - `connections` — the elements it is joined to.
+ *
+ * The field names are deliberately not EXPRESS names, and #2422 resolved to
+ * keep them. IFC's own names for these traversals (`HasOpenings`, `FillsVoids`,
+ * `HasAssignments`, `ConnectedTo` / `ConnectedFrom`) are INVERSE attributes
+ * holding the `IfcRel*` entity, which is not what these arrays contain — so
+ * "use the exact EXPRESS name" has no name to offer here. Renaming `voids` to
+ * `openings` is not a fix either: `voids` **and** `fills` both hold
+ * `IfcOpeningElement`s, and only the voids/fills pair — buildingSMART's own
+ * vocabulary for the two directions — tells them apart. Pinned by
+ * `packages/parser/test/relationship-field-semantics-2422.test.ts`.
+ */
+export interface EntityRelationshipsData {
+  voids: Array<{ id: number; name?: string; type: string }>;
+  fills: Array<{ id: number; name?: string; type: string }>;
+  groups: Array<{ id: number; name?: string }>;
+  connections: Array<{ id: number; name?: string; type: string }>;
+}
+
+// ============================================================================
+// Query Types
+// ============================================================================
+
+export type ComparisonOp = '=' | '!=' | '>' | '<' | '>=' | '<=' | 'contains' | 'exists';
+
+export interface QueryFilter {
+  psetName: string;
+  propName: string;
+  operator: ComparisonOp;
+  value?: string | number | boolean;
+}
+
+export interface QueryDescriptor {
+  modelId?: string;
+  types?: string[];
+  filters?: QueryFilter[];
+  limit?: number;
+  offset?: number;
+}
+
+// ============================================================================
+// Viewer Types
+// ============================================================================
+
+export type ProjectionMode = 'perspective' | 'orthographic';
+
+export interface CameraState {
+  mode: ProjectionMode;
+  position?: [number, number, number];
+  target?: [number, number, number];
+  up?: [number, number, number];
+}
+
+export interface SectionPlane {
+  axis: 'x' | 'y' | 'z';
+  position: number;
+  enabled: boolean;
+  flipped: boolean;
+}
+
+// ============================================================================
+// Spatial Types
+// ============================================================================
+
+export interface AABB {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+export interface SpatialPlane {
+  normal: [number, number, number];
+  distance: number;
+}
+
+export interface SpatialFrustum {
+  planes: SpatialPlane[];
+}
+
+// ============================================================================
+// Lens Types (re-export core types for SDK consumers)
+// ============================================================================
+
+import type { Lens, LensRule, LensCriteria, RGBAColor } from '@ifc-lite/lens';
+export type { Lens, LensRule, LensCriteria, RGBAColor };
+
+// ============================================================================
+// Mutation Types
+// ============================================================================
+
+export interface MutationRecord {
+  entityRef: EntityRef;
+  psetName: string;
+  propName: string;
+  oldValue: string | number | boolean | null;
+  newValue: string | number | boolean | null;
+  timestamp: number;
+}
+
+// ============================================================================
+// Event Types
+// ============================================================================
+
+export type BimEventType =
+  | 'selection:changed'
+  | 'visibility:changed'
+  | 'model:loaded'
+  | 'model:removed'
+  | 'mutation:changed'
+  | 'lens:changed';
+
+export type BimEventData = {
+  'selection:changed': { refs: EntityRef[] };
+  'visibility:changed': Record<string, never>;
+  'model:loaded': { model: ModelInfo };
+  'model:removed': { modelId: string };
+  'mutation:changed': { modelId: string; count: number };
+  'lens:changed': { lensId: string | null };
+};
+
+export type BimEventHandler<T extends BimEventType> = (data: BimEventData[T]) => void;
+
+// ============================================================================
+// Transport Protocol
+// ============================================================================
+
+export interface SdkRequest {
+  id: string;
+  namespace: string;
+  method: string;
+  args: unknown[];
+}
+
+export interface SdkResponse {
+  id: string;
+  result?: unknown;
+  error?: { message: string; stack?: string };
+}
+
+export interface SdkEvent {
+  type: BimEventType;
+  data: unknown;
+}
+
+// ============================================================================
+// Backend Namespace Interfaces (typed method contracts per adapter)
+// ============================================================================
+
+export interface ModelBackendMethods {
+  list(): ModelInfo[];
+  activeId(): string | null;
+  loadIfc(content: string, filename: string): void;
+}
+
+export interface QueryBackendMethods {
+  entities(descriptor: QueryDescriptor): EntityData[];
+  /**
+   * Entities matching the host's active advanced filter, or `null` when no
+   * filter is active (so callers can distinguish "no filter" from "filter with
+   * zero matches"). Host-specific; transport/headless backends may return null.
+   */
+  entitiesMatchingActiveFilter(): EntityData[] | null;
+  entityData(ref: EntityRef): EntityData | null;
+  attributes(ref: EntityRef): EntityAttributeData[];
+  properties(ref: EntityRef): PropertySetData[];
+  quantities(ref: EntityRef): QuantitySetData[];
+  classifications(ref: EntityRef): ClassificationData[];
+  materials(ref: EntityRef): MaterialData | null;
+  typeProperties(ref: EntityRef): TypePropertiesData | null;
+  documents(ref: EntityRef): DocumentData[];
+  relationships(ref: EntityRef): EntityRelationshipsData;
+  related(ref: EntityRef, relType: string, direction: 'forward' | 'inverse'): EntityRef[];
+}
+
+export interface SelectionBackendMethods {
+  get(): EntityRef[];
+  set(refs: EntityRef[]): void;
+}
+
+export interface VisibilityBackendMethods {
+  hide(refs: EntityRef[]): void;
+  show(refs: EntityRef[]): void;
+  isolate(refs: EntityRef[]): void;
+  reset(): void;
+}
+
+export interface ViewerBackendMethods {
+  colorize(refs: EntityRef[], color: RGBAColor): void;
+  colorizeAll(batches: Array<{ refs: EntityRef[]; color: RGBAColor }>): void;
+  resetColors(refs?: EntityRef[]): void;
+  flyTo(refs: EntityRef[]): void;
+  setSection(section: SectionPlane | null): void;
+  getSection(): SectionPlane | null;
+  setCamera(state: Partial<CameraState>): void;
+  getCamera(): CameraState;
+}
+
+export interface MutateBackendMethods {
+  setProperty(ref: EntityRef, psetName: string, propName: string, value: string | number | boolean): void;
+  setAttribute(ref: EntityRef, attrName: string, value: string): void;
+  deleteProperty(ref: EntityRef, psetName: string, propName: string): void;
+  batchBegin(label: string): void;
+  batchEnd(label: string): void;
+  undo(modelId: string): boolean;
+  redo(modelId: string): boolean;
+}
+
+/**
+ * Document-level edits — adding, removing, and editing positional STEP
+ * arguments on entities in a parsed `IfcDataStore`. Complements the
+ * property/attribute-level edits exposed by `MutateBackendMethods`.
+ *
+ * Implementations route into a per-model `MutablePropertyView` overlay so
+ * the underlying store buffer is never mutated; changes materialise on
+ * the next `bim.export.ifc()`.
+ */
+export interface AddColumnInStoreParams {
+  Position: [number, number, number];
+  Width: number;
+  Depth: number;
+  Height: number;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddWallInStoreParams {
+  Start: [number, number, number];
+  End: [number, number, number];
+  Thickness: number;
+  Height: number;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export type AddSlabInStoreParams = AddSlabRectangleParams | AddSlabPolygonParams;
+
+export interface AddSlabRectangleParams {
+  Position: [number, number, number];
+  Width: number;
+  Depth: number;
+  Thickness: number;
+  /** `'rectangle'` (or omit) selects the IfcRectangleProfileDef path. */
+  Profile?: 'rectangle';
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddSlabPolygonParams {
+  /** `'polygon'` selects the IfcArbitraryClosedProfileDef path. */
+  Profile: 'polygon';
+  /** Closed outline as 2D storey-local points (≥3). Auto-closed at emit time. */
+  OuterCurve: Array<[number, number]>;
+  /** Local placement origin (metres). Defaults to `[0, 0, 0]`. */
+  Position?: [number, number, number];
+  Thickness: number;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddBeamInStoreParams {
+  Start: [number, number, number];
+  End: [number, number, number];
+  Width: number;
+  Height: number;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddDoorInStoreParams {
+  Position: [number, number, number];
+  Width: number;
+  Height: number;
+  FrameThickness?: number;
+  PredefinedType?: 'DOOR' | 'GATE' | 'TRAPDOOR' | 'USERDEFINED' | 'NOTDEFINED';
+  OperationType?: string;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddWindowInStoreParams {
+  Position: [number, number, number];
+  Width: number;
+  Height: number;
+  FrameThickness?: number;
+  PredefinedType?: 'WINDOW' | 'SKYLIGHT' | 'LIGHTDOME' | 'USERDEFINED' | 'NOTDEFINED';
+  PartitioningType?: string;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export type AddSpaceInStoreParams = AddSpaceRectangleParams | AddSpacePolygonParams;
+
+export interface AddSpaceRectangleParams {
+  Position: [number, number, number];
+  Width: number;
+  Depth: number;
+  Height: number;
+  Profile?: 'rectangle';
+  Name?: string;
+  LongName?: string;
+  Description?: string;
+  ObjectType?: string;
+}
+
+export interface AddSpacePolygonParams {
+  Profile: 'polygon';
+  OuterCurve: Array<[number, number]>;
+  Position?: [number, number, number];
+  Height: number;
+  Name?: string;
+  LongName?: string;
+  Description?: string;
+  ObjectType?: string;
+}
+
+export type AddRoofInStoreParams = AddRoofRectangleParams | AddRoofPolygonParams;
+
+export interface AddRoofRectangleParams {
+  Position: [number, number, number];
+  Width: number;
+  Depth: number;
+  Thickness: number;
+  Profile?: 'rectangle';
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddRoofPolygonParams {
+  Profile: 'polygon';
+  OuterCurve: Array<[number, number]>;
+  Position?: [number, number, number];
+  Thickness: number;
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export type AddPlateInStoreParams = AddPlateRectangleParams | AddPlatePolygonParams;
+
+export interface AddPlateRectangleParams {
+  Position: [number, number, number];
+  Width: number;
+  Depth: number;
+  Thickness: number;
+  Profile?: 'rectangle';
+  PredefinedType?: 'CURTAIN_PANEL' | 'SHEET' | 'USERDEFINED' | 'NOTDEFINED';
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddPlatePolygonParams {
+  Profile: 'polygon';
+  OuterCurve: Array<[number, number]>;
+  Position?: [number, number, number];
+  Thickness: number;
+  PredefinedType?: 'CURTAIN_PANEL' | 'SHEET' | 'USERDEFINED' | 'NOTDEFINED';
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface AddMemberInStoreParams {
+  Start: [number, number, number];
+  End: [number, number, number];
+  Width: number;
+  Height: number;
+  PredefinedType?:
+    | 'BRACE' | 'CHORD' | 'COLLAR' | 'MEMBER' | 'MULLION' | 'PLATE'
+    | 'POST' | 'PURLIN' | 'RAFTER' | 'STRINGER' | 'STRUT' | 'STUD'
+    | 'USERDEFINED' | 'NOTDEFINED';
+  Name?: string;
+  Description?: string;
+  ObjectType?: string;
+  Tag?: string;
+}
+
+export interface StoreBackendMethods {
+  addEntity(modelId: string, def: { type: string; attributes: unknown[] }): EntityRef;
+  removeEntity(ref: EntityRef): boolean;
+  setPositionalAttribute(ref: EntityRef, index: number, value: unknown): void;
+  /**
+   * High-level builders: drop an element into an existing parsed model,
+   * anchored to a target IfcBuildingStorey. Each emits the full STEP
+   * sub-graph (placement → profile → solid → representation +
+   * IfcRelContainedInSpatialStructure / IfcRelAggregates for spaces)
+   * into the overlay so the element appears alongside the existing
+   * model on export.
+   */
+  addColumn(modelId: string, storeyExpressId: number, params: AddColumnInStoreParams): EntityRef;
+  addWall(modelId: string, storeyExpressId: number, params: AddWallInStoreParams): EntityRef;
+  addSlab(modelId: string, storeyExpressId: number, params: AddSlabInStoreParams): EntityRef;
+  addBeam(modelId: string, storeyExpressId: number, params: AddBeamInStoreParams): EntityRef;
+  addDoor(modelId: string, storeyExpressId: number, params: AddDoorInStoreParams): EntityRef;
+  addWindow(modelId: string, storeyExpressId: number, params: AddWindowInStoreParams): EntityRef;
+  addSpace(modelId: string, storeyExpressId: number, params: AddSpaceInStoreParams): EntityRef;
+  addRoof(modelId: string, storeyExpressId: number, params: AddRoofInStoreParams): EntityRef;
+  addPlate(modelId: string, storeyExpressId: number, params: AddPlateInStoreParams): EntityRef;
+  addMember(modelId: string, storeyExpressId: number, params: AddMemberInStoreParams): EntityRef;
+}
+
+export interface SpatialBackendMethods {
+  queryBounds(modelId: string, bounds: AABB): EntityRef[];
+  raycast(modelId: string, origin: [number, number, number], direction: [number, number, number]): EntityRef[];
+  queryFrustum(modelId: string, frustum: SpatialFrustum): EntityRef[];
+}
+
+export interface ExportBackendMethods {
+  csv(refs: unknown, options: unknown): string;
+  json(refs: unknown, columns: unknown): Record<string, unknown>[];
+  ifc(refs: unknown, options: unknown): string | Uint8Array;
+  download(content: string | Uint8Array, filename: string, mimeType: string): void;
+  /**
+   * Export the model's `IfcSpace` volumes as a Honeybee HBJSON energy/daylight model.
+   * Optional — present only on geometry-capable backends (CLI / browser, which carry the
+   * wasm engine); the data-only SDK never meshes, so it delegates here.
+   */
+  hbjson?(name?: string): Promise<string>;
+  /**
+   * Export the model's `IfcSpace` volumes as a Dragonfly DFJSON energy model (extruded
+   * `Room2D` plates). Optional — present only on geometry-capable backends.
+   */
+  dfjson?(name?: string): Promise<string>;
+}
+
+export interface LensBackendMethods {
+  presets(): unknown[];
+  create(config: unknown): unknown;
+  activate(lensId: string): void;
+  deactivate(): void;
+  getActive(): string | null;
+}
+
+export interface FilesBackendMethods {
+  list(): FileAttachmentInfo[];
+  text(name: string): string | null;
+  csv(name: string): Record<string, string>[] | null;
+  csvColumns(name: string): string[];
+}
+
+// ============================================================================
+// Schedule (4D) — IFC task, sequence, and work schedule extraction
+//
+// Shapes mirror `@ifc-lite/parser`'s `ScheduleExtraction` struct so the SDK
+// layer stays serializable across the sandbox/transport boundary without
+// pulling the parser into consumer bundles.
+// ============================================================================
+
+export type ScheduleSequenceType =
+  | 'START_START' | 'START_FINISH' | 'FINISH_START' | 'FINISH_FINISH'
+  | 'USERDEFINED' | 'NOTDEFINED';
+
+export type ScheduleTaskDurationType =
+  | 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED';
+
+export interface ScheduleTaskTimeData {
+  scheduleStart?: string;
+  scheduleFinish?: string;
+  scheduleDuration?: string;
+  actualStart?: string;
+  actualFinish?: string;
+  actualDuration?: string;
+  earlyStart?: string;
+  earlyFinish?: string;
+  lateStart?: string;
+  lateFinish?: string;
+  freeFloat?: string;
+  totalFloat?: string;
+  remainingTime?: string;
+  statusTime?: string;
+  durationType?: ScheduleTaskDurationType;
+  isCritical?: boolean;
+  completion?: number;
+}
+
+export interface ScheduleTaskData {
+  expressId: number;
+  globalId: string;
+  name: string;
+  description?: string;
+  objectType?: string;
+  identification?: string;
+  longDescription?: string;
+  status?: string;
+  workMethod?: string;
+  isMilestone: boolean;
+  priority?: number;
+  predefinedType?: string;
+  taskTime?: ScheduleTaskTimeData;
+  parentGlobalId?: string;
+  childGlobalIds: string[];
+  productExpressIds: number[];
+  productGlobalIds: string[];
+  controllingScheduleGlobalIds: string[];
+}
+
+export interface ScheduleSequenceData {
+  globalId: string;
+  relatingTaskGlobalId: string;
+  relatedTaskGlobalId: string;
+  sequenceType: ScheduleSequenceType;
+  userDefinedSequenceType?: string;
+  timeLagSeconds?: number;
+  timeLagDuration?: string;
+}
+
+export interface WorkScheduleData {
+  expressId: number;
+  globalId: string;
+  kind: 'WorkSchedule' | 'WorkPlan';
+  name: string;
+  description?: string;
+  identification?: string;
+  creationDate?: string;
+  purpose?: string;
+  duration?: string;
+  startTime?: string;
+  finishTime?: string;
+  predefinedType?: string;
+  taskGlobalIds: string[];
+}
+
+export interface ScheduleExtractionData {
+  workSchedules: WorkScheduleData[];
+  tasks: ScheduleTaskData[];
+  sequences: ScheduleSequenceData[];
+  hasSchedule: boolean;
+}
+
+export interface ScheduleBackendMethods {
+  /** Extract the full schedule graph from the active or specified model. */
+  data(modelId?: string): ScheduleExtractionData;
+  /** Convenience — just the task list. */
+  tasks(modelId?: string): ScheduleTaskData[];
+  /** Convenience — just the work schedules / work plans. */
+  workSchedules(modelId?: string): WorkScheduleData[];
+  /** Convenience — just the task dependency edges. */
+  sequences(modelId?: string): ScheduleSequenceData[];
+}
+
+// ============================================================================
+// Backend Interface (implemented by local store or remote proxy)
+// ============================================================================
+
+/**
+ * Abstraction over the viewer's internal state — SDK namespaces use this.
+ *
+ * Each namespace is a typed property with methods matching the adapter contract.
+ * SDK namespace classes call backend.query.entities(...) instead of dispatch().
+ *
+ * BimHost (wire protocol) uses dispatchToBackend() to route string-based
+ * SdkRequests to the typed namespace methods.
+ */
+/**
+ * Derive IfcSpace from a model's walls/slabs/roofs. Optional on the backend:
+ * local backends with direct store access implement it; remote backends (whose
+ * store lives server-side) leave it undefined.
+ */
+export interface SpacesBackendMethods {
+  /** Every IfcBuildingStorey (id, name, elevation), low → high. */
+  listStoreys(): StoreyInfo[];
+  /**
+   * Derive IfcSpace across the selected storeys, writing them to the backend's
+   * mutation overlay. Persist with `bim.export.toStep()`.
+   */
+  generate(options?: GenerateSpacesAllOptions): GenerateSpacesAllResult;
+}
+
+/**
+ * Colour products by writing presentation-style entities into the model, so the
+ * colour is in the exported IFC rather than in the current view. Optional on
+ * the backend for the same reason as {@link SpacesBackendMethods}: it needs
+ * direct store access, which a remote backend does not have.
+ *
+ * Distinct from `ViewerBackendMethods.colorize`, which paints the view and is
+ * gone on export.
+ */
+export interface StyleBackendMethods {
+  /**
+   * Give every representation item behind each batch one `IfcSurfaceStyle`,
+   * writing to the backend's mutation overlay. Persist with `bim.export.ifc()`.
+   *
+   * Batched rather than one call per colour because the "at most one
+   * IfcStyledItem per item" rule has to hold across the whole pass, and because
+   * the index of already-styled geometry is the expensive part to build.
+   */
+  applyColors(
+    batches: Array<{ refs: EntityRef[]; color: SurfaceStyleColor; name?: string }>,
+    options?: ApplyStyleOptions,
+  ): ApplyStyleResult[];
+}
+
+export interface BimBackend {
+  readonly model: ModelBackendMethods;
+  readonly query: QueryBackendMethods;
+  readonly selection: SelectionBackendMethods;
+  readonly visibility: VisibilityBackendMethods;
+  readonly viewer: ViewerBackendMethods;
+  readonly mutate: MutateBackendMethods;
+  readonly store: StoreBackendMethods;
+  readonly spatial: SpatialBackendMethods;
+  readonly export: ExportBackendMethods;
+  readonly lens: LensBackendMethods;
+  readonly files: FilesBackendMethods;
+  readonly schedule: ScheduleBackendMethods;
+  /** Space derivation — present only on local backends with store access. */
+  readonly spaces?: SpacesBackendMethods;
+  /** Persistent colouring — present only on local backends with store access. */
+  readonly style?: StyleBackendMethods;
+
+  /** Subscribe to viewer events */
+  subscribe(event: BimEventType, handler: (data: unknown) => void): () => void;
+}
+
+/**
+ * Route a string-based SdkRequest to the appropriate typed method on a BimBackend.
+ * Used by BimHost for wire protocol compatibility.
+ *
+ * Security: namespace/method come straight off the wire. Use `Object.hasOwn`
+ * lookups so an attacker can't reach prototype members (`__proto__`,
+ * `constructor`, `toString`, …) or methods inherited from a host class.
+ */
+export function dispatchToBackend(backend: BimBackend, namespace: string, method: string, args: unknown[]): unknown {
+  const backendObj = backend as unknown as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(backendObj, namespace)) {
+    throw new Error(`Unknown namespace '${namespace}'`);
+  }
+  const ns = backendObj[namespace] as Record<string, unknown> | null | undefined;
+  if (!ns || typeof ns !== 'object') {
+    throw new Error(`Unknown namespace '${namespace}'`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(ns, method)) {
+    throw new Error(`Unknown method '${namespace}.${method}'`);
+  }
+  const fn = ns[method];
+  if (typeof fn !== 'function') {
+    throw new Error(`Unknown method '${namespace}.${method}'`);
+  }
+  return (fn as (...a: unknown[]) => unknown).apply(ns, args);
+}
+
+// ============================================================================
+// SDK Context Options
+// ============================================================================
+
+export interface BimContextOptions {
+  /** Direct backend for local (embedded) mode */
+  backend?: BimBackend;
+
+  /** Transport for remote (connected) mode */
+  transport?: Transport;
+}
+
+export interface Transport {
+  send(request: SdkRequest): Promise<SdkResponse>;
+  subscribe(handler: (event: SdkEvent) => void): () => void;
+  close(): void;
+}

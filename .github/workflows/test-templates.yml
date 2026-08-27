@@ -1,0 +1,92 @@
+name: Test Templates
+
+on:
+  # push:main intentionally dropped — branch-protected PR runs validate
+  # the same SHA before merge.
+  pull_request:
+    paths:
+      - 'packages/create-ifc-lite/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-templates:
+    name: Scaffold & verify (${{ matrix.template }})
+    # Free GitHub-hosted runner. This job scaffolds a template, runs
+    # `npm install` + tsc + a vite/tsc build against PUBLISHED packages —
+    # no Rust/WASM compile and no cargo cache to preserve, so it never
+    # needed Depot's paid cores. A 6-way matrix on `depot-ubuntu-24.04-4`
+    # was billing 6 x 2x the base rate for pure JS work; `ubuntu-latest` is
+    # free + unlimited on a public repo. See scripts/README-vercel-cost.md.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - template: basic
+            check_command: npx tsc --noEmit
+            build_command: npm run build
+          - template: threejs
+            check_command: npx tsc --noEmit
+            build_command: npx vite build
+          - template: babylonjs
+            check_command: npx tsc --noEmit
+            build_command: npx vite build
+          - template: react
+            check_command: npx tsc --noEmit
+            build_command: npx vite build
+          - template: server
+            check_command: npm run typecheck
+            build_command: npm run build
+          - template: server-native
+            check_command: npm run typecheck
+            build_command: npm run build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: false
+          persist-credentials: false
+
+      - name: Setup pnpm
+        # v6 reads the version from the `packageManager` field in
+        # package.json (`pnpm@10.8.1`); specifying `with.version` here
+        # would conflict and the action errors with ERR_PNPM_BAD_PM_VERSION.
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install monorepo deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build create-ifc-lite
+        run: pnpm --filter create-ifc-lite build
+
+      - name: Scaffold ${{ matrix.template }} template
+        run: |
+          mkdir -p /tmp/scaffold
+          cd /tmp/scaffold
+          node $GITHUB_WORKSPACE/packages/create-ifc-lite/dist/index.js \
+            test-${{ matrix.template }} --template ${{ matrix.template }}
+
+      - name: Install template deps (npm, as a real user would)
+        run: npm install --prefer-offline
+        working-directory: /tmp/scaffold/test-${{ matrix.template }}
+
+      - name: Type-check template
+        run: ${{ matrix.check_command }}
+        working-directory: /tmp/scaffold/test-${{ matrix.template }}
+
+      - name: Build template
+        run: ${{ matrix.build_command }}
+        working-directory: /tmp/scaffold/test-${{ matrix.template }}

@@ -1,0 +1,15 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+  - 'examples/*'
+
+allowBuilds:
+  '@posthog/cli': set this to true or false
+  '@swc/core': set this to true or false
+  core-js: set this to true or false
+  esbuild: set this to true or false
+
+onlyBuiltDependencies:
+  - '@clerk/shared'
+  - '@swc/core'
+  - 'esbuild'

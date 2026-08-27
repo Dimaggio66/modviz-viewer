@@ -1,0 +1,49 @@
+{
+  "name": "@ifc-lite/codegen",
+  "version": "1.15.11",
+  "description": "TypeScript code generator from IFC EXPRESS schemas",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LTplus-AG/ifc-lite.git",
+    "directory": "packages/codegen"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "pnpm exec tsc",
+    "typecheck": "node ../../scripts/typecheck-tests.mjs",
+    "dev": "pnpm exec tsc --watch",
+    "test": "vitest run",
+    "generate": "node dist/cli.js",
+    "generate:ifc4": "node dist/cli.js schemas/IFC4_ADD2_TC1.exp -o generated/ifc4",
+    "generate:ifc4x3": "node dist/cli.js schemas/IFC4X3.exp -o generated/ifc4x3"
+  },
+  "keywords": [
+    "ifc",
+    "express",
+    "codegen",
+    "typescript"
+  ],
+  "author": "Louis True",
+  "license": "MPL-2.0",
+  "dependencies": {
+    "@ifc-lite/data": "workspace:^",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://ifclite.dev/docs/",
+  "bugs": "https://github.com/LTplus-AG/ifc-lite/issues",
+  "files": [
+    "dist",
+    "schemas",
+    "README.md"
+  ]
+}

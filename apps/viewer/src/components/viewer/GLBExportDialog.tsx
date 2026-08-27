@@ -1,0 +1,531 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Export Dialog for GLB (binary glTF) export.
+ *
+ * v1 surface: model picker (single-model only — merged export deferred),
+ * colour source (Rendering vs Shading), visible-only filter, include
+ * metadata toggle. Other knobs Dion flagged (PBR reflectance, embed-
+ * transparency, default material picker, coordinate origin, apply
+ * mutations) are intentionally absent here and tracked separately.
+ */
+
+import { useState, useCallback, useMemo, useEffect } from 'react';
+import { Download, AlertCircle, Check, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { Badge } from '@/components/ui/badge';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog';
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from '@/components/ui/alert';
+import { useViewerStore } from '@/store';
+import { buildHiddenIfcTypes } from '@/store/typeVisibilityFilter';
+import { posthog } from '@/lib/analytics';
+import { toast } from '@/components/ui/toast';
+import { GeometryProcessor, isNoRenderGeometryError, type MeshData } from '@ifc-lite/geometry';
+import { GEOM_CLASS_INSTANCED_TYPE } from '@ifc-lite/geometry/geometry-class';
+import { classifyLoadError } from '@/lib/load-errors';
+import { formatLoadError } from '@/lib/load-error-message';
+import { exportGlbFromGeometry } from '@/lib/export/glb';
+import { downloadBlob, sanitizeFilename } from '@/lib/export/download';
+import { withInstancedMeshes } from '../../utils/instancedExport.js';
+
+type ColorSource = 'rendering' | 'shading';
+
+interface GLBExportDialogProps {
+  trigger?: React.ReactNode;
+}
+
+export function GLBExportDialog({ trigger }: GLBExportDialogProps) {
+  const models = useViewerStore((s) => s.models);
+  const hiddenEntities = useViewerStore((s) => s.hiddenEntities);
+  const isolatedEntities = useViewerStore((s) => s.isolatedEntities);
+  const hiddenEntitiesByModel = useViewerStore((s) => s.hiddenEntitiesByModel);
+  const isolatedEntitiesByModel = useViewerStore((s) => s.isolatedEntitiesByModel);
+  // Class-level visibility (IfcSpace / IfcOpeningElement / IfcSite) — these
+  // are off by default and live OUTSIDE the per-entity hidden set, so a
+  // visible-only export that only checks `hiddenEntities` would still ship
+  // openings the user never rendered (issue surfaced on the Revit door
+  // fixture where IfcOpeningElement #2438 leaked through).
+  const typeVisibility = useViewerStore((s) => s.typeVisibility);
+  // Legacy single-model fallback so this dialog works before any
+  // FederatedModel is registered (the common case for v1 users). Only
+  // the geometryResult is needed — GLB export doesn't read the parsed
+  // STEP store.
+  const legacyGeometryResult = useViewerStore((s) => s.geometryResult);
+  // Merge-layers suppresses multilayer-wall part meshes at load time (#540);
+  // the from-bytes exporter re-meshes with defaults and would resurrect them,
+  // exporting different model content than the user loaded.
+  const mergeLayers = useViewerStore((s) => s.mergeLayers);
+
+  const [open, setOpen] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [colorSource, setColorSource] = useState<ColorSource>('rendering');
+  const [visibleOnly, setVisibleOnly] = useState(false);
+  const [includeMetadata, setIncludeMetadata] = useState(true);
+  // Lit materials shade from normals in external viewers; unlit (#1321) renders
+  // the flat apparent base colour. Default lit — most users expect shading.
+  const [lit, setLit] = useState(true);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportResult, setExportResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Model list: federated models first, falling back to the legacy single
+  // model when nothing is registered. Mirrors ExportDialog.
+  const modelList = useMemo(() => {
+    const list = Array.from(models.values()).map((m) => ({
+      id: m.id,
+      name: m.name,
+      geometryResult: m.geometryResult,
+    }));
+
+    if (list.length === 0 && legacyGeometryResult) {
+      list.push({
+        id: '__legacy__',
+        name: 'Current Model',
+        geometryResult: legacyGeometryResult,
+      });
+    }
+
+    return list;
+  }, [models, legacyGeometryResult]);
+
+  // Default to the first model in the list whenever the menu opens.
+  useEffect(() => {
+    if (modelList.length > 0 && !selectedModelId) {
+      setSelectedModelId(modelList[0].id);
+    }
+  }, [modelList, selectedModelId]);
+
+  const selectedModel = useMemo(() => {
+    if (selectedModelId === '__legacy__' && legacyGeometryResult) {
+      return {
+        id: '__legacy__',
+        name: 'Current Model',
+        geometryResult: legacyGeometryResult,
+      };
+    }
+    return modelList.find((m) => m.id === selectedModelId);
+  }, [modelList, selectedModelId, legacyGeometryResult]);
+
+  /**
+   * Build the hidden / isolation sets in **global** ID space.
+   *
+   * `MeshData.expressId` carries the federated global ID (`local +
+   * idOffset`, see `store/types.ts:365`), and the legacy / global store
+   * sets (`hiddenEntities`, `isolatedEntities`) are also global —
+   * `basketVisibleSet.ts:405-412` is the canonical reference for which
+   * set lives in which space. Only the per-model `*ByModel` Maps store
+   * raw local IDs, so those need an offset added before they can match
+   * a mesh expressId. This is the opposite shape from the STEP exporter
+   * (which works in local entity space), so don't reuse ExportDialog's
+   * helpers here.
+   */
+  const getGlobalHiddenIds = useCallback((modelId: string): Set<number> => {
+    if (modelId === '__legacy__') return hiddenEntities;
+
+    const model = models.get(modelId);
+    if (!model) return new Set();
+    const offset = model.idOffset ?? 0;
+
+    const out = new Set<number>();
+    // Global IDs from the legacy / global store — already global, just
+    // restrict to this model's range so we don't carry over hidden IDs
+    // that belong to sibling federated models.
+    for (const globalId of hiddenEntities) {
+      const localId = globalId - offset;
+      if (localId > 0 && localId <= model.maxExpressId) {
+        out.add(globalId);
+      }
+    }
+    // Per-model entries are LOCAL IDs — convert to global.
+    const modelHidden = hiddenEntitiesByModel.get(modelId);
+    if (modelHidden) {
+      for (const localId of modelHidden) {
+        out.add(localId + offset);
+      }
+    }
+    return out;
+  }, [models, hiddenEntities, hiddenEntitiesByModel]);
+
+  const getGlobalIsolatedIds = useCallback((modelId: string): Set<number> | null => {
+    if (modelId === '__legacy__') return isolatedEntities;
+
+    const model = models.get(modelId);
+    if (!model) return null;
+    const offset = model.idOffset ?? 0;
+
+    const out = new Set<number>();
+    if (isolatedEntities) {
+      for (const globalId of isolatedEntities) {
+        const localId = globalId - offset;
+        if (localId > 0 && localId <= model.maxExpressId) {
+          out.add(globalId);
+        }
+      }
+    }
+    const modelIsolated = isolatedEntitiesByModel.get(modelId);
+    if (modelIsolated) {
+      for (const localId of modelIsolated) {
+        out.add(localId + offset);
+      }
+    }
+    return out.size > 0 ? out : null;
+  }, [models, isolatedEntities, isolatedEntitiesByModel]);
+
+  const handleExport = useCallback(async () => {
+    if (!selectedModel?.geometryResult) return;
+
+    setIsExporting(true);
+    setExportResult(null);
+
+    // Which of the two assemblers ran, recorded outside the try so a failure
+    // report can say which one trapped (they have very different memory
+    // profiles: from-bytes re-meshes the whole model in wasm, from-meshes
+    // copies what the GPU already holds).
+    let fromSourceBytes = false;
+
+    try {
+      // Assemble the GLB in Rust over the meshes the viewer already holds (no
+      // re-meshing). Visibility + colour-source selection is applied here because
+      // the Rust path emits exactly the meshes it is handed — this mirrors the
+      // previous GLTFExporter `isMeshVisible` / `pickColor` semantics.
+      //
+      // Fold in GPU-instanced occurrences (absent from geometryResult.meshes — they
+      // live in shards) for the primary model so the GLB isn't missing repeated
+      // geometry; the same visibility/colour filter below applies to them.
+      // Instancing is the PRIMARY model only (idOffset 0). Detect that by offset,
+      // not by the `__legacy__` id — a federated primary also has idOffset 0 but
+      // carries a real model id, and would otherwise lose its instanced
+      // occurrences from the export. Mirrors ExportDialog.tsx. (#1238 review)
+      const federatedModel = models.get(selectedModelId);
+      const idOffset = federatedModel?.idOffset ?? 0;
+      const sourceFile = federatedModel?.sourceFile;
+
+      // Prefer the FROM-BYTES exporter when it can express this export exactly:
+      // it re-meshes at full fidelity in Rust with rep-identity instancing
+      // (50-85% smaller on repetitive models) and bounded memory on large
+      // inputs. Requirements: rendering colours (shading substitution only
+      // exists on the viewer's MeshData), a plain .ifc source handle (cache
+      // restores have none; .ifcx/.ifczip go through different parsers), and
+      // the primary id space (idOffset 0) so node-extras expressIds stay
+      // consistent with the from-meshes output. Everything else keeps the
+      // from-meshes assembler over the meshes the viewer already holds.
+      // NOTE on fidelity: the on-screen load may skip small cuts / lower the
+      // tessellation tier; exporters deliberately re-mesh at full fidelity
+      // (the house rule - see GeometryProcessorOptions.skipSmallCuts). Only
+      // mergeLayers changes model CONTENT, so it forces the from-meshes path.
+      const canUseSource =
+        colorSource === 'rendering' &&
+        !mergeLayers &&
+        idOffset === 0 &&
+        !!sourceFile &&
+        /\.ifc$/i.test(sourceFile.name);
+
+      fromSourceBytes = canUseSource;
+
+      let glb: Uint8Array;
+      if (canUseSource) {
+        const bytes = new Uint8Array(await sourceFile.arrayBuffer());
+        const toLocal = (set: Set<number> | null | undefined): Uint32Array => {
+          if (!set || set.size === 0) return new Uint32Array();
+          const out: number[] = [];
+          for (const g of set) {
+            const local = g - idOffset;
+            if (local > 0) out.push(local);
+          }
+          return new Uint32Array(out);
+        };
+        const hidden = visibleOnly ? toLocal(getGlobalHiddenIds(selectedModelId)) : new Uint32Array();
+        const isolated = visibleOnly ? toLocal(getGlobalIsolatedIds(selectedModelId)) : new Uint32Array();
+        const hiddenTypesCsv = visibleOnly
+          ? [...buildHiddenIfcTypes(typeVisibility)].join(',')
+          : '';
+        const gp = new GeometryProcessor();
+        await gp.init();
+        try {
+          const out = gp.exportGlb(bytes, includeMetadata, hidden, isolated, hiddenTypesCsv, lit);
+          if (!out) throw new Error('Geometry engine unavailable');
+          glb = out;
+        } finally {
+          gp.dispose();
+        }
+      } else {
+        // GPU instancing stopped being primary-only on 2026-08-06 (#2255) — a
+        // federated model can carry instanced occurrences too, re-homed onto
+        // its own global id space at drain. `getAllInstancedMeshData()`
+        // returns every loaded model's occurrences unfiltered, so scope it to
+        // THIS model's `{ idOffset, maxExpressId }` bracket (both on
+        // `FederatedModel`) rather than the old primary-only gate, or a
+        // federation of N models would splice every other model's instanced
+        // entities into this one's export too. `federatedModel` is undefined
+        // only for the legacy `__legacy__` slot, which is provably the sole
+        // model loaded — nothing else to wrongly include, so `null` (no
+        // filter) is correct there (#2865/#2878 follow-up).
+        const exportGeometry = withInstancedMeshes(
+          selectedModel.geometryResult,
+          federatedModel
+            ? { idOffset: federatedModel.idOffset ?? 0, maxExpressId: federatedModel.maxExpressId ?? 0 }
+            : null,
+        );
+        const globalHidden = visibleOnly ? getGlobalHiddenIds(selectedModelId) : undefined;
+        const globalIsolated = visibleOnly ? getGlobalIsolatedIds(selectedModelId) : undefined;
+        const hiddenIfcTypes = visibleOnly ? buildHiddenIfcTypes(typeVisibility) : undefined;
+        const hasIsolation = !!globalIsolated && globalIsolated.size > 0;
+
+        const meshes = (exportGeometry.meshes as MeshData[])
+          .filter((m) => {
+            // Instanced type-library duplicates repeat occurrence geometry at the
+            // origin; the from-bytes assembler excludes them (mesh_visible), as must this.
+            if (m.geometryClass === GEOM_CLASS_INSTANCED_TYPE) return false;
+            if (!visibleOnly) return true;
+            if (hiddenIfcTypes && m.ifcType && hiddenIfcTypes.has(m.ifcType)) return false;
+            if (hasIsolation && !globalIsolated!.has(m.expressId)) return false;
+            if (globalHidden && globalHidden.has(m.expressId)) return false;
+            return true;
+          })
+          .map((m) =>
+            colorSource === 'shading' && m.shadingColor
+              ? ({ ...m, color: m.shadingColor } as MeshData)
+              : m,
+          );
+
+        glb = await exportGlbFromGeometry(exportGeometry, { meshes, includeMetadata, lit });
+      }
+
+      const blob = new Blob([new Uint8Array(glb)], { type: 'model/gltf-binary' });
+      const baseName = sanitizeFilename(selectedModel.name.replace(/\.[^.]+$/, ''), { fallback: 'model' });
+      const suffix = visibleOnly ? '_visible' : '';
+      downloadBlob(blob, `${baseName}${suffix}.glb`);
+
+      const msg = `Exported GLB (${(blob.size / 1024).toFixed(0)} KB)`;
+      setExportResult({ success: true, message: msg });
+      toast.success(msg);
+      posthog.capture('export_completed', {
+        format: 'glb',
+        visible_only: visibleOnly,
+        include_metadata: includeMetadata,
+        color_source: colorSource,
+        lit,
+        size_kb: Math.round(blob.size / 1024),
+      });
+    } catch (err) {
+      console.error('Export failed:', err);
+      const kind = classifyLoadError(err);
+      // The Rust boundary fails closed on an empty visible set; translate the
+      // typed error into the operator-friendly message.
+      const errMsg = isNoRenderGeometryError(err)
+        ? 'GLB export produced 0 meshes — nothing visible to export with the current filters.'
+        // A wasm trap here used to reach the user as raw engine text (or, once
+        // it had poisoned the module, as an internal sentence about recreating
+        // a worker process). Hand it to the shared humaniser instead, which
+        // explains the crash and offers a reload when the engine can't restart
+        // (#1898).
+        : kind === 'wasm_runtime_crashed'
+          ? formatLoadError(err, selectedModel.name)
+          : `GLB export failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      setExportResult({ success: false, message: errMsg });
+      toast.error(errMsg);
+      // This export failed silently in production: the catch only logged +
+      // toasted, so PostHog saw nothing and the trap that started the whole
+      // chain was never recorded anywhere but the user's console (#1898).
+      posthog.capture('export_failed', {
+        format: 'glb',
+        error_kind: kind,
+        from_source_bytes: fromSourceBytes,
+      });
+      // …but only the *unexpected* failures belong in error tracking. An empty
+      // visible set is a typed, expected outcome of the user's own filters, and
+      // it classifies as `unknown`, so capturing it would mint a fresh PostHog
+      // issue per filter mistake and bury the trap signal this capture exists
+      // to surface.
+      if (!isNoRenderGeometryError(err)) {
+        posthog.captureException(err, { context: 'export_glb', error_kind: kind });
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  }, [
+    selectedModel,
+    selectedModelId,
+    models,
+    mergeLayers,
+    includeMetadata,
+    lit,
+    colorSource,
+    visibleOnly,
+    typeVisibility,
+    getGlobalHiddenIds,
+    getGlobalIsolatedIds,
+  ]);
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        {trigger || (
+          <Button variant="outline" size="sm">
+            <Download className="h-4 w-4 mr-2" />
+            Export GLB
+          </Button>
+        )}
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-lg overflow-hidden">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Download className="h-5 w-5" />
+            Export GLB File
+          </DialogTitle>
+          <DialogDescription>
+            Export the 3D model as binary glTF for use in other viewers and renderers
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 py-4 max-h-[70vh] overflow-y-auto">
+          {/* Model selector — only shown when multiple are loaded */}
+          {modelList.length > 1 && (
+            <div className="flex items-center gap-4">
+              <Label className="w-32">Model</Label>
+              <Select value={selectedModelId} onValueChange={setSelectedModelId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelList.map((m) => {
+                    const maxLen = 32;
+                    const displayName =
+                      m.name.length > maxLen ? m.name.slice(0, maxLen) + '…' : m.name;
+                    return (
+                      <SelectItem key={m.id} value={m.id} title={m.name}>
+                        {displayName}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {/* Colour source */}
+          <div className="flex items-start gap-4">
+            <div className="w-32 pt-2">
+              <Label>Colour Source</Label>
+            </div>
+            <div className="flex-1 space-y-2">
+              <Select
+                value={colorSource}
+                onValueChange={(v) => setColorSource(v as ColorSource)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="rendering">Rendering (apparent colour)</SelectItem>
+                  <SelectItem value="shading">Shading (SurfaceColour)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {colorSource === 'rendering'
+                  ? 'Uses IfcSurfaceStyleRendering.DiffuseColour when authored, otherwise SurfaceColour. Matches most IFC viewers.'
+                  : 'Uses the base SurfaceColour. Falls back to the rendering colour when no distinct DiffuseColour was authored.'}
+              </p>
+            </div>
+          </div>
+
+          {/* Output format indicator */}
+          <div className="flex items-center gap-4">
+            <Label className="w-32 text-muted-foreground">Output</Label>
+            <Badge variant="secondary">glTF Binary</Badge>
+            <span className="text-xs text-muted-foreground">.glb</span>
+          </div>
+
+          {/* Visible only */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label>Export Visible Only</Label>
+              <p className="text-xs text-muted-foreground">
+                Skip entities currently hidden or outside the isolation set
+              </p>
+            </div>
+            <Switch checked={visibleOnly} onCheckedChange={setVisibleOnly} />
+          </div>
+
+          {/* Include metadata */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label>Include Metadata</Label>
+              <p className="text-xs text-muted-foreground">
+                Embed expressId / modelIndex on each node and totals on the asset
+              </p>
+            </div>
+            <Switch checked={includeMetadata} onCheckedChange={setIncludeMetadata} />
+          </div>
+
+          {/* Lit materials */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label>Lit Materials</Label>
+              <p className="text-xs text-muted-foreground">
+                Shade from normals in other viewers. Off = flat apparent colour (unlit)
+              </p>
+            </div>
+            <Switch checked={lit} onCheckedChange={setLit} />
+          </div>
+
+          {exportResult && (
+            <Alert variant={exportResult.success ? 'default' : 'destructive'}>
+              {exportResult.success ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <AlertCircle className="h-4 w-4" />
+              )}
+              <AlertTitle>{exportResult.success ? 'Success' : 'Error'}</AlertTitle>
+              <AlertDescription>{exportResult.message}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleExport}
+            disabled={isExporting || !selectedModel?.geometryResult}
+          >
+            {isExporting ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Exporting...
+              </>
+            ) : (
+              <>
+                <Download className="h-4 w-4 mr-2" />
+                Export
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

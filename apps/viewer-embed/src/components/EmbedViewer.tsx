@@ -1,0 +1,484 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Embed viewer: Viewport-only layout with no panels, toolbar, or chrome.
+ *
+ * Reuses the main viewer's Viewport component via the @ alias (which points
+ * to apps/viewer/src/). The embed app shares the same Zustand store instance
+ * as the viewer -- it just doesn't render panels, toolbars, or measurement UI.
+ *
+ * Communication with the host page happens via postMessage (the bridge) and URL params.
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Viewport } from '@/components/viewer/Viewport';
+import { ViewportOverlays } from '@/components/viewer/ViewportOverlays';
+import { useIfc } from '@/hooks/useIfc';
+import { useWebGPU } from '@/hooks/useWebGPU';
+import { useViewerStore } from '@/store';
+import { toGlobalIdFromModels } from '@/store/globalId';
+import { parseUrlParams, assertFetchableUrl } from '../bridge/urlParams.js';
+import { initBridge, destroyBridge, emitEvent } from '../bridge/handler.js';
+import { mountBridgeLifecycle, unmountBridgeLifecycle } from '../bridge/lifecycle.js';
+import type { MeshData, CoordinateInfo } from '@ifc-lite/geometry';
+
+export function EmbedViewer() {
+  const webgpu = useWebGPU();
+  const { geometryResult, ifcDataStore, loadFile, loading, models, clearAllModels, addModel } = useIfc();
+  const storeModels = useViewerStore((s) => s.models);
+  const typeVisibility = useViewerStore((s) => s.typeVisibility);
+  const isolatedEntities = useViewerStore((s) => s.isolatedEntities);
+  const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
+  const theme = useViewerStore((s) => s.theme);
+  const setTheme = useViewerStore((s) => s.setTheme);
+  const progress = useViewerStore((s) => s.progress);
+  const error = useViewerStore((s) => s.error);
+  const [urlParams] = useState(() => parseUrlParams());
+  const bridgeInitialized = useRef(false);
+  const autoLoadAttempted = useRef(false);
+
+  // Apply URL params on mount. Embeds default to light unless ?theme=dark
+  // (the surrounding viewer-core store may bootstrap to dark based on system
+  // preference, which is wrong for a third-party iframe with no chrome).
+  useEffect(() => {
+    setTheme(urlParams.theme === 'dark' ? 'dark' : 'light');
+  }, [urlParams.theme, setTheme]);
+
+  // Force hover picking on. `hoverState` (apps/viewer/src/store/slices/
+  // hoverSlice.ts) is populated by useMouseControls.ts's throttled
+  // renderer.pick() on mousemove — the same pipeline the main viewer uses —
+  // but that whole branch is gated behind `hoverTooltipsEnabled`, which
+  // defaults to false (a toolbar toggle). The embed has no toolbar to flip it,
+  // and the ENTITY_HOVERED effect below needs `hoverState` to ever populate.
+  // Safe to force on here: the embed shell never renders <HoverTooltip> (it
+  // lives in ViewerLayout, which the embed doesn't use), so this activates the
+  // picking pipeline only — no tooltip UI appears.
+  useEffect(() => {
+    useViewerStore.setState({ hoverTooltipsEnabled: true });
+  }, []);
+
+  // Initialize the postMessage bridge.
+  //
+  // Guarded via mountBridgeLifecycle/unmountBridgeLifecycle so a React 19
+  // <StrictMode> mount -> cleanup -> remount cycle (dev only) re-initializes
+  // instead of leaving the bridge permanently dead: the mount side was
+  // ref-guarded but the cleanup never reset it, so the remount saw the guard
+  // already set, skipped initBridge(), and the inbound listener stayed removed.
+  useEffect(() => {
+    mountBridgeLifecycle(bridgeInitialized, () => {
+      // Derive the expected parent origin (so content-bearing auto-load events
+      // are not broadcast to '*' before any inbound command arrives): prefer the
+      // explicit ?parentOrigin= param, then fall back to the referrer's origin.
+      let expectedParentOrigin = urlParams.parentOrigin;
+      if (!expectedParentOrigin && document.referrer) {
+        try {
+          expectedParentOrigin = new URL(document.referrer).origin;
+        } catch (error) {
+          // Malformed referrer — leave undefined and rely on the inbound handshake.
+          console.warn('[embed] Failed to derive parent origin from document.referrer', document.referrer, error);
+          expectedParentOrigin = undefined;
+        }
+      }
+
+      initBridge({
+        getState: () => useViewerStore.getState(),
+        loadModelFromUrl: async (url: string) => {
+          // Enforce the same http(s)-only allowlist as the URL-param path so the
+          // postMessage bridge can't be steered to file:/data:/internal targets.
+          const safeUrl = assertFetchableUrl(url);
+          const response = await fetch(safeUrl, { signal: AbortSignal.timeout(60_000) });
+          if (!response.ok) throw new Error(`Failed to fetch model: ${response.statusText}`);
+          const buffer = await response.arrayBuffer();
+          const filename = url.split('/').pop() || 'model.ifc';
+          const file = new File([buffer], filename);
+          await loadFile(file);
+          const state = useViewerStore.getState();
+          const gr = state.geometryResult;
+          return {
+            entities: state.ifcDataStore?.entities?.count ?? 0,
+            triangles: gr?.totalTriangles ?? 0,
+            vertices: gr?.totalVertices ?? 0,
+          };
+        },
+        loadModelFromBuffer: async (buffer: ArrayBuffer, name?: string) => {
+          const file = new File([buffer], name || 'model.ifc');
+          await loadFile(file);
+          const state = useViewerStore.getState();
+          const gr = state.geometryResult;
+          return {
+            entities: state.ifcDataStore?.entities?.count ?? 0,
+            triangles: gr?.totalTriangles ?? 0,
+            vertices: gr?.totalVertices ?? 0,
+          };
+        },
+        addModelFromUrl: async (url: string) => {
+          // Federation-aware add: routes through useIfcFederation's addModel,
+          // which loads with target `{ kind: 'federated' }` and therefore does
+          // NOT clear existing models (unlike loadFile's default primary
+          // target, which loadModelFromUrl above uses for LOAD_MODEL).
+          const safeUrl = assertFetchableUrl(url);
+          const response = await fetch(safeUrl, { signal: AbortSignal.timeout(60_000) });
+          if (!response.ok) throw new Error(`Failed to fetch model: ${response.statusText}`);
+          const buffer = await response.arrayBuffer();
+          const filename = url.split('/').pop() || 'model.ifc';
+          const file = new File([buffer], filename);
+          const modelId = await addModel(file);
+          if (!modelId) throw new Error('Failed to add model');
+          const added = useViewerStore.getState().models.get(modelId);
+          return {
+            modelId,
+            entities: added?.ifcDataStore?.entities?.count ?? 0,
+            triangles: added?.geometryResult?.totalTriangles ?? 0,
+            vertices: added?.geometryResult?.totalVertices ?? 0,
+          };
+        },
+      }, {
+        allowedOrigins: urlParams.allowOrigins,
+        expectedParentOrigin,
+      });
+    });
+
+    return () => unmountBridgeLifecycle(bridgeInitialized, () => destroyBridge());
+  }, [loadFile, addModel, urlParams.allowOrigins, urlParams.parentOrigin]);
+
+  // Auto-load model from URL param
+  useEffect(() => {
+    if (autoLoadAttempted.current) return;
+    if (!urlParams.modelUrl || urlParams.autoLoad === false || !webgpu.supported || loading) return;
+    if (storeModels.size > 0 || geometryResult?.meshes?.length) return;
+
+    autoLoadAttempted.current = true;
+
+    (async () => {
+      try {
+        emitEvent('MODEL_LOADING', { progress: 0, phase: 'Fetching model...' });
+        const response = await fetch(urlParams.modelUrl!, { signal: AbortSignal.timeout(60_000) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const buffer = await response.arrayBuffer();
+        const filename = urlParams.modelUrl!.split('/').pop() || 'model.ifc';
+        const file = new File([buffer], filename);
+        await loadFile(file);
+      } catch (err) {
+        emitEvent('MODEL_ERROR', {
+          error: {
+            code: 'LOAD_FAILED',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    })();
+  }, [urlParams.modelUrl, urlParams.autoLoad, webgpu.supported, loading, loadFile, storeModels.size, geometryResult?.meshes?.length]);
+
+  // Emit progress events to parent
+  useEffect(() => {
+    if (progress) {
+      emitEvent('MODEL_LOADING', { progress: progress.percent, phase: progress.phase });
+    }
+  }, [progress]);
+
+  // Emit model loaded event + auto-fit camera on the first model that lands.
+  // Unlike the full viewer (which has toolbar buttons for fit-all and a default
+  // load flow that fits), the embed has no chrome — so without an explicit fit
+  // call the camera stays at its initial position and the model renders off-frame.
+  // We only fit on the *first* successful load so host-driven SET_CAMERA / view
+  // params via the bridge aren't immediately overridden.
+  const autoFittedRef = useRef(false);
+  useEffect(() => {
+    if (loading) return;
+    const meshes = geometryResult?.meshes;
+    if (!meshes || meshes.length === 0) return;
+
+    emitEvent('MODEL_LOADED', {
+      entities: ifcDataStore?.entities?.count ?? 0,
+      triangles: geometryResult.totalTriangles,
+      vertices: geometryResult.totalVertices,
+    });
+
+    if (autoFittedRef.current) return;
+
+    // Viewport registers cameraCallbacks AFTER renderer.init() resolves (async).
+    // On a fast network + small model, geometry can land before that happens.
+    // Poll for up to ~2 s, checking each frame, then bail out so we never leak.
+    autoFittedRef.current = true;
+    const deadline = performance.now() + 2000;
+    let rafId = 0;
+    const tryFit = () => {
+      const cbs = useViewerStore.getState().cameraCallbacks;
+      const ready = Boolean(cbs.home || cbs.fitAll || cbs.setPresetView);
+      if (!ready) {
+        if (performance.now() < deadline) {
+          rafId = requestAnimationFrame(tryFit);
+        } else {
+          console.warn('[embed] auto-fit gave up — cameraCallbacks never registered');
+        }
+        return;
+      }
+      // Honour ?view= / ?camera= URL params first; only auto-fit if neither was set.
+      if (urlParams.view) {
+        cbs.setPresetView?.(urlParams.view);
+      } else if (urlParams.camera) {
+        // ?camera= is handled elsewhere — nothing to do here.
+      } else if (cbs.home) {
+        cbs.home();
+      } else if (cbs.fitAll) {
+        cbs.fitAll();
+      }
+    };
+    rafId = requestAnimationFrame(tryFit);
+    return () => cancelAnimationFrame(rafId);
+  }, [loading, geometryResult, ifcDataStore, urlParams.view, urlParams.camera]);
+
+  // Emit selection events to parent
+  const selectedEntityId = useViewerStore((s) => s.selectedEntityId);
+  useEffect(() => {
+    if (selectedEntityId !== null) {
+      // Resolve metadata for the selected entity
+      const state = useViewerStore.getState();
+      const lookup = state.resolveGlobalIdFromModels(selectedEntityId);
+      const model = lookup ? state.models.get(lookup.modelId) : undefined;
+      const entities = model?.ifcDataStore?.entities;
+      emitEvent('ENTITY_SELECTED', {
+        id: selectedEntityId,
+        globalId: entities?.getGlobalId(lookup?.expressId ?? selectedEntityId) ?? undefined,
+        modelId: lookup?.modelId,
+        ifcType: entities?.getTypeName(lookup?.expressId ?? selectedEntityId) ?? undefined,
+      });
+    } else {
+      emitEvent('ENTITY_DESELECTED', undefined);
+    }
+  }, [selectedEntityId]);
+
+  // Emit hover events to parent. ENTITY_HOVERED is declared in the protocol
+  // and exposed by the SDK, but nothing in this app ever emitted it — the
+  // SDK's tests pass because they fabricate the event themselves (#2934).
+  //
+  // Subscribes to `hoverState.entityId` specifically, not the whole
+  // `hoverState` object: screenX/screenY/worldXYZ change on every
+  // hover-throttled mousemove even while the pointer stays on the same mesh,
+  // so selecting the object would re-post the event continuously instead of
+  // only on a hover-target change. The protocol declares no ENTITY_UNHOVERED
+  // counterpart to ENTITY_DESELECTED, so null (nothing hovered) is tracked but
+  // never emitted.
+  const hoveredEntityId = useViewerStore((s) => s.hoverState.entityId);
+  useEffect(() => {
+    if (hoveredEntityId === null) return;
+
+    const state = useViewerStore.getState();
+    const lookup = state.resolveGlobalIdFromModels(hoveredEntityId);
+    const model = lookup ? state.models.get(lookup.modelId) : undefined;
+    const entities = model?.ifcDataStore?.entities;
+    emitEvent('ENTITY_HOVERED', {
+      id: hoveredEntityId,
+      globalId: entities?.getGlobalId(lookup?.expressId ?? hoveredEntityId) ?? undefined,
+      ifcType: entities?.getTypeName(lookup?.expressId ?? hoveredEntityId) ?? undefined,
+    });
+  }, [hoveredEntityId]);
+
+  // Emit camera rotation changes to parent (throttled)
+  const cameraRotation = useViewerStore((s) => s.cameraRotation);
+  const lastCameraEmit = useRef(0);
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastCameraEmit.current < 100) return; // throttle to 10Hz
+    lastCameraEmit.current = now;
+    emitEvent('CAMERA_CHANGED', {
+      azimuth: cameraRotation.azimuth,
+      elevation: cameraRotation.elevation,
+    });
+  }, [cameraRotation]);
+
+  // Emit section-plane changes to parent. Mirrors the CAMERA_CHANGED effect
+  // above: the bridge's SET_SECTION handler (apps/viewer-embed/src/bridge/
+  // handler.ts) only mutates `sectionPlane` via the store's setters and never
+  // emits an event itself, so this reactive subscription is what turns those
+  // mutations (from SET_SECTION *or* any in-viewer section-tool interaction)
+  // into the outbound SECTION_CHANGED event -- same source of truth as
+  // ENTITY_SELECTED/CAMERA_CHANGED, not a handler.ts-local special case.
+  const sectionPlane = useViewerStore((s) => s.sectionPlane);
+  useEffect(() => {
+    emitEvent('SECTION_CHANGED', {
+      axis: sectionPlane.axis,
+      position: sectionPlane.position,
+      enabled: sectionPlane.enabled,
+    });
+  }, [sectionPlane]);
+
+  // Multi-model: create mapping from modelId to modelIndex
+  const modelIdToIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    let index = 0;
+    for (const modelId of storeModels.keys()) {
+      map.set(modelId, index++);
+    }
+    return map;
+  }, [storeModels]);
+
+  // Merge geometries from all visible models
+  const mergedGeometryResult = useMemo(() => {
+    if (storeModels.size > 0) {
+      const allMeshes: MeshData[] = [];
+      let totalVertices = 0;
+      let totalTriangles = 0;
+      let mergedCoordinateInfo: CoordinateInfo | undefined;
+
+      for (const [modelId, model] of storeModels) {
+        if (!model.visible) continue;
+        const mg = model.geometryResult;
+        const mi = modelIdToIndex.get(modelId) ?? 0;
+        if (mg?.meshes) {
+          for (const mesh of mg.meshes) {
+            allMeshes.push({ ...mesh, modelIndex: mi });
+          }
+          totalVertices += mg.totalVertices || 0;
+          totalTriangles += mg.totalTriangles || 0;
+          if (!mergedCoordinateInfo && mg.coordinateInfo) mergedCoordinateInfo = mg.coordinateInfo;
+        }
+      }
+
+      return { meshes: allMeshes, totalVertices, totalTriangles, coordinateInfo: mergedCoordinateInfo };
+    }
+    return geometryResult;
+  }, [storeModels, geometryResult, modelIdToIndex]);
+
+  // Filter by type visibility
+  const filteredGeometry = useMemo(() => {
+    if (!mergedGeometryResult?.meshes) return null;
+    let meshes = mergedGeometryResult.meshes;
+
+    meshes = meshes.filter(mesh => {
+      if (mesh.ifcType === 'IfcSpace' && !typeVisibility.spaces) return false;
+      if (mesh.ifcType === 'IfcOpeningElement' && !typeVisibility.openings) return false;
+      if (mesh.ifcType === 'IfcSite' && !typeVisibility.site) return false;
+      return true;
+    });
+
+    meshes = meshes.map(mesh => {
+      if (mesh.ifcType === 'IfcSpace' || mesh.ifcType === 'IfcOpeningElement') {
+        return { ...mesh, color: [mesh.color[0], mesh.color[1], mesh.color[2], Math.min(mesh.color[3] * 0.3, 0.3)] as [number, number, number, number] };
+      }
+      return mesh;
+    });
+
+    return meshes;
+  }, [mergedGeometryResult, typeVisibility]);
+
+  // Compute isolation set
+  const computedIsolatedIds = useMemo(() => {
+    if (isolatedEntities !== null) return isolatedEntities;
+    if (selectedStoreys.size > 0) {
+      const combinedGlobalIds = new Set<number>();
+      for (const [, model] of storeModels) {
+        const hierarchy = model.ifcDataStore?.spatialHierarchy;
+        if (!hierarchy) continue;
+        const offset = model.idOffset ?? 0;
+        for (const storeyId of selectedStoreys) {
+          const elements = hierarchy.byStorey.get(storeyId) || hierarchy.byStorey.get(storeyId - offset);
+          if (elements) for (const id of elements) combinedGlobalIds.add(toGlobalIdFromModels(storeModels, model.id, id));
+        }
+      }
+      if (combinedGlobalIds.size > 0) return combinedGlobalIds;
+    }
+    return null;
+  }, [storeModels, selectedStoreys, isolatedEntities]);
+
+  // Background color
+  const bgColor = theme === 'dark' ? '#1a1b26' : '#ffffff';
+  const customBg = urlParams.bg ? `#${urlParams.bg}` : undefined;
+
+  return (
+    <div
+      style={{
+        width: '100%',
+        height: '100%',
+        position: 'relative',
+        overflow: 'hidden',
+        background: customBg || bgColor,
+      }}
+    >
+      {/* WebGPU check */}
+      {!webgpu.checking && !webgpu.supported && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: 'system-ui', color: theme === 'dark' ? '#a9b1d6' : '#333',
+        }}>
+          <div style={{ textAlign: 'center', padding: '2rem' }}>
+            <p style={{ fontSize: '1.2rem', fontWeight: 700 }}>WebGPU Not Available</p>
+            <p style={{ fontSize: '0.85rem', opacity: 0.7, marginTop: '0.5rem' }}>
+              {webgpu.reason || 'This viewer requires WebGPU support.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Loading indicator */}
+      {loading && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: 'system-ui', color: theme === 'dark' ? '#a9b1d6' : '#333', zIndex: 10,
+          background: theme === 'dark' ? 'rgba(26,27,38,0.8)' : 'rgba(255,255,255,0.8)',
+        }}>
+          <div style={{ textAlign: 'center' }}>
+            <p style={{ fontSize: '0.9rem', fontWeight: 600 }}>
+              {progress?.phase || 'Loading...'}
+            </p>
+            {progress && (
+              <div style={{
+                width: '200px', height: '4px', background: theme === 'dark' ? '#3b4261' : '#e5e7eb',
+                borderRadius: '2px', marginTop: '0.75rem', overflow: 'hidden',
+              }}>
+                <div style={{
+                  width: `${progress.percent}%`, height: '100%',
+                  background: '#7aa2f7', transition: 'width 0.3s',
+                }} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Error indicator */}
+      {error && !loading && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: 'system-ui', color: '#f7768e', zIndex: 10,
+        }}>
+          <div style={{ textAlign: 'center', padding: '2rem' }}>
+            <p style={{ fontSize: '0.9rem', fontWeight: 600 }}>Error</p>
+            <p style={{ fontSize: '0.8rem', opacity: 0.8, marginTop: '0.5rem' }}>{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Empty state: no model loaded and nothing in progress */}
+      {!loading && !error && !filteredGeometry?.length && !urlParams.modelUrl && webgpu.supported && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: 'system-ui', color: theme === 'dark' ? '#565f89' : '#9ca3af',
+        }}>
+          <div style={{ textAlign: 'center', padding: '2rem' }}>
+            <p style={{ fontSize: '0.9rem' }}>No model loaded</p>
+            <p style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '0.4rem' }}>
+              Use the SDK or pass a <code style={{ opacity: 0.9 }}>modelUrl</code> parameter
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* 3D Viewport — wrapper ensures canvas fills the container even
+           when Tailwind utility classes (w-full h-full) are not generated */}
+      {webgpu.supported && (
+        <div style={{ position: 'absolute', inset: 0 }}>
+          <Viewport
+            geometry={filteredGeometry}
+            coordinateInfo={mergedGeometryResult?.coordinateInfo}
+            computedIsolatedIds={computedIsolatedIds}
+            modelIdToIndex={modelIdToIndex}
+          />
+          <ViewportOverlays hideViewCube />
+        </div>
+      )}
+    </div>
+  );
+}

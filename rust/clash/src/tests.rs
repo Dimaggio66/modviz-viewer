@@ -1,0 +1,1124 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Golden tests mirroring the TypeScript reference suite plus triangle-math
+//! unit tests.
+
+use crate::narrow::{ClashStatus, DistanceKind};
+use crate::session::ClashSession;
+use crate::tri_mesh::TriMesh;
+use crate::triangle::{tri_tri_distance, tri_tri_intersect};
+use crate::vec3::Vec3;
+
+/// Axis-aligned unit cube (side 1) centred at `[cx, cy, cz]`.
+///
+/// Returns `(positions, indices, aabb)`: 8 vertices packed `x, y, z`, 12
+/// triangles as LOCAL (0-based) indices, and the 6-float AABB
+/// `[minx, miny, minz, maxx, maxy, maxz]`.
+fn unit_cube(cx: f32, cy: f32, cz: f32) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let h = 0.5f32;
+    // 8 corners.
+    let corners = [
+        [cx - h, cy - h, cz - h],
+        [cx + h, cy - h, cz - h],
+        [cx + h, cy + h, cz - h],
+        [cx - h, cy + h, cz - h],
+        [cx - h, cy - h, cz + h],
+        [cx + h, cy - h, cz + h],
+        [cx + h, cy + h, cz + h],
+        [cx - h, cy + h, cz + h],
+    ];
+    let mut positions = Vec::with_capacity(24);
+    for c in &corners {
+        positions.extend_from_slice(c);
+    }
+    // 12 triangles (two per face), winding is irrelevant for these tests.
+    let indices: Vec<u32> = vec![
+        // -z
+        0, 1, 2, 0, 2, 3, // +z
+        4, 6, 5, 4, 7, 6, // -y
+        0, 5, 1, 0, 4, 5, // +y
+        3, 2, 6, 3, 6, 7, // -x
+        0, 3, 7, 0, 7, 4, // +x
+        1, 5, 6, 1, 6, 2,
+    ];
+    let aabb = vec![cx - h, cy - h, cz - h, cx + h, cy + h, cz + h];
+    (positions, indices, aabb)
+}
+
+/// Build a session from a list of cubes, packing the flat arenas the API needs.
+fn session_of_cubes(cubes: &[(f32, f32, f32)]) -> ClashSession {
+    let mut positions: Vec<f32> = Vec::new();
+    let mut pos_ranges: Vec<u32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut idx_ranges: Vec<u32> = Vec::new();
+    let mut aabbs: Vec<f32> = Vec::new();
+
+    for &(cx, cy, cz) in cubes {
+        let (p, idx, ab) = unit_cube(cx, cy, cz);
+        let pos_off = positions.len() as u32;
+        let pos_len = p.len() as u32;
+        let idx_off = indices.len() as u32;
+        let idx_len = idx.len() as u32;
+
+        positions.extend_from_slice(&p);
+        indices.extend_from_slice(&idx);
+        aabbs.extend_from_slice(&ab);
+        pos_ranges.push(pos_off);
+        pos_ranges.push(pos_len);
+        idx_ranges.push(idx_off);
+        idx_ranges.push(idx_len);
+    }
+
+    let mut session = ClashSession::new();
+    session.ingest(&positions, &pos_ranges, &indices, &idx_ranges, &aabbs);
+    session
+}
+
+/// Axis-aligned cube of arbitrary `side` centred at `(cx, cy, cz)`. Same packing
+/// as `unit_cube`, used for enclosure tests where the two cubes differ in size.
+fn sized_cube(cx: f32, cy: f32, cz: f32, side: f32) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let h = side / 2.0;
+    let corners = [
+        [cx - h, cy - h, cz - h],
+        [cx + h, cy - h, cz - h],
+        [cx + h, cy + h, cz - h],
+        [cx - h, cy + h, cz - h],
+        [cx - h, cy - h, cz + h],
+        [cx + h, cy - h, cz + h],
+        [cx + h, cy + h, cz + h],
+        [cx - h, cy + h, cz + h],
+    ];
+    let mut positions = Vec::with_capacity(24);
+    for c in &corners {
+        positions.extend_from_slice(c);
+    }
+    let indices: Vec<u32> = vec![
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
+    ];
+    let aabb = vec![cx - h, cy - h, cz - h, cx + h, cy + h, cz + h];
+    (positions, indices, aabb)
+}
+
+/// Build a session from `(cx, cy, cz, side)` cubes.
+fn session_of_sized(cubes: &[(f32, f32, f32, f32)]) -> ClashSession {
+    let mut positions: Vec<f32> = Vec::new();
+    let mut pos_ranges: Vec<u32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut idx_ranges: Vec<u32> = Vec::new();
+    let mut aabbs: Vec<f32> = Vec::new();
+    for &(cx, cy, cz, side) in cubes {
+        let (p, idx, ab) = sized_cube(cx, cy, cz, side);
+        pos_ranges.push(positions.len() as u32);
+        pos_ranges.push(p.len() as u32);
+        idx_ranges.push(indices.len() as u32);
+        idx_ranges.push(idx.len() as u32);
+        positions.extend_from_slice(&p);
+        indices.extend_from_slice(&idx);
+        aabbs.extend_from_slice(&ab);
+    }
+    let mut session = ClashSession::new();
+    session.ingest(&positions, &pos_ranges, &indices, &idx_ranges, &aabbs);
+    session
+}
+
+/// Axis-aligned box with independent per-axis half-extents, centred at
+/// `(cx, cy, cz)`. Same packing/winding as `unit_cube`. Used for the
+/// perpendicular-bar crossing fixture (#1362 / #1402 Bug B).
+fn box_hxyz(cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let corners = [
+        [cx - hx, cy - hy, cz - hz],
+        [cx + hx, cy - hy, cz - hz],
+        [cx + hx, cy + hy, cz - hz],
+        [cx - hx, cy + hy, cz - hz],
+        [cx - hx, cy - hy, cz + hz],
+        [cx + hx, cy - hy, cz + hz],
+        [cx + hx, cy + hy, cz + hz],
+        [cx - hx, cy + hy, cz + hz],
+    ];
+    let mut positions = Vec::with_capacity(24);
+    for c in &corners {
+        positions.extend_from_slice(c);
+    }
+    let indices: Vec<u32> = vec![
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
+    ];
+    let aabb = vec![cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz];
+    (positions, indices, aabb)
+}
+
+/// A rectangular box (independent per-axis half-extents `hx,hy,hz`, centred
+/// at `(cx, cy, cz)`), rotated `angle` radians about Z, baked directly into
+/// world-space triangle positions (not carried as a transform) — `detect_obb`
+/// reasons about world-space triangle normals, so this must be a genuinely
+/// rotated mesh. Same packing/winding as `box_hxyz`.
+#[allow(clippy::too_many_arguments)]
+fn rotated_box_hxyz(
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    hx: f32,
+    hy: f32,
+    hz: f32,
+    angle: f32,
+) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let local = [
+        [-hx, -hy, -hz],
+        [hx, -hy, -hz],
+        [hx, hy, -hz],
+        [-hx, hy, -hz],
+        [-hx, -hy, hz],
+        [hx, -hy, hz],
+        [hx, hy, hz],
+        [-hx, hy, hz],
+    ];
+    let mut positions = Vec::with_capacity(24);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for [x, y, z] in local {
+        let wx = c * x - s * y + cx;
+        let wy = s * x + c * y + cy;
+        let wz = z + cz;
+        positions.extend_from_slice(&[wx, wy, wz]);
+        let p = [wx, wy, wz];
+        for axis in 0..3 {
+            if p[axis] < min[axis] {
+                min[axis] = p[axis];
+            }
+            if p[axis] > max[axis] {
+                max[axis] = p[axis];
+            }
+        }
+    }
+    let indices: Vec<u32> = vec![
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
+    ];
+    let aabb = vec![min[0], min[1], min[2], max[0], max[1], max[2]];
+    (positions, indices, aabb)
+}
+
+/// A rectangular box (half-extents `h`, centred at `c`) under a FULL
+/// three-axis rotation (`rz`,`ry`,`rx`, applied as Rz*Ry*Rx), baked into
+/// world-space triangle positions. [`rotated_box_hxyz`] only yaws, so two
+/// boxes built with it always share the world Z axis; this one lets a fixture
+/// put a pair at a GENUINE MUTUAL rotation, with no axis shared between them.
+/// Mirrors `rotatedBoxXyz` in `engine-ts/depth-provenance.test.ts`.
+fn rotated_box_xyz(
+    c: [f32; 3],
+    h: [f32; 3],
+    rz: f32,
+    ry: f32,
+    rx: f32,
+) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let (cz, sz) = (rz.cos(), rz.sin());
+    let (cy, sy) = (ry.cos(), ry.sin());
+    let (cx, sx) = (rx.cos(), rx.sin());
+    let m = [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ];
+    let local = [
+        [-h[0], -h[1], -h[2]],
+        [h[0], -h[1], -h[2]],
+        [h[0], h[1], -h[2]],
+        [-h[0], h[1], -h[2]],
+        [-h[0], -h[1], h[2]],
+        [h[0], -h[1], h[2]],
+        [h[0], h[1], h[2]],
+        [-h[0], h[1], h[2]],
+    ];
+    let mut positions = Vec::with_capacity(24);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in local {
+        let mut w = [0.0f32; 3];
+        for (axis, row) in m.iter().enumerate() {
+            w[axis] = row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + c[axis];
+        }
+        positions.extend_from_slice(&w);
+        for axis in 0..3 {
+            if w[axis] < min[axis] {
+                min[axis] = w[axis];
+            }
+            if w[axis] > max[axis] {
+                max[axis] = w[axis];
+            }
+        }
+    }
+    let indices: Vec<u32> = vec![
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
+    ];
+    let aabb = vec![min[0], min[1], min[2], max[0], max[1], max[2]];
+    (positions, indices, aabb)
+}
+
+/// A closed triangular prism: the `footprint` triangle (XY) extruded between
+/// `z0` and `z1`. Exact-coordinate fixtures (no trig) so the slanted contact face
+/// is bit-identically coplanar in `f32` and `f64`, exercising the coplanar-touch
+/// fallback without the SAT degeneracy a rotated box would introduce (#1362 Bug A).
+fn tri_prism(footprint: [[f32; 2]; 3], z0: f32, z1: f32) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let [p0, p1, p2] = footprint;
+    // 0..2 bottom, 3..5 top.
+    let v: [[f32; 3]; 6] = [
+        [p0[0], p0[1], z0],
+        [p1[0], p1[1], z0],
+        [p2[0], p2[1], z0],
+        [p0[0], p0[1], z1],
+        [p1[0], p1[1], z1],
+        [p2[0], p2[1], z1],
+    ];
+    let mut positions = Vec::with_capacity(18);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in &v {
+        positions.extend_from_slice(p);
+        for axis in 0..3 {
+            if p[axis] < min[axis] {
+                min[axis] = p[axis];
+            }
+            if p[axis] > max[axis] {
+                max[axis] = p[axis];
+            }
+        }
+    }
+    // bottom, top, then a quad (2 tris) per footprint edge.
+    let indices: Vec<u32> = vec![
+        0, 1, 2, // bottom
+        3, 4, 5, // top
+        0, 1, 4, 0, 4, 3, // edge p0-p1
+        1, 2, 5, 1, 5, 4, // edge p1-p2 (the shared slanted face when reused)
+        2, 0, 3, 2, 3, 5, // edge p2-p0
+    ];
+    let aabb = vec![min[0], min[1], min[2], max[0], max[1], max[2]];
+    (positions, indices, aabb)
+}
+
+/// Non-box "tub": a 10 x 10 x 1 block with an open-top recess [1,9]x[1,9]
+/// from z = 0.875 up. The recess floor (z = 0.875) is a solid surface INSIDE
+/// the element's own AABB, so another element can cross it while staying
+/// AABB-contained — the shape class behind the eight Infra-Bridge pairs.
+/// `detect_obb` declines it: the z-normal family has three offset planes
+/// (0, 0.875, 1). Mirrors the TS `tubEl`.
+fn tub() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    #[rustfmt::skip]
+    let positions: Vec<f32> = vec![
+        // 0-3: outer bottom (z=0)
+        0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 10.0, 0.0,
+        // 4-7: outer top (z=1)
+        0.0, 0.0, 1.0, 10.0, 0.0, 1.0, 10.0, 10.0, 1.0, 0.0, 10.0, 1.0,
+        // 8-11: recess rim (z=1)
+        1.0, 1.0, 1.0, 9.0, 1.0, 1.0, 9.0, 9.0, 1.0, 1.0, 9.0, 1.0,
+        // 12-15: recess floor (z=0.875)
+        1.0, 1.0, 0.875, 9.0, 1.0, 0.875, 9.0, 9.0, 0.875, 1.0, 9.0, 0.875,
+    ];
+    #[rustfmt::skip]
+    let indices: Vec<u32> = vec![
+        // bottom
+        0, 2, 1, 0, 3, 2,
+        // outer walls
+        0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7,
+        // rim annulus (z=1, outer 4-7 to inner 8-11)
+        4, 5, 9, 4, 9, 8, 5, 6, 10, 5, 10, 9, 6, 7, 11, 6, 11, 10, 7, 4, 8, 7, 8, 11,
+        // recess walls (rim 8-11 down to floor 12-15)
+        8, 9, 13, 8, 13, 12, 9, 10, 14, 9, 14, 13, 10, 11, 15, 10, 15, 14, 11, 8, 12, 11, 12, 15,
+        // recess floor
+        12, 14, 13, 12, 15, 14,
+    ];
+    let aabb = vec![0.0, 0.0, 0.0, 10.0, 10.0, 1.0];
+    (positions, indices, aabb)
+}
+
+/// Plate [2,8]x[2,8] from z = 0.4 up through the tub's recess-floor plane
+/// (z = 0.875), side faces split into two bands at `z_mid` so the CROSSING
+/// triangles' vertices sit at `z_mid` / `z_top`. Mirrors the TS
+/// `bandedPlateEl`.
+fn banded_plate(z_mid: f32, z_top: f32) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let ring = |z: f32| -> [f32; 12] { [2.0, 2.0, z, 8.0, 2.0, z, 8.0, 8.0, z, 2.0, 8.0, z] };
+    let mut positions: Vec<f32> = Vec::with_capacity(36);
+    positions.extend_from_slice(&ring(0.4));
+    positions.extend_from_slice(&ring(z_mid));
+    positions.extend_from_slice(&ring(z_top));
+    #[rustfmt::skip]
+    let mut indices: Vec<u32> = vec![
+        0, 2, 1, 0, 3, 2, // bottom
+        8, 9, 10, 8, 10, 11, // top
+    ];
+    for band in 0..2u32 {
+        let lo = band * 4;
+        let hi = lo + 4;
+        for k in 0..4u32 {
+            let a = lo + k;
+            let b = lo + ((k + 1) % 4);
+            indices.extend_from_slice(&[a, b, hi + ((k + 1) % 4), a, hi + ((k + 1) % 4), hi + k]);
+        }
+    }
+    let aabb = vec![2.0, 2.0, 0.4, 8.0, 8.0, z_top];
+    (positions, indices, aabb)
+}
+
+/// Build a session from already-built `(positions, indices, aabb)` parts.
+fn session_of_parts(parts: &[(Vec<f32>, Vec<u32>, Vec<f32>)]) -> ClashSession {
+    let mut positions: Vec<f32> = Vec::new();
+    let mut pos_ranges: Vec<u32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut idx_ranges: Vec<u32> = Vec::new();
+    let mut aabbs: Vec<f32> = Vec::new();
+    for (p, idx, ab) in parts {
+        pos_ranges.push(positions.len() as u32);
+        pos_ranges.push(p.len() as u32);
+        idx_ranges.push(indices.len() as u32);
+        idx_ranges.push(idx.len() as u32);
+        positions.extend_from_slice(p);
+        indices.extend_from_slice(idx);
+        aabbs.extend_from_slice(ab);
+    }
+    let mut session = ClashSession::new();
+    session.ingest(&positions, &pos_ranges, &indices, &idx_ranges, &aabbs);
+    session
+}
+
+/// A closed, CONCAVE L-shaped prism: footprint
+/// `(0,0)-(2,0)-(2,1)-(1,1)-(1,2)-(0,2)` extruded z=0..1. The square
+/// `[1,2]×[1,2]` is the notch — inside the AABB but OUTSIDE the solid.
+fn l_prism() -> TriMesh {
+    let positions: Vec<f64> = vec![
+        // bottom (z=0): 0..5
+        0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 0.0,
+        // top (z=1): 6..11
+        0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0,
+    ];
+    let indices: Vec<u32> = vec![
+        // bottom cap (fan from 0)
+        0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, // top cap (fan from 6)
+        6, 7, 8, 6, 8, 9, 6, 9, 10, 6, 10, 11, // sides (one quad per footprint edge)
+        0, 1, 7, 0, 7, 6, 1, 2, 8, 1, 8, 7, 2, 3, 9, 2, 9, 8, 3, 4, 10, 3, 10, 9, 4, 5, 11, 4, 11,
+        10, 5, 0, 6, 5, 6, 11,
+    ];
+    TriMesh::new(positions, indices)
+}
+
+/// The concave L prism (same footprint as [`l_prism`]) as `f32` session parts.
+fn l_part() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    let positions: Vec<f32> = vec![
+        // bottom (z=0): 0..5
+        0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 0.0,
+        // top (z=1): 6..11
+        0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0,
+    ];
+    let indices: Vec<u32> = vec![
+        // bottom cap (fan from 0), top cap (fan from 6)
+        0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 6, 7, 8, 6, 8, 9, 6, 9, 10, 6, 10, 11,
+        // sides (one quad per footprint edge)
+        0, 1, 7, 0, 7, 6, 1, 2, 8, 1, 8, 7, 2, 3, 9, 2, 9, 8, 3, 4, 10, 3, 10, 9, 4, 5, 11, 4, 11,
+        10, 5, 0, 6, 5, 6, 11,
+    ];
+    let aabb = vec![0.0, 0.0, 0.0, 2.0, 2.0, 1.0];
+    (positions, indices, aabb)
+}
+
+const HARD: u8 = 0;
+const CLEARANCE: u8 = 1;
+
+/// `distance` is either a depth MEASURED on the meshes or an ESTIMATE read off
+/// the AABBs, and the two are not interchangeable. These mirror the TS fixtures
+/// in `engine-ts/depth-provenance.test.ts` one for one, so a kernel that
+/// labelled a pair differently from its twin would fail here.
+#[test]
+fn a_genuine_crossing_is_labelled_mesh_measured() {
+    // A block driven 75 mm into a 200 mm slab: the block's lower corners lie
+    // strictly inside the slab, so the mesh probe has a vertex to measure from.
+    let session = session_of_parts(&[
+        box_hxyz(5.0, 5.0, 0.1, 5.0, 5.0, 0.1),
+        box_hxyz(4.5, 4.5, 0.5625, 0.5, 0.5, 0.4375),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn a_box_member_piercing_clean_through_another_box_is_labelled_an_estimate() {
+    // Maintainer review on #2536, reproduced: a 0.4x0.4 duct, 2 m long,
+    // straight through the 200 mm thickness of a 5.0 x 0.2 x 3.0 m wall,
+    // both boxes, centred. The plain 15-axis box-box MTD picks the wall's
+    // thin Y axis as the winning separating axis — but along that axis the
+    // duct's own half-length (1.0 m) dominates the wall's half-thickness
+    // (0.1 m), so the "exact" depth comes out 1.1 m: 5.5x the true 0.2 m
+    // wall thickness. A through-penetration must not carry the box-exact
+    // label even though both operands ARE boxes. Mirrors the TS fixture in
+    // `engine-ts/depth-provenance.test.ts`.
+    let session = session_of_parts(&[
+        box_hxyz(0.0, 0.0, 0.0, 2.5, 0.1, 1.5),
+        box_hxyz(0.0, 0.0, 0.0, 0.2, 1.0, 0.2),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn a_box_member_piercing_clean_through_rotated_15_degrees_is_labelled_an_estimate() {
+    // Same wall/duct shape and true ~0.2 m overlap as the aligned case above,
+    // but the DUCT ALONE is rotated 15 degrees about Z relative to the
+    // (still axis-aligned) wall, so `is_through_penetration`'s old shared-
+    // frame requirement could no longer find a common axis set between wall
+    // and duct. Before the per-candidate-axis fix, this fell through to the
+    // raw 15-axis MTD unchecked and re-certified an order-of-magnitude-
+    // inflated number as `Mesh` (measured -1.1177 on the TS harness against
+    // a true ~0.207 m — mirrors `engine-ts/depth-provenance.test.ts`).
+    let angle = 15.0_f32.to_radians();
+    let session = session_of_parts(&[
+        box_hxyz(0.0, 0.0, 0.0, 2.5, 0.1, 1.5),
+        rotated_box_hxyz(0.0, 0.0, 0.0, 0.2, 1.0, 0.2, angle),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn two_walls_crossing_at_an_x_junction_are_labelled_an_estimate_not_the_full_wall_height() {
+    // Reviewer regression on #2536: the two most ordinary elements in any
+    // building model, crossing. Two 200 mm walls, both 3 m tall, meeting at
+    // an X — each pierces the other clean through in thickness. The shared
+    // volume is a 0.2 x 0.2 x 3 m column, so 0.2 m is the honest depth, and
+    // that is what `main` reported. The box-box MTD is 3.0 (the shared
+    // height axis is the cheapest separating translation), and the
+    // through-penetration guard used to MISS this pair because it required
+    // the piercing cross-section to be STRICTLY inside the other's: the
+    // height axis TIES, so `r_q - margin` rejected it and the raw 3.0 was
+    // certified `Mesh`. Mirrors the TS fixture in
+    // `engine-ts/depth-provenance.test.ts`.
+    let session = session_of_parts(&[
+        box_hxyz(0.0, 0.0, 1.5, 5.0, 0.1, 1.5),
+        box_hxyz(0.0, 0.0, 1.5, 0.1, 5.0, 1.5),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+    assert_eq!(result.records[0].distance, -0.200_000_002_980_232_24);
+}
+
+#[test]
+fn an_x_junction_of_walls_of_different_heights_is_labelled_an_estimate_too() {
+    // The tie is not what makes the pair a through-penetration, so breaking
+    // it must not bring the inflated number back: a 3 m wall crossing a
+    // 2.5 m one reported -2.5 `Mesh` (the shorter wall's full height) under
+    // the strict form. The shared volume is still 0.2 x 0.2 x 2.5 m, so
+    // 0.2 m is still the honest depth.
+    let session = session_of_parts(&[
+        box_hxyz(0.0, 0.0, 1.5, 5.0, 0.1, 1.5),
+        box_hxyz(0.0, 0.0, 1.25, 0.1, 5.0, 1.25),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+    assert_eq!(result.records[0].distance, -0.200_000_002_980_232_24);
+}
+
+#[test]
+fn an_x_junction_at_a_generic_mutual_rotation_is_labelled_an_estimate() {
+    // Reviewer's stated gap on the fix: every other rotated fixture here
+    // turns ONE box (`rotated_box_hxyz` only yaws), so the pair always still
+    // shares the world Z axis and the relaxation was unproven where the two
+    // boxes share no axis at all. Here each wall carries its own three-axis
+    // rotation, so no axis of one is parallel to any axis of the other.
+    let session = session_of_parts(&[
+        rotated_box_xyz([0.0, 0.0, 0.0], [5.0, 0.1, 1.5], 0.7, 0.4, 1.1),
+        rotated_box_xyz([0.0, 0.0, 0.0], [0.1, 5.0, 1.5], 0.76, 0.48, 1.2),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn a_plain_corner_overlap_at_a_generic_mutual_rotation_keeps_the_mesh_label() {
+    // The other half of the same gap: relaxing the containment test to admit
+    // touching edges must not start DEMOTING genuinely measurable pairs to
+    // estimates. Two unit blocks overlapping at a corner, each under its own
+    // three-axis rotation (again no shared axis), are a plain partial
+    // overlap — neither cross-section is anywhere near inside the other's —
+    // so the box-exact MTD stays certified.
+    let session = session_of_parts(&[
+        rotated_box_xyz([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 0.3, 0.2, 0.9),
+        rotated_box_xyz([1.2, 1.2, 1.2], [1.0, 1.0, 1.0], 1.7, 0.8, 2.3),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn a_through_penetration_below_the_precision_floor_reports_touch_not_a_labelled_hard_clash() {
+    // Precedence pin (#2536 rebase over #2594): a pair can simultaneously be
+    // a through-penetration (declines the box-exact `Mesh` label, falls back
+    // to the AABB estimate) AND have that estimate at or below the f32
+    // precision floor for its coordinate magnitude — the two guards in
+    // `test_pair` fire on the same result. The floor wins: it is checked
+    // BEFORE the through-penetration guard decides `Mesh` vs `Estimate`, so
+    // this reports `Touch`, not a `Hard` clash labelled either way. Same
+    // wall/duct through-penetration shape as the aligned case above (true
+    // overlap 0.2 m), translated far enough from the origin (1,000,000
+    // units) that `precision_floor` grows past 0.2 m: floor = extent *
+    // 2^-22 ~ 1e6 * 2.384e-7 ~ 0.238 m > 0.2 m. Mirrors the TS fixture in
+    // `engine-ts/depth-provenance.test.ts`.
+    let off = 1_000_000.0_f32;
+    let session = session_of_parts(&[
+        box_hxyz(off, 0.0, 0.0, 2.5, 0.1, 1.5),
+        box_hxyz(off, 0.0, 0.0, 0.2, 1.0, 0.2),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+    assert_eq!(result.records[0].distance, 0.0);
+}
+
+#[test]
+fn a_contained_non_box_pair_flush_at_f32_noise_scale_reports_touch_not_hard() {
+    // The eight Infra-Bridge pairs (#2536 rebase decision — THE FLOOR WINS):
+    // an element authored FLUSH against a surface inside another element's
+    // AABB. The crossing exists (f32 rounding pushes the surfaces through
+    // each other by ~1 ULP), but every crossing vertex sits within f32 noise
+    // of the other surface — while the AABB estimate, the number the depth
+    // rework would report for this non-box contained pair, is the contained
+    // element's own extent (~0.475 m here, 4.084 m on the bridge), far above
+    // the floor. Floor-testing only the reported estimate promotes the pair
+    // to `Hard` at a number that measures nothing; the crossing-vertex
+    // evidence (`crossing_vertex_penetration`) must gate it back to `Touch`.
+    // Plate side-band vertices at 0.875 - 6e-8 / 0.875 + 1.2e-7 straddle the
+    // tub's recess floor (z = 0.875) by ~1-2 f32 ULP; the floor here is
+    // 10 * 2^-22 ~ 2.4e-6, three orders above the ~6e-8 evidence. Mirrors
+    // the TS fixture in `engine-ts/depth-provenance.test.ts`.
+    let session = session_of_parts(&[tub(), banded_plate(0.875 - 6e-8, 0.875 + 1.2e-7)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+    assert_eq!(result.records[0].distance, 0.0);
+}
+
+#[test]
+fn a_contained_non_box_pair_with_a_real_above_floor_crossing_stays_hard() {
+    // Discriminating companion to the flush pin above: the same tub/plate
+    // shape with the plate genuinely 10 mm through the recess floor. The
+    // crossing-vertex evidence (~0.01 m) clears the floor, so the gate must
+    // NOT suppress it — the pair stays `Hard`, reported at the AABB estimate
+    // with the honest `Estimate` label (non-box pair, no certified depth).
+    let session = session_of_parts(&[tub(), banded_plate(0.865, 0.885)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn a_member_piercing_clean_through_is_labelled_an_estimate() {
+    // A triangular-prism column passing right through a box slab. The column
+    // is NOT a box (`detect_obb` declines it: the two triangular caps are
+    // antipodal and canonicalize into one family, plus three side-quad
+    // families, so 4 face-normal families, not 3), so there is no certified
+    // box-box depth and the number reported is the
+    // smallest overlapping AABB dimension — an estimate, not a measured depth.
+    let session = session_of_parts(&[
+        box_hxyz(5.0, 5.0, 0.1, 5.0, 5.0, 0.1),
+        tri_prism([[4.0, 4.0], [4.3, 4.0], [4.15, 4.3]], -5.0, 5.0),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn coincident_footprint_layers_are_labelled_mesh_measured() {
+    // Two BOX layers sharing a footprint, overlapping 40 mm. Their surfaces
+    // only COINCIDE — no triangle pair crosses — so this lands in the
+    // coplanar-overlap branch. Both parts are boxes, so the exact box-box
+    // depth (the Z overlap) is certifiable there too.
+    let session = session_of_parts(&[
+        box_hxyz(5.0, 5.0, 0.1, 5.0, 5.0, 0.1),
+        box_hxyz(5.0, 5.0, 0.285, 5.0, 5.0, 0.125),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn an_enclosed_layer_is_labelled_mesh_measured() {
+    // A thin BOX layer modelled wholly inside a thicker BOX: no surface
+    // crossing at all, so this lands in the enclosed-solid branch. Both are
+    // boxes, so the exact depth is certified there too — it happens to equal
+    // the thin layer's own thickness, the value most easily mistaken for a
+    // guess.
+    let session = session_of_parts(&[
+        box_hxyz(5.0, 5.0, 0.02, 5.0, 5.0, 0.02),
+        box_hxyz(5.0, 5.0, 0.125, 5.0, 5.0, 0.125),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn a_coincident_footprint_pair_below_the_precision_floor_reports_touch_not_a_labelled_hard_clash() {
+    // Structural pin, not just a value pin: this branch (surfaces coincide,
+    // no triangle crossing, AABB penetration beyond tolerance) built its
+    // `NarrowResult` directly and never checked `precision_floor` — unlike
+    // the crossing branch (`a_through_penetration_below_the_precision_floor_
+    // reports_touch_not_a_labelled_hard_clash` above), which does. Same
+    // shape and true depth (0.04 m) as `coincident_footprint_layers_are_
+    // labelled_mesh_measured` above, translated 1,000,000 units out where
+    // `precision_floor` grows to ~0.238 m (> 0.04 m): must report `Touch`,
+    // not `Hard`/`Mesh`/-0.04. Mirrors the TS fixture in
+    // `engine-ts/depth-provenance.test.ts`.
+    let off = 1_000_000.0_f32;
+    let session = session_of_parts(&[
+        box_hxyz(off + 5.0, 5.0, 0.1, 5.0, 5.0, 0.1),
+        box_hxyz(off + 5.0, 5.0, 0.285, 5.0, 5.0, 0.125),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+    assert_eq!(result.records[0].distance, 0.0);
+}
+
+#[test]
+fn an_enclosed_pair_below_the_precision_floor_reports_touch_not_a_labelled_hard_clash() {
+    // Same regression as above, for the enclosed-solid branch (one element's
+    // AABB wholly inside the other's, no surface crossing at all): it also
+    // built its `NarrowResult` directly and never checked `precision_floor`.
+    // Same shape and true depth (0.04 m) as `an_enclosed_layer_is_labelled_
+    // mesh_measured` above, same 1,000,000-unit translation; must report
+    // `Touch`, not `Hard`. Mirrors the TS fixture in
+    // `engine-ts/depth-provenance.test.ts`.
+    let off = 1_000_000.0_f32;
+    let session = session_of_parts(&[
+        box_hxyz(off + 5.0, 5.0, 0.02, 5.0, 5.0, 0.02),
+        box_hxyz(off + 5.0, 5.0, 0.125, 5.0, 5.0, 0.125),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+    assert_eq!(result.records[0].distance, 0.0);
+}
+
+#[test]
+fn a_clearance_gap_is_labelled_mesh_measured() {
+    // `min_dist` is an exact triangle-to-triangle distance, not a box reading.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], CLEARANCE, 0.001, 1.5, false);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Clearance);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn a_reported_touch_is_labelled_mesh_measured() {
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+    assert_eq!(result.records[0].distance_kind, DistanceKind::Mesh);
+}
+
+#[test]
+fn overlapping_cubes_hard() {
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "expected exactly one hard clash");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Hard);
+    assert!(rec.distance < 0.0, "penetration distance must be negative, got {}", rec.distance);
+    // The coplanar/flush overlap must report the real (non-degenerate) overlap
+    // region so it renders as a visible penetration box (#1402), not the zero-size
+    // box of two near-coincident surface points. Overlap here is 0.5 x 1 x 1.
+    let dx = rec.bounds[3] - rec.bounds[0];
+    let dy = rec.bounds[4] - rec.bounds[1];
+    let dz = rec.bounds[5] - rec.bounds[2];
+    assert!(
+        dx > 0.4 && dx < 0.6 && dy > 0.5 && dz > 0.5,
+        "coplanar hard clash must report a visible overlap region, got {dx}x{dy}x{dz}"
+    );
+}
+
+#[test]
+fn separated_cubes_hard_none() {
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 0, "separated cubes are not a hard clash");
+}
+
+#[test]
+fn separated_cubes_clearance_hit() {
+    // Cubes at x=0 and x=2: faces at x=0.5 and x=1.5 -> gap 1.0.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], CLEARANCE, 0.001, 1.5, false);
+    assert_eq!(result.records.len(), 1, "clearance 1.5 should report the gap");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Clearance);
+    assert!((rec.distance - 1.0).abs() < 1e-6, "gap should be ~1.0, got {}", rec.distance);
+}
+
+#[test]
+fn separated_cubes_clearance_miss() {
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], CLEARANCE, 0.001, 0.5, false);
+    assert_eq!(result.records.len(), 0, "clearance 0.5 < gap 1.0 -> no record");
+}
+
+#[test]
+fn touching_faces_no_touch_report() {
+    // Cubes at x=0 and x=1: faces coincide at x=0.5 -> contact, not penetration.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 0, "touch with report_touch=false -> none");
+}
+
+#[test]
+fn touching_faces_with_touch_report() {
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, true);
+    assert_eq!(result.records.len(), 1, "touch with report_touch=true -> one record");
+    assert_eq!(result.records[0].status, ClashStatus::Touch);
+}
+
+#[test]
+fn self_clash_group() {
+    // Three cubes: two overlap, one is far away. group_b empty -> self-clash.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (10.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1, 2], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "only the overlapping pair clashes");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Hard);
+    // Records carry GLOBAL element indices; the overlapping pair is (0, 1).
+    assert_eq!((rec.a, rec.b), (0, 1));
+}
+
+#[test]
+fn cross_group_dedup_and_same_element_skip() {
+    // Cross-group clash (group_b non-empty): exercises the BVH-over-group_a
+    // query-per-group_b-element branch of `candidate_pairs`, distinct from the
+    // self-clash (`group_b` empty) path every other test above uses.
+    //
+    // Cube 0 = a "wall", cube 1 = an overlapping "pipe", cube 2 = a distant pipe.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (10.0, 0.0, 0.0)]);
+
+    // group_a deliberately lists the wall's global id TWICE (e.g. the caller
+    // accidentally included the same element in a group from two sources). The
+    // BVH is built with one item per group_a POSITION, so both positions 0 and 1
+    // map to global element 0 and will both hit group_b element 1's query -> the
+    // HashSet pair-dedup in `candidate_pairs` must collapse that to one record.
+    let group_a = &[0u32, 0u32];
+    // group_b includes the wall's OWN global id (0) alongside the two pipes: a
+    // group_b element equal to a group_a element (same underlying entity, e.g.
+    // classified into both groups) must be skipped rather than clashed with
+    // itself, and the far pipe (2) must not clash at all.
+    let group_b = &[0u32, 1u32, 2u32];
+
+    let result = session.run_rule(group_a, group_b, HARD, 0.001, 0.0, false);
+
+    assert_eq!(
+        result.records.len(),
+        1,
+        "expected exactly one deduplicated cross-group record, got {:?}",
+        result.records.iter().map(|r| (r.a, r.b)).collect::<Vec<_>>()
+    );
+    let rec = &result.records[0];
+    assert_eq!(
+        (rec.a, rec.b),
+        (0, 1),
+        "the only real cross-group clash is wall(0) vs overlapping pipe(1)"
+    );
+    assert_eq!(rec.status, ClashStatus::Hard);
+}
+
+#[test]
+fn enclosed_solid_hard() {
+    // A side-1 cube fully inside a side-10 cube, both centred at origin: surfaces
+    // are ~4.5 apart so no triangle pair is within margin — only full enclosure
+    // signals the clash, via the point-in-solid ray cast.
+    let session = session_of_sized(&[(0.0, 0.0, 0.0, 10.0), (0.0, 0.0, 0.0, 1.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "fully-enclosed solid must be a hard clash");
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+    assert!(result.records[0].distance < 0.0, "penetration distance must be negative");
+}
+
+#[test]
+fn separated_not_enclosed_none() {
+    // Two side-1 cubes far apart: neither AABB contains the other, so the
+    // enclosure path must stay quiet (no false positive).
+    let session = session_of_sized(&[(0.0, 0.0, 0.0, 1.0), (20.0, 0.0, 0.0, 1.0)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 0, "disjoint cubes are not a clash");
+}
+
+#[test]
+fn contained_pair_with_a_non_box_element_falls_back_to_the_aabb_estimate() {
+    // #1866 was fixed by `max_penetration_into` — a nearest-crossing-vertex
+    // probe held (PR #2536) as a sampling artifact that converges to 0 under
+    // retessellation instead of to the true depth (see `obb.rs`). Its
+    // replacement, the box-box SAT depth, cannot certify a concave L-prism (it
+    // is not a box), so this KNOWN case regresses to the pre-#1866 AABB
+    // signed-gap estimate — reported honestly as `Estimate`, not silently
+    // mislabelled `Mesh` the way the old probe was. A non-box depth metric is
+    // future work (PR #2536 hold comment, "landing conditions").
+    let session = session_of_parts(&[l_part(), box_hxyz(1.2, 1.4, 0.5, 0.25, 0.2, 0.2)]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "expected one hard clash");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Hard);
+    assert_eq!(rec.distance_kind, DistanceKind::Estimate);
+}
+
+#[test]
+fn penetrating_pair_reports_mesh_depth_not_bar_thickness() {
+    // Mirrors the TS test: block [-1,1]^3 and a bar x in [0.5, 3] with a
+    // 0.2 x 0.2 cross-section, entering through the block's x = 1 face. True
+    // penetration depth = 0.5 (the buried end cap's distance to the x = 1 face;
+    // the y/z faces are 0.9 away). The AABB min-axis overlap is 0.2 — the bar's
+    // own thickness — because the X overlap (0.5) is the largest of the three.
+    // Neither AABB contains the other, so this is not the #1866 contained case.
+    let session = session_of_parts(&[
+        box_hxyz(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+        box_hxyz(1.75, 0.0, 0.0, 1.25, 0.1, 0.1),
+    ]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "expected one hard clash");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Hard);
+    assert!(
+        (rec.distance + 0.5).abs() < 1e-9,
+        "depth must be the mesh penetration 0.5, got {}",
+        rec.distance
+    );
+}
+
+#[test]
+fn contains_point_convex_cube() {
+    let (p, idx, _) = unit_cube(0.0, 0.0, 0.0);
+    let positions: Vec<f64> = p.iter().map(|&x| x as f64).collect();
+    let mesh = TriMesh::new(positions, idx);
+    assert!(mesh.contains_point([0.0, 0.0, 0.0]), "centre is inside");
+    assert!(!mesh.contains_point([5.0, 5.0, 5.0]), "far point is outside");
+}
+
+#[test]
+fn contains_point_concave_notch_is_outside() {
+    // The defining guarantee of ray casting over an AABB heuristic: a point in
+    // the L-prism's concave notch is inside the AABB but OUTSIDE the solid.
+    let mesh = l_prism();
+    assert!(mesh.contains_point([0.5, 0.5, 0.5]), "point in the L arm is inside the solid");
+    assert!(!mesh.contains_point([1.5, 1.5, 0.5]), "point in the concave notch is OUTSIDE the solid");
+    assert!(!mesh.contains_point([5.0, 5.0, 5.0]), "far point is outside");
+}
+
+#[test]
+fn skewed_face_touch_no_false_hard() {
+    // Bug A (#1362): two members that only SHARE A SLANTED FACE (no shared volume)
+    // still have fully-overlapping axis-aligned bounds because of the skew. The old
+    // AABB-penetration proxy promoted that bare touch to a false hard clash; the
+    // volumetric confirmation must suppress it.
+    // A = lower-left wedge (x+y<=2); B = upper-right wedge sharing the hypotenuse.
+    let a = tri_prism([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]], 0.0, 1.0);
+    let b = tri_prism([[2.0, 0.0], [0.0, 2.0], [5.0, 5.0]], 0.0, 1.0);
+    // Sanity: their AABBs overlap fully in A's footprint, so the broad phase pairs
+    // them even though the solids only touch along the slanted face.
+    let oa = &a.2;
+    let ob = &b.2;
+    let overlaps = oa[0] <= ob[3] && oa[3] >= ob[0] && oa[1] <= ob[4] && oa[4] >= ob[1];
+    assert!(overlaps, "fixture invalid: AABBs must overlap to reach the narrow phase");
+
+    let session = session_of_parts(&[a, b]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(
+        result.records.len(),
+        0,
+        "a bare slanted-face touch with overlapping AABBs must NOT be a hard clash"
+    );
+}
+
+#[test]
+fn skewed_genuine_overlap_still_hard() {
+    // Recall guard for Bug A: the SAME wedge A, but a box that genuinely straddles
+    // the slanted face -> the fix must still report the hard clash (it suppresses
+    // bare touches, not real overlaps).
+    let a = tri_prism([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]], 0.0, 1.0);
+    let b = box_hxyz(1.0, 1.0, 0.5, 0.5, 0.5, 0.5); // [0.5,1.5]^2 x [0,1], straddles x+y=2
+    let session = session_of_parts(&[a, b]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "a genuine straddling overlap is a hard clash");
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+}
+
+#[test]
+fn aligned_unequal_overlap_still_hard() {
+    // Bug A recall (PR #1455 review): two AXIS-ALIGNED members of unequal length
+    // that genuinely overlap by a small amount, sharing y/z extents. The vertex-
+    // centroid midpoint (~x=2.7) lies outside the shorter member, so a single
+    // centroid probe would drop the clash; the AABB-overlap-centre probe keeps it.
+    let a = box_hxyz(0.0, 0.0, 0.0, 5.0, 0.5, 0.5); // x[-5,5]
+    let b = box_hxyz(5.4, 0.0, 0.0, 0.5, 0.5, 0.5); // x[4.9,5.9], overlaps x[4.9,5]
+    let session = session_of_parts(&[a, b]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "a genuine aligned overlap is a hard clash");
+    assert_eq!(result.records[0].status, ClashStatus::Hard);
+}
+
+#[test]
+fn crossing_hard_bounds_are_tight() {
+    // Bug B (#1362 / #1402): two perpendicular bars genuinely cross. The reported
+    // contact bounds must be the LOCAL crossing region, not the whole-element AABB
+    // overlap. Bar A runs along X, bar B along Y; they cross near the origin.
+    let a = box_hxyz(0.0, 0.0, 0.0, 5.0, 0.5, 0.5); // x[-5,5]
+    let b = box_hxyz(0.0, 0.0, 0.0, 0.5, 5.0, 0.5); // y[-5,5]
+    let a_aabb = a.2.clone();
+    let b_aabb = b.2.clone();
+    let session = session_of_parts(&[a, b]);
+    let result = session.run_rule(&[0, 1], &[], HARD, 0.001, 0.0, false);
+    assert_eq!(result.records.len(), 1, "crossing bars are a hard clash");
+    let rec = &result.records[0];
+    assert_eq!(rec.status, ClashStatus::Hard);
+
+    // Tight along the long bar: A spans x[-5,5] (10 m), but the contact is only
+    // the local crossing (~B's 1 m width), so the box must NOT span the whole bar.
+    let bounds_x = rec.bounds[3] - rec.bounds[0];
+    assert!(
+        bounds_x < 2.0,
+        "contact bounds must be local along the long bar, not its full length (got {bounds_x})"
+    );
+
+    // The tight bounds must stay inside the element-OVERLAP AABB on every axis,
+    // not just element A: A is the long X bar, so an X regression returning most
+    // of A's 10 m span would still satisfy an A-only check. The overlap is
+    // x[-0.5,0.5] (B's width) on X.
+    for axis in 0..3 {
+        let overlap_min = a_aabb[axis].max(b_aabb[axis]) as f64;
+        let overlap_max = a_aabb[axis + 3].min(b_aabb[axis + 3]) as f64;
+        assert!(
+            rec.bounds[axis] >= overlap_min - 1e-6 && rec.bounds[axis + 3] <= overlap_max + 1e-6,
+            "contact bounds escape the element-overlap AABB on axis {axis}"
+        );
+    }
+}
+
+// --- Triangle math unit tests -------------------------------------------------
+
+#[test]
+fn tritri_intersect_piercing() {
+    // Triangle A in the z=0 plane; triangle B pierces straight through it.
+    let a0: Vec3 = [-1.0, -1.0, 0.0];
+    let a1: Vec3 = [1.0, -1.0, 0.0];
+    let a2: Vec3 = [0.0, 1.0, 0.0];
+    let b0: Vec3 = [0.0, 0.0, -1.0];
+    let b1: Vec3 = [0.0, 0.0, 1.0];
+    let b2: Vec3 = [0.5, 0.5, 0.0];
+    assert!(tri_tri_intersect(a0, a1, a2, b0, b1, b2), "piercing should intersect");
+}
+
+#[test]
+fn tritri_intersect_separated() {
+    let a0: Vec3 = [-1.0, -1.0, 0.0];
+    let a1: Vec3 = [1.0, -1.0, 0.0];
+    let a2: Vec3 = [0.0, 1.0, 0.0];
+    // Same triangle translated +2 in z: clearly separated.
+    let b0: Vec3 = [-1.0, -1.0, 2.0];
+    let b1: Vec3 = [1.0, -1.0, 2.0];
+    let b2: Vec3 = [0.0, 1.0, 2.0];
+    assert!(!tri_tri_intersect(a0, a1, a2, b0, b1, b2), "separated should not intersect");
+}
+
+#[test]
+fn tritri_intersect_coincident() {
+    // Identical coplanar triangles: coplanar overlap is treated as touching,
+    // i.e. NOT a hard intersection.
+    let a0: Vec3 = [-1.0, -1.0, 0.0];
+    let a1: Vec3 = [1.0, -1.0, 0.0];
+    let a2: Vec3 = [0.0, 1.0, 0.0];
+    assert!(!tri_tri_intersect(a0, a1, a2, a0, a1, a2), "coincident should not intersect");
+}
+
+#[test]
+fn tritri_distance_parallel_gap() {
+    let a0: Vec3 = [-1.0, -1.0, 0.0];
+    let a1: Vec3 = [1.0, -1.0, 0.0];
+    let a2: Vec3 = [0.0, 1.0, 0.0];
+    // Same triangle, shifted +0.5 in z.
+    let b0: Vec3 = [-1.0, -1.0, 0.5];
+    let b1: Vec3 = [1.0, -1.0, 0.5];
+    let b2: Vec3 = [0.0, 1.0, 0.5];
+    let (dist, _, _) = tri_tri_distance(a0, a1, a2, b0, b1, b2);
+    assert!((dist - 0.5).abs() < 1e-9, "parallel gap should be 0.5, got {dist}");
+}
+
+#[test]
+fn tritri_distance_touching() {
+    let a0: Vec3 = [-1.0, -1.0, 0.0];
+    let a1: Vec3 = [1.0, -1.0, 0.0];
+    let a2: Vec3 = [0.0, 1.0, 0.0];
+    // Coplanar, sharing the vertex region -> distance ~0.
+    let (dist, _, _) = tri_tri_distance(a0, a1, a2, a0, a1, a2);
+    assert!(dist.abs() < 1e-9, "coincident triangles distance should be 0, got {dist}");
+}
+
+#[test]
+fn separated_cubes_clearance_exact_boundary_hits() {
+    // Cubes at x=0 and x=2: faces at x=0.5 and x=1.5 -> gap exactly 1.0.
+    // narrow.rs documents the clearance rule as "ANY gap within the required
+    // clearance is a violation", so a clearance set to EXACTLY the gap must
+    // still report. `separated_cubes_clearance_hit` uses clearance 1.5
+    // against a 1.0 gap — far past the line, where `<=` and `<` agree — so
+    // only a fixture AT the threshold can discriminate the operator.
+    let session = session_of_cubes(&[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
+    let result = session.run_rule(&[0, 1], &[], CLEARANCE, 0.001, 1.0, false);
+    assert_eq!(
+        result.records.len(),
+        1,
+        "clearance exactly equal to the gap must still report (<=, not <)"
+    );
+}
+
+#[test]
+fn tritri_distance_pa_pb_identity_via_b_vertex() {
+    // `tri_tri_distance` returns (dist, pA, pB) with pA on triangle A and pB
+    // on triangle B. Every existing test discards both points, and the only
+    // production caller feeds them to `mid()` and `bounds_of_points()`, which
+    // are symmetric in their arguments — so swapping pA/pB is invisible.
+    // Force the "closest B-vertex to triangle A" loop to win: a large A face
+    // with a near-degenerate B clustered directly above an interior point,
+    // far from A's edges and corners.
+    let a0: Vec3 = [-4.0, -4.0, 0.0];
+    let a1: Vec3 = [4.0, -4.0, 0.0];
+    let a2: Vec3 = [0.0, 4.0, 0.0];
+    let b0: Vec3 = [1.0, 1.0, 5.0];
+    let b1: Vec3 = [1.0001, 1.0, 5.0];
+    let b2: Vec3 = [1.0, 1.0001, 5.0];
+    let (dist, p_a, p_b) = tri_tri_distance(a0, a1, a2, b0, b1, b2);
+    assert!((dist - 5.0).abs() < 1e-3, "expected ~5.0 gap, got {dist}");
+    assert!(
+        p_a[2].abs() < 1e-3 && (p_a[0] - 1.0).abs() < 1e-3 && (p_a[1] - 1.0).abs() < 1e-3,
+        "pA must be the point ON TRIANGLE A (z~0, near (1,1,0)), got {p_a:?}"
+    );
+    assert!(
+        (p_b[2] - 5.0).abs() < 1e-3,
+        "pB must be the point ON TRIANGLE B (z~5), got {p_b:?}"
+    );
+}

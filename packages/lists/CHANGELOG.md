@@ -1,0 +1,681 @@
+# @ifc-lite/lists
+
+## 2.0.0
+
+### Major Changes
+
+- [#3115](https://github.com/LTplus-AG/ifc-lite/pull/3115) [`8ba612f`](https://github.com/LTplus-AG/ifc-lite/commit/8ba612f90d3bb0ad41f756d6fdef6b3250e8d330) Thanks [@louistrue](https://github.com/louistrue)! - CSV: numeric cells export as numbers. **The formula guard's default changed.**
+  Pass `exemptNumbers: false` to `escapeCsvCell` / `guardSpreadsheetFormula` to
+  keep the old behaviour.
+  
+  **Read this first if you consume `@ifc-lite/export`.** The CWE-1236 guard
+  prefixes a leading `=`, `+`, `-`, `@`, TAB or CR with `'` so a spreadsheet reads
+  the cell as text. It now makes one exception by default: a cell that is *wholly*
+  a signed number is left alone. Nothing in your code has to change for the
+  behaviour to change, which is why this is called out here rather than in a
+  footnote.
+  
+  The exception cannot weaken the guard. The exempted language contains only
+  `+ - . e E` and the digits `0-9`, which cannot spell a function name, a cell
+  reference or a `(`. `=`, `@`, TAB and CR are never exempted, `-0.35=cmd` is not
+  wholly a number and stays guarded, and a leading invisible character defeats the
+  exemption rather than the guard, so `<ZWSP>-1` is still prefixed.
+  
+  **What it costs.** The default has to guess from the text, because most callers
+  hand it a bare string, and guessing gets identifiers wrong: a `+`-prefixed phone
+  number is wholly numeric as text, so it is written bare and Excel renders
+  `4.1791E+10` with the `+` gone. `-007` becomes `-7`. Both were previously kept
+  exactly, as `'`-prefixed text.
+  
+  The viewer's Lists CSV does not guess, because it has the value itself: it
+  exempts a cell when the value really is a number and guards it otherwise, so a
+  phone number stays text there and a measure stays summable even in a column that
+  also holds text. So this cost applies to the writers that only ever see strings,
+  which is the CLI, the SDK, MCP, the compare report, search results, zone tables
+  and `@ifc-lite/lists`' own CSV. Pass `exemptNumbers: false` to opt any of them
+  out.
+  
+  **Why the exception exists.** `@ifc-lite/lists` had exempted numbers since [#1772](https://github.com/LTplus-AG/ifc-lite/issues/1772)
+  ("`-0.35` exported as `'-0.35` and broke Excel SUM()") while every other writer
+  guarded them, so the same list exported two ways did not match. The policy is
+  now one default rather than eleven call-site decisions that drift.
+  
+  **The viewer's Lists CSV stopped formatting numbers before writing them.** It
+  ran every value through the display formatter, which calls `toLocaleString()` on
+  integers. Under en-US that wrote `"-1,000"`, quoted because of the comma, so the
+  column stopped summing. Under a locale that groups with `.` it wrote a bare
+  `-3.000`, which a spreadsheet in a `,`-grouping locale reads back as **-3**, a
+  silent 1000x error in a quantity column. Exempting numbers fixes neither, since
+  neither string is wholly numeric in the locale that produced it. CSV is
+  machine-readable output, so it now writes the number, matching what the XLSX
+  writer always did. PDF, which a human reads, is unchanged.
+  
+  Two consequences of that, both deliberate. Unit-converted values now show their
+  full double precision (3 ft in metres is `0.9144000000000001`, not `0.9144`),
+  which is the same value the XLSX export already carried, so the two agree. And grouping a
+  list by a numeric column used to hard-code that column as non-numeric in the
+  schedule/pivot export, where the grouping value is the *only* place the value
+  appears; it wrote `"'-3,000"` and nothing else for -3000. Schedule grouping
+  columns now inherit `numeric` and carry the raw value, falling back to the group
+  label where a bucket holds values that merely format alike.
+  
+  **The numeric test no longer backtracks.** It was
+  `/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/`, quadratic on a failing match and
+  reached only after a trigger matched, so `-` plus 60k digits took ~1.8s. IFC
+  property text is attacker-controllable, which made that a denial of service on
+  an export. It is a linear scan now, and lives in `@ifc-lite/encoding` (no
+  dependencies, already depended on by both callers) as the new `isWhollyNumeric`
+  export, so there is one copy per language rather than one per package. The
+  accepted language is unchanged, checked by sweeping every string up to four
+  characters over the alphabet it is built from against the old regex.
+
+### Patch Changes
+
+- [#3100](https://github.com/LTplus-AG/ifc-lite/pull/3100) [`56ad58c`](https://github.com/LTplus-AG/ifc-lite/commit/56ad58cc8d1d8d54fdb996606f667c0c170d74aa) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix two defects in `listResultToCSV` found by validating its output against RFC 4180 and an independent third-party CSV parser rather than against our own reader.
+  
+  **Records were separated by LF, not CRLF.** RFC 4180 s2.1 says "each record is located on a separate line, delimited by a line break (CRLF)", and its ABNF admits no other separator (`file = [header CRLF] record *(CRLF record) [CRLF]`). Over the 364 real IFC files in this repository the writer produced 1949 bare-LF separators and not one RFC-conformant document; it now emits CRLF and all 364 are clean. No trailing terminator is written, which s2.2 explicitly permits. The viewer's own Lists CSV writer already emitted CRLF, so the two paths disagreed on the same export.
+  
+  **The CWE-1236 spreadsheet formula guard could be bypassed with a leading invisible character.** The guard anchored `/^[=+\-@\t\r]/` at offset 0, so a BOM, zero-width space, left-to-right mark, no-break space, U+2028/U+2029 or a plain space in front of `=` stopped the regex matching while doing nothing to stop Excel or Sheets evaluating the cell as a formula — `\uFEFF=HYPERLINK(...)` sailed through unguarded. IFC text properties are attacker-controllable and can carry any of them. The trigger is now looked for past any leading `\p{Cf}`/`\p{Z}` run, and the invisibles are preserved rather than stripped so no cell content is lost. This is the same fix `packages/sdk/src/namespaces/export.ts` received for [#1944](https://github.com/LTplus-AG/ifc-lite/issues/1944); this copy never got it. The deliberate exemption that keeps a plain signed number such as `-0.35` summable in Excel ([#1772](https://github.com/LTplus-AG/ifc-lite/issues/1772)) is unchanged.
+- Updated dependencies [[`8ba612f`](https://github.com/LTplus-AG/ifc-lite/commit/8ba612f90d3bb0ad41f756d6fdef6b3250e8d330), [`9359bc4`](https://github.com/LTplus-AG/ifc-lite/commit/9359bc488173585b2b90e124cc66dcf8292c4be9), [`f6febcc`](https://github.com/LTplus-AG/ifc-lite/commit/f6febcc2d4986e79b3c44d63853bb72a16475c65), [`00f6e79`](https://github.com/LTplus-AG/ifc-lite/commit/00f6e79c22641ff59bfb3327d910b04f9a164d8b), [`116a3e9`](https://github.com/LTplus-AG/ifc-lite/commit/116a3e94de753b95fa94b2d6c41a0171cd254729)]:
+  - @ifc-lite/encoding@2.1.0
+  - @ifc-lite/data@3.4.1
+
+## 1.23.2
+
+### Patch Changes
+
+- Updated dependencies [[`be6b43c`](https://github.com/LTplus-AG/ifc-lite/commit/be6b43c2b334811422c1cbfbea5d6e6d1b9a401d), [`6ce17fa`](https://github.com/LTplus-AG/ifc-lite/commit/6ce17fa903d38ab8ee3e6ebaf6da8453726d3ce2)]:
+  - @ifc-lite/data@3.4.0
+
+## 1.23.1
+
+### Patch Changes
+
+- Updated dependencies [[`02079a6`](https://github.com/LTplus-AG/ifc-lite/commit/02079a66042a6e446b9f83f656685f6056020718)]:
+  - @ifc-lite/data@3.3.0
+
+## 1.23.0
+
+### Minor Changes
+
+- [#2515](https://github.com/LTplus-AG/ifc-lite/pull/2515) [`ed9acf0`](https://github.com/LTplus-AG/ifc-lite/commit/ed9acf0d5a11c291caa70165e9d673812c75c7fa) Thanks [@louistrue](https://github.com/louistrue)! - Add `zone` column/condition modes that report how much VOLUME of an element sits in each zone (`Volume (mesh)` and `Volume breakdown (mesh)`), backed by a new optional `ListDataProvider.getZoneVolumeShares` hook. The numeric mode is tagged as a volume quantity so the shared per-column unit resolver converts and labels it like any declared `NetVolume`. Providers built before this simply have no volume data and the columns read `null`.
+
+### Patch Changes
+
+- Updated dependencies [[`b4b3e0c`](https://github.com/LTplus-AG/ifc-lite/commit/b4b3e0cfa8ffa9185e96dc266dd6fdc3fef34797)]:
+  - @ifc-lite/encoding@2.0.0
+  - @ifc-lite/data@3.2.4
+
+## 1.22.5
+
+### Patch Changes
+
+- Updated dependencies [[`eb39b27`](https://github.com/LTplus-AG/ifc-lite/commit/eb39b27f5eba186b23b3a683c25fff2c60084d9c), [`7c686f9`](https://github.com/LTplus-AG/ifc-lite/commit/7c686f9ac39f78a707dc083c798b6ef3d255e171)]:
+  - @ifc-lite/encoding@1.16.0
+  - @ifc-lite/data@3.2.3
+
+## 1.22.4
+
+### Patch Changes
+
+- [#2373](https://github.com/LTplus-AG/ifc-lite/pull/2373) [`d954df3`](https://github.com/LTplus-AG/ifc-lite/commit/d954df35ef9e01f30e0a26333381b4dd50f9e59e) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `equals`/`notEquals` list conditions being case-sensitive for boolean-like values, while their `contains` sibling was already case-insensitive. An `IfcBoolean` property displays as `"True"`/`"False"`, and a location-zone `Straddles` condition resolves to a raw JS boolean that stringifies as `"true"`/`"false"` — a condition typed as `IsExternal = true` (or a saved zone `Straddles = True` filter) could silently fail to match, and the equivalent `notEquals` condition could silently include rows that only differed by letter case.
+
+  The fix is scoped to values that look like a boolean/logical (`"true"`/`"false"`/`"unknown"`, any case, or a genuine JS boolean) on both sides of the comparison. Every other value type — GlobalId, Name, classification codes, spatial container names, and any other string property — keeps the original exact, case-sensitive comparison, since e.g. two distinct IFC GlobalIds can differ only by case.
+
+- Updated dependencies [[`d75786f`](https://github.com/LTplus-AG/ifc-lite/commit/d75786f631047d234f204289426f708f0be8674b), [`273b068`](https://github.com/LTplus-AG/ifc-lite/commit/273b06827ef1469f63c396d204474a9f2400c642), [`58fbc63`](https://github.com/LTplus-AG/ifc-lite/commit/58fbc634994742c79375830c1983508752fd78e9), [`d9490e6`](https://github.com/LTplus-AG/ifc-lite/commit/d9490e6e2ecacb65aea42fcaef73fd292a4c3095), [`deb54d3`](https://github.com/LTplus-AG/ifc-lite/commit/deb54d3ff75f35c3c9206c8ea9a1e875426352c6)]:
+  - @ifc-lite/data@3.2.2
+  - @ifc-lite/encoding@1.15.1
+
+## 1.22.3
+
+### Patch Changes
+
+- Updated dependencies [[`befc108`](https://github.com/LTplus-AG/ifc-lite/commit/befc1083e377315231006352cb3fe95949e92b47)]:
+  - @ifc-lite/data@3.2.1
+
+## 1.22.2
+
+### Patch Changes
+
+- Updated dependencies [[`e4d2db5`](https://github.com/LTplus-AG/ifc-lite/commit/e4d2db5f11798e3ec78f45249139d69aa1e65275)]:
+  - @ifc-lite/data@3.2.0
+
+## 1.22.1
+
+### Patch Changes
+
+- [#1927](https://github.com/LTplus-AG/ifc-lite/pull/1927) [`f2357a2`](https://github.com/LTplus-AG/ifc-lite/commit/f2357a2115d8787b62b68fa11951a76f01e6b2de) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix the Wall Schedule preset asking for a quantity that does not exist in IFC. `Qto_WallBaseQuantities` has no `NetArea` member in any schema version — the wall side-area quantity is `NetSideArea` — so the preset's last column resolved against nothing and rendered permanently empty. Closes [#1873](https://github.com/LTplus-AG/ifc-lite/issues/1873).
+
+- Updated dependencies [[`9a7b5a2`](https://github.com/LTplus-AG/ifc-lite/commit/9a7b5a2fc1bb85ce60e954ccf7819829e43431d6)]:
+  - @ifc-lite/data@3.1.0
+
+## 1.22.0
+
+### Minor Changes
+
+- [#1867](https://github.com/LTplus-AG/ifc-lite/pull/1867) [`8492e51`](https://github.com/LTplus-AG/ifc-lite/commit/8492e516f23775930e55a192abe526ff507d79bc) Thanks [@louistrue](https://github.com/louistrue)! - Add `toScheduleRows()`: project a grouped `ListResult` down to a Bonsai-style
+  schedule / pivot presentation — one row per group-value tuple (leaf group),
+  carrying its Count aggregate and configured sums as first-class fields,
+  instead of the nested tree `ListGroup[]` already returned.
+
+  Follow-up to the multi-criteria grouping added for issue [#1790](https://github.com/LTplus-AG/ifc-lite/issues/1790): the reporter
+  came back asking for Count as its own column (not a badge next to the group
+  label) and a pivot/schedule table (grouping columns become leading columns,
+  one row per combination) matching Bonsai's own output — plus a CSV export
+  that mirrors that arrangement.
+
+  `ListGrouping` gains an optional `view?: 'nested' | 'schedule'` field
+  (`undefined` keeps the existing nested-tree behaviour, so persisted lists are
+  unaffected) and a new `ListScheduleRow` type describes each schedule row.
+  The viewer's Lists panel and its CSV/XLSX/PDF export now offer a schedule
+  (pivot) view alongside the existing nested tree.
+
+- [#1869](https://github.com/LTplus-AG/ifc-lite/pull/1869) [`f8a3f39`](https://github.com/LTplus-AG/ifc-lite/commit/f8a3f3970844edf266ae6887884ed3be4293ff8c) Thanks [@louistrue](https://github.com/louistrue)! - Add a `zone` column/condition source (issue [#1810](https://github.com/LTplus-AG/ifc-lite/issues/1810)): location-zone
+  classification (which user-defined 3D zone box an element falls into, plus a
+  "straddles" flag when its bounds cross a zone boundary) can now be surfaced as
+  a list column, grouped/sorted/exported, and used as a filter condition.
+
+  `ColumnDefinition.source` / `PropertyCondition.source` gain a `'zone'` variant
+  (`psetName` holds the zone-SET id, `propertyName` selects `Zone` (default) or
+  `Straddles`). `ListDataProvider` gains two new OPTIONAL accessors,
+  `getZoneAssignment` and `getZoneSetNames` — providers built before this change
+  simply resolve every `zone` column to `null`, so this is purely additive and
+  backward compatible.
+
+### Patch Changes
+
+- Updated dependencies [[`382fa7c`](https://github.com/LTplus-AG/ifc-lite/commit/382fa7cf97c04bad07963e25052cbaeb6c2ba7e3), [`6792dd1`](https://github.com/LTplus-AG/ifc-lite/commit/6792dd11ad7049acb7329221ea8809d6333aefb7), [`8799484`](https://github.com/LTplus-AG/ifc-lite/commit/87994844a5edb66404fa12b0719c89f5ec026c4d), [`22bffac`](https://github.com/LTplus-AG/ifc-lite/commit/22bffac737efa9bdd6ca583518f637593cb4d4bc), [`205a136`](https://github.com/LTplus-AG/ifc-lite/commit/205a136ee69e378ea01cd0d0a8a6dc81cf2fb08f)]:
+  - @ifc-lite/encoding@1.15.0
+  - @ifc-lite/data@3.0.0
+
+## 1.21.0
+
+### Minor Changes
+
+- [#1801](https://github.com/LTplus-AG/ifc-lite/pull/1801) [`e3378c4`](https://github.com/LTplus-AG/ifc-lite/commit/e3378c4a0dd88fc774801e772be24b2f97aca7f7) Thanks [@louistrue](https://github.com/louistrue)! - Count aggregation with multi-criteria grouping in lists (issue [#1790](https://github.com/LTplus-AG/ifc-lite/issues/1790)): `ListGrouping.columnIds` groups rows by several columns in order (e.g. Building, then Storey); `summariseListRows` emits a flat pre-order group list with `level`/`path` and a per-group `count` (the Count aggregate) plus per-column sums at every nesting level. New helpers: `groupingColumnIds` resolves the effective group columns with full backward compatibility for the legacy single `columnId`, and `groupPathKey` encodes a group path into its collision-free unique key (`ListGroup.key` is now this JSON path encoding).
+
+### Patch Changes
+
+- Updated dependencies [[`3441fb9`](https://github.com/LTplus-AG/ifc-lite/commit/3441fb9e902daea8ed7d6f1a692e75618bbecb7e)]:
+  - @ifc-lite/data@2.8.0
+
+## 1.20.1
+
+### Patch Changes
+
+- Updated dependencies [[`2a7c7ff`](https://github.com/LTplus-AG/ifc-lite/commit/2a7c7ffe0ac27a8cc315e5d4a633c56469646cf0), [`7194c95`](https://github.com/LTplus-AG/ifc-lite/commit/7194c95002f2c84cd3c9444d710a50190a976a90)]:
+  - @ifc-lite/data@2.7.0
+
+## 1.20.0
+
+### Minor Changes
+
+- [#1759](https://github.com/LTplus-AG/ifc-lite/pull/1759) [`e49a1a0`](https://github.com/LTplus-AG/ifc-lite/commit/e49a1a020eaafd397af626e88a058b69122a1bd9) Thanks [@louistrue](https://github.com/louistrue)! - Server-parse path now resolves Type-level properties/QTOs in Lists/Schedules identically to the in-browser (WASM) path ([#1751](https://github.com/LTplus-AG/ifc-lite/issues/1751)), and adds a `Type` list column showing the element's IfcTypeProduct name ([#1754](https://github.com/LTplus-AG/ifc-lite/issues/1754)).
+
+  Two things were broken on the server path and are fixed together:
+
+  - **Every text/boolean property was garbled.** The server's property extractor only matched bare strings/numbers, so STEP's typed wrappers (`IFCLABEL('X')`, `IFCBOOLEAN(.T.)`) fell through to a Rust `Debug` string typed `"unknown"`. It now mirrors the WASM `parsePropertyValue` — resolving canonical value + kind (`string`/`boolean`/`logical`/`integer`/`real`) and carrying the raw measure tag (`data_type`, e.g. `IFCLENGTHMEASURE`) — so numeric cells sum/sort and unit conversion ([#1573](https://github.com/LTplus-AG/ifc-lite/issues/1573)) works. `@ifc-lite/server-client`'s `Property` gains an optional `data_type` (data-model payload bumped to v3).
+
+  - **Type sets never reached the client.** The server dropped `IfcRelDefinesByType` and never read a type's `HasPropertySets`. It now emits the type→element relationship plus a synthetic `TYPEHASPROPERTYSETS` edge per type-owned set, and the viewer merges those onto the type id (own sets first, name-deduped) — matching the WASM path exactly.
+
+  `@ifc-lite/lists` adds a `Type` attribute column and an optional `getEntityDefiningTypeName` accessor on `ListDataProvider`. A cross-path parity test asserts identical `executeList` rows, column metadata, and group sums for the same file through both parse paths.
+
+### Patch Changes
+
+- [#1772](https://github.com/LTplus-AG/ifc-lite/pull/1772) [`cc92f17`](https://github.com/LTplus-AG/ifc-lite/commit/cc92f171661eb8e27170bcc0360336df819f9ab7) Thanks [@louistrue](https://github.com/louistrue)! - Harden BCF archive I/O and the CSV formula-injection guard.
+
+  BCF writer now sanitizes a topic GUID before using it as a zip folder name, so a GUID parsed from untrusted markup (`../../evil`) can no longer traverse outside the archive root on a read-modify-save (zip-slip). Sanitized names that collide (`a?b` and `a:b` both map to `a_b`) are disambiguated with a hash of the original GUID plus a counter backstop, so no topic silently overwrites another. BCF reader now caps the compressed input size, the raw zip record count (scanned from the buffer, so duplicate-pathname floods that JSZip dedupes to one visible entry are still counted), and the declared expanded size; because declared sizes are attacker-controlled, the expansion cap is additionally enforced on the ACTUAL decompressed bytes as entries stream out, aborting mid-entry. Entries declaring invalid (negative-reading) sizes are rejected outright.
+
+  The lists CSV export formula-injection guard no longer quotes genuine numeric cells: `-0.35` and `+1` export unquoted (summable in Excel), while real injection vectors (`=`, `@`, tab/CR, and a leading `-`/`+` that is not a plain number such as `-cmd` or `-1+cmd`) are still prefixed with an apostrophe.
+
+- Updated dependencies [[`cc92f17`](https://github.com/LTplus-AG/ifc-lite/commit/cc92f171661eb8e27170bcc0360336df819f9ab7), [`0d400ed`](https://github.com/LTplus-AG/ifc-lite/commit/0d400edd61a71108c2affd0923fb561affbfe9fe), [`564a800`](https://github.com/LTplus-AG/ifc-lite/commit/564a800e997322d863aac84127497ef4f8310ac3), [`cc92f17`](https://github.com/LTplus-AG/ifc-lite/commit/cc92f171661eb8e27170bcc0360336df819f9ab7)]:
+  - @ifc-lite/data@2.6.0
+  - @ifc-lite/encoding@1.14.11
+
+## 1.19.0
+
+### Minor Changes
+
+- [#1748](https://github.com/LTplus-AG/ifc-lite/pull/1748) [`ae6079f`](https://github.com/LTplus-AG/ifc-lite/commit/ae6079f0d2d8a3dbc923dfd468817c7f3e2f9b4a) Thanks [@louistrue](https://github.com/louistrue)! - Lists/Schedules now resolve Type-level properties and quantities on instance rows ([#1745](https://github.com/LTplus-AG/ifc-lite/issues/1745)). A column mapped to a pset/qto that lives on an element's `IfcTypeProduct` (via `IfcRelDefinesByType`) — e.g. `Pset_WallCommon.FireRating` or `Qto_WallBaseQuantities.Width` defined once on `IfcWallType` — now falls back to the type when the instance has no local value, so it no longer renders a blank cell. Instance-level values still take precedence, and the same fallback applies to list filter conditions.
+
+  `@ifc-lite/parser` gains `extractTypeQuantitiesOnDemand` (and the `extractQsetsFromIds` helper) mirroring the existing `extractTypePropertiesOnDemand`. `@ifc-lite/lists` gains optional `getTypePropertySets` / `getTypeQuantitySets` accessors on `ListDataProvider`; providers that don't implement them keep their previous behaviour (no fallback).
+
+## 1.18.4
+
+### Patch Changes
+
+- [#1700](https://github.com/LTplus-AG/ifc-lite/pull/1700) [`422d47d`](https://github.com/LTplus-AG/ifc-lite/commit/422d47dde37c7168ce4a547fc0a4f966649c1762) Thanks [@louistrue](https://github.com/louistrue)! - Harden the immediate-Container spatial level ([#1591](https://github.com/LTplus-AG/ifc-lite/issues/1591) follow-up):
+
+  - The spatial hierarchy now records an aggregated-descendant containment walk for ANY spatial container node, not just storeys, via a new optional `SpatialHierarchy.elementToContainer` map (also carried across data-store transport). A part nested through an IfcElementAssembly under an IfcBridgePart / IfcRoadPart / IfcSpatialZone now resolves that container instead of a blank cell. Storey-only `elementToStorey` semantics are unchanged.
+  - The list engine matches the spatial level string case-insensitively, so a hand-edited / imported list carrying `container` resolves the Container level rather than silently falling back to the storey name. An empty or unrecognised level still defaults to Storey.
+
+- [#1700](https://github.com/LTplus-AG/ifc-lite/pull/1700) [`422d47d`](https://github.com/LTplus-AG/ifc-lite/commit/422d47dde37c7168ce4a547fc0a4f966649c1762) Thanks [@louistrue](https://github.com/louistrue)! - Add a `Container` spatial level: a `spatial` column or condition with `propertyName: 'Container'` resolves the element's IMMEDIATE spatial container (its direct IfcRelContainedInSpatialStructure parent - the storey, or for infrastructure the IfcBridgePart / IfcRoadPart / IfcSpatialZone it sits in) via the new optional `ListDataProvider.getContainerName`. Providers without the method keep returning blank cells; existing levels (`Storey` default, `Building`, `Site`, `Project`) are unchanged.
+
+- Updated dependencies [[`422d47d`](https://github.com/LTplus-AG/ifc-lite/commit/422d47dde37c7168ce4a547fc0a4f966649c1762)]:
+  - @ifc-lite/data@2.5.3
+
+## 1.18.3
+
+### Patch Changes
+
+- [#1691](https://github.com/LTplus-AG/ifc-lite/pull/1691) [`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a) Thanks [@louistrue](https://github.com/louistrue)! - Documentation moved to https://ifclite.dev/docs/ - README links and package homepage fields now point at the new home (the GitHub Pages site remains as a mirror whose canonical URLs point there).
+
+- Updated dependencies [[`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a)]:
+  - @ifc-lite/data@2.5.2
+  - @ifc-lite/encoding@1.14.10
+
+## 1.18.2
+
+### Patch Changes
+
+- [#1676](https://github.com/LTplus-AG/ifc-lite/pull/1676) [`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39) Thanks [@louistrue](https://github.com/louistrue)! - Docs refresh: correct stale README claims and API samples against the current codebase; add READMEs to the ten published packages that shipped without one (cli, create, sdk, sandbox, lens, lists, embed-sdk, embed-protocol, encoding, viewer-core).
+
+- Updated dependencies [[`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39)]:
+  - @ifc-lite/data@2.5.1
+  - @ifc-lite/encoding@1.14.9
+
+## 1.18.1
+
+### Patch Changes
+
+- Updated dependencies [[`d758460`](https://github.com/LTplus-AG/ifc-lite/commit/d758460dce1a564286a9af5579b0a2ba72dfa81d)]:
+  - @ifc-lite/data@2.5.0
+
+## 1.18.0
+
+### Minor Changes
+
+- [#1614](https://github.com/LTplus-AG/ifc-lite/pull/1614) [`f6f8bd2`](https://github.com/LTplus-AG/ifc-lite/commit/f6f8bd2ca0be7b242fb78bef1bd1a1b8a5ab8944) Thanks [@louistrue](https://github.com/louistrue)! - Add federation-identity list columns: a `model` source (source file / model name) and a leveled `spatial` source whose `propertyName` selects `Storey` (default), `Building`, `Site`, or `Project`. Lets a list over several federated models be grouped, sorted, filtered, and exported by which project/site/building/file each row comes from (issue [#1591](https://github.com/LTplus-AG/ifc-lite/issues/1591)). `ListDataProvider` gains optional `getModelName` / `getProjectName` / `getSiteName` / `getBuildingName` accessors; existing storey-only `spatial` columns keep resolving the storey name.
+
+- [#1626](https://github.com/LTplus-AG/ifc-lite/pull/1626) [`07f630e`](https://github.com/LTplus-AG/ifc-lite/commit/07f630e8373e52f37e5c5133d4b92ca5592368eb) Thanks [@louistrue](https://github.com/louistrue)! - Support Bonsai-style `/regex/` patterns for property-set / quantity-set and property / quantity names. A name wrapped in slashes (e.g. `/Qto_.*BaseQuantities/`, optionally with flags like `/qto_.*/i`) is matched as a regular expression; a plain name stays an exact match. This lets one list column or query read a value across several matching sets at once, for example `NetVolume` from `Qto_WallBaseQuantities` AND `Qto_SlabBaseQuantities` (issue [#1591](https://github.com/LTplus-AG/ifc-lite/issues/1591)). Applies to `@ifc-lite/lists` column extraction and filter conditions and to the SDK `bim.query().property()` / `quantity()` getters. `@ifc-lite/lists` exports the new `compileNameMatcher` / `isNamePattern` helpers.
+
+## 1.17.0
+
+### Minor Changes
+
+- [#1580](https://github.com/LTplus-AG/ifc-lite/pull/1580) [`3a2cd42`](https://github.com/LTplus-AG/ifc-lite/commit/3a2cd42158313d8e22f21885e62b6c705814ab47) Thanks [@louistrue](https://github.com/louistrue)! - `ColumnDefinition` gains two optional, execution-time-only fields: `quantityType` (the `QuantityType` a `source: 'quantity'` column resolved to) and `dataType` (the raw IFC measure value type a `source: 'property'` column resolved to, e.g. `"IFCVOLUMETRICFLOWRATEMEASURE"`). `executeList` populates them on the RESULT's columns from the first matching entity's quantity/property — the persisted `ListDefinition` authoring schema is never mutated.
+
+  This lets a consumer apply unit-aware display/export logic (the viewer's list export now honours its display-unit converter, issue [#1573](https://github.com/LTplus-AG/ifc-lite/issues/1573)) without re-deriving a column's measure type from scratch. Existing consumers are unaffected: both fields are optional and `undefined` unless the caller opts in by reading them.
+
+### Patch Changes
+
+- Updated dependencies [[`3a2cd42`](https://github.com/LTplus-AG/ifc-lite/commit/3a2cd42158313d8e22f21885e62b6c705814ab47)]:
+  - @ifc-lite/data@2.4.0
+
+## 1.16.1
+
+### Patch Changes
+
+- Updated dependencies [[`d1e16f9`](https://github.com/LTplus-AG/ifc-lite/commit/d1e16f944ea9f3a35a7153959f13db168a35c229), [`a46dcdf`](https://github.com/LTplus-AG/ifc-lite/commit/a46dcdf68d05e8cdec4199167647f2dfa3c62cb6)]:
+  - @ifc-lite/data@2.3.0
+  - @ifc-lite/encoding@1.14.8
+
+## 1.16.0
+
+### Minor Changes
+
+- [#1373](https://github.com/LTplus-AG/ifc-lite/pull/1373) [`f8599d7`](https://github.com/LTplus-AG/ifc-lite/commit/f8599d78d7ee040de2bd521c878bae721de774c6) Thanks [@louistrue](https://github.com/louistrue)! - Expose IFC `PredefinedType` as a selectable entity attribute in Lists and Lens. `ENTITY_ATTRIBUTES` (lists) and `ENTITY_ATTRIBUTE_NAMES` (lens) now include `PredefinedType`, so it can be used as a List column / condition and as a Lens "color by attribute" / rule criterion. The list engine resolves it through a new optional `ListDataProvider.getEntityPredefinedType(expressId)` accessor (implementers without it degrade gracefully). ([#1364](https://github.com/LTplus-AG/ifc-lite/issues/1364))
+
+## 1.15.6
+
+### Patch Changes
+
+- Updated dependencies [[`b6acbc4`](https://github.com/LTplus-AG/ifc-lite/commit/b6acbc4b84bcdb4a2d774515200d27edd7e831cb)]:
+  - @ifc-lite/data@2.2.0
+
+## 1.15.5
+
+### Patch Changes
+
+- Updated dependencies [[`249761a`](https://github.com/LTplus-AG/ifc-lite/commit/249761ab7f1d51ce46b3058b595a6fad7c26db7e)]:
+  - @ifc-lite/data@2.1.1
+
+## 1.15.4
+
+### Patch Changes
+
+- [#1145](https://github.com/LTplus-AG/ifc-lite/pull/1145) [`ddae2b0`](https://github.com/LTplus-AG/ifc-lite/commit/ddae2b0024f071d00f9e6e4b77e0be3965412ec3) Thanks [@louistrue](https://github.com/louistrue)! - Resolve names for IfcGroup-family entities and make zones/systems listable ([#1075](https://github.com/LTplus-AG/ifc-lite/issues/1075) follow-up).
+
+  `IfcZone`, `IfcGroup`, `IfcSystem` and `IfcDistributionSystem` are not `IfcProduct` subtypes, so the columnar parser categorised them as `CAT_SKIP` and never added them to the `EntityTable`. As a result `getName()` returned `''` (the UI showed "Group #<id>"), `getByType()` could not find them (so they were absent from lists), and the "By Zone" lens fell back to an arbitrary first group because `getTypeName()` returned `Unknown`. `IfcSpatialZone` was in the table but its `Name` was never extracted.
+
+  This routes the group family into the `EntityTable` with `Name` (falling back to `LongName` for systems/zones that leave `Name` empty) plus `Description` and `ObjectType` (the system designation), and extracts names for the previously-unnamed "other relevant" products (including `IfcSpatialZone`). New `IfcSystem` / `IfcDistributionSystem` `IfcTypeEnum` entries make systems addressable by `getByType`. Zones, spatial zones and systems are now selectable in the list builder and ship a "Zones & Systems" preset, the relationship card and "By Zone" lens legend show real names (with an `ObjectType` fallback for unnamed systems), and selecting a group surfaces its attributes.
+
+  The cache `FORMAT_VERSION` is bumped (6 → 7) so models cached before the fix re-parse and pick up the resolved names.
+
+- Updated dependencies [[`bfd9004`](https://github.com/LTplus-AG/ifc-lite/commit/bfd9004daa17f481a7b33b5c3c11f620e6cd894d), [`248f2c0`](https://github.com/LTplus-AG/ifc-lite/commit/248f2c09a4d61fa27dfeaba5511a2a641d4cd278), [`ddae2b0`](https://github.com/LTplus-AG/ifc-lite/commit/ddae2b0024f071d00f9e6e4b77e0be3965412ec3)]:
+  - @ifc-lite/data@2.1.0
+
+## 1.15.3
+
+### Patch Changes
+
+- Updated dependencies [[`891efef`](https://github.com/LTplus-AG/ifc-lite/commit/891efef5fa9fca04bf2e01be9a1de04bbb84aafe)]:
+  - @ifc-lite/data@2.0.3
+
+## 1.15.2
+
+### Patch Changes
+
+- [#1036](https://github.com/LTplus-AG/ifc-lite/pull/1036) [`0205c4d`](https://github.com/LTplus-AG/ifc-lite/commit/0205c4d50995572ef796ce66877aa389f19c6fbc) Thanks [@louistrue](https://github.com/louistrue)! - Add a `default` condition to every package's exports map. The maps only
+  declared `import` + `types`, so any resolver hitting the CJS/default
+  condition path (tsx, jest, plain `require`, some bundlers) failed with
+  ERR_PACKAGE_PATH_NOT_EXPORTED. The `default` entry points at the same
+  ESM dist file; pure ESM consumers are unaffected.
+- Updated dependencies [[`0205c4d`](https://github.com/LTplus-AG/ifc-lite/commit/0205c4d50995572ef796ce66877aa389f19c6fbc)]:
+  - @ifc-lite/data@2.0.2
+  - @ifc-lite/encoding@1.14.7
+
+## 1.15.1
+
+### Patch Changes
+
+- [#946](https://github.com/LTplus-AG/ifc-lite/pull/946) [`6378998`](https://github.com/LTplus-AG/ifc-lite/commit/6378998ec146f7f9297ef5fcc5953b155fd6b5e0) Thanks [@louistrue](https://github.com/louistrue)! - Fix a batch of verified findings from a full-codebase review (security, correctness,
+  data-loss, and resource/memory leaks). Highlights:
+
+  **Security**
+
+  - collab-server: a malformed WebSocket frame no longer crashes the whole process
+    (decode is wrapped; a bad frame is rejected/audited instead of throwing).
+  - mcp: the local HTTP transport now validates `Host`/`Origin` and no longer sends a
+    wildcard `Access-Control-Allow-Origin`, closing a DNS-rebinding/CSRF hole; the
+    `AuthScope.modelIds` allowlist is now enforced at model resolution.
+  - server-bin: `extractZip` uses `execFileSync` (argv, no shell), removing command
+    injection via archive/destination paths.
+  - export / sdk / cli / mcp / lists / viewer CSV exporters now neutralize spreadsheet
+    formula injection (CWE-1236) consistently.
+  - create-ifc-lite: validates the project name (no path traversal) and drops the
+    unused `execSync`-based downloader.
+  - embed-sdk: inbound `postMessage` now validates `event.origin`.
+
+  **Correctness / data-loss**
+
+  - parser: `lengthUnitScale` survives the worker transport; the nested STEP list
+    parser is string-aware (commas/parens inside quoted values no longer mis-split).
+  - mutations: deleting a property from a session-created pset and replaying
+    `UPDATE_ATTRIBUTE` / `CREATE_PROPERTY_SET` mutations now work.
+  - export: merged-export ID remapping no longer rewrites `#N` inside quoted strings.
+  - drawing-2d: GPU section cutter triangle upload/readback use correct WGSL std-layout
+    offsets and strides.
+  - ifcx: cyclic children no longer abort the parse; spatial children round-trip; the
+    mesh transform guards a zero/non-finite homogeneous `w`.
+  - data / cache: a `NULL` string property value stays `null` instead of becoming `""`.
+  - pointcloud, bcf, server-client, query, viewer-core, viewer store/federation: assorted
+    decoding, federation-id, and selection-state fixes.
+
+  **Resource / memory leaks**
+
+  - geometry, query (DuckDB), renderer (GPU buffers), collab (federation presence),
+    sandbox (host log capture + runtime), mcp (clash mesh cache), server-bin (signal
+    listeners), and the viewer renderer on unmount now release resources deterministically.
+
+  **Hardening (apps, not published)**
+
+  - server: a dedicated `server-release` Cargo profile (`panic = "unwind"`) plus a
+    `CatchPanicLayer` contain a malformed-IFC parse panic to the offending request
+    instead of aborting the whole server.
+  - desktop (Tauri): a Content-Security-Policy is set, and unused `shell:*` /
+    `fs:allow-write|mkdir|remove` capabilities (and the unused shell plugin) are removed.
+
+  **Second pass** (additional verified findings)
+
+  - collab-server: S3 log load now follows `ListObjectsV2` pagination (no dropped frames);
+    awareness frames are size-capped + rate-limited; path-lock verify runs after role/rate-limit;
+    the blob route requires auth and `/metrics` can be token-gated.
+  - server-bin: downloaded binaries are SHA-256 verified against a release sidecar (fail-closed on
+    mismatch, warn-if-absent for older releases).
+  - extensions: inner-ring capability check fails _closed_ for unknown namespaces; signing
+    canonicalization is now injective (length-prefixed).
+  - correctness/leaks: mutations quantity type+unit preserved on replay; `findByProperty` boolean
+    comparisons; Parquet REAL columns kept as Float64; blob GC fail-safe on missing `uploadedAt`;
+    spatial-hierarchy + codegen cycle guards; BVH NaN edge; bSDD/playground caches bounded;
+    point-cloud GPU asset freed on federation error; mcp `parseColor` rejects non-hex; bcf/SVG/STEP
+    output escaping; and more.
+
+- Updated dependencies [[`6378998`](https://github.com/LTplus-AG/ifc-lite/commit/6378998ec146f7f9297ef5fcc5953b155fd6b5e0)]:
+  - @ifc-lite/data@2.0.1
+
+## 1.15.0
+
+### Minor Changes
+
+- [#933](https://github.com/LTplus-AG/ifc-lite/pull/933) [`34df1e2`](https://github.com/LTplus-AG/ifc-lite/commit/34df1e2573523e88b8a808b129d71d78057c14a6) Thanks [@louistrue](https://github.com/louistrue)! - Add material, classification, and storey list columns ([#922](https://github.com/LTplus-AG/ifc-lite/issues/922)).
+
+  `ColumnDefinition.source` gains `material` | `classification` | `spatial`
+  (storey). The engine resolves them via the optional `ListDataProvider`
+  material/classification/storey accessors; material and classification cells
+  are de-duplicated and joined.
+
+- [#935](https://github.com/LTplus-AG/ifc-lite/pull/935) [`398c59c`](https://github.com/LTplus-AG/ifc-lite/commit/398c59c942462dd38bea963247741ab298eae857) Thanks [@louistrue](https://github.com/louistrue)! - Add `ListDefinition.expressIdsByModel` — an explicit element-snapshot scope
+  keyed by model.
+
+  When set, `executeList` targets exactly the express IDs captured for the
+  current model (so a federated list never over-selects when local express IDs
+  collide across files), with `conditions` still applied on top and
+  `entityTypes` ignored. Lets a search/filter result be frozen into a list
+  ([#917](https://github.com/LTplus-AG/ifc-lite/issues/917) §4).
+
+- [#934](https://github.com/LTplus-AG/ifc-lite/pull/934) [`7bb46cd`](https://github.com/LTplus-AG/ifc-lite/commit/7bb46cd265cc93cd2cddc268591d8ee93a2a556b) Thanks [@louistrue](https://github.com/louistrue)! - Add `ListDataProvider.discoverAllColumns()` for complete, type-independent
+  column discovery.
+
+  Lets the list column picker offer every property set / property and quantity
+  set / quantity in the model — even when no entity type is selected — instead
+  of only the columns sampled from the selected types. Optional method; callers
+  fall back to the type-sampled `discoverColumns()` when it's absent.
+
+- [#934](https://github.com/LTplus-AG/ifc-lite/pull/934) [`7bb46cd`](https://github.com/LTplus-AG/ifc-lite/commit/7bb46cd265cc93cd2cddc268591d8ee93a2a556b) Thanks [@louistrue](https://github.com/louistrue)! - Add counts, sums, and grouping to list results ([#926](https://github.com/LTplus-AG/ifc-lite/issues/926)).
+
+  `ListDefinition.grouping` ({ columnId, sumColumnIds }) makes `executeList`
+  return a per-group breakdown (`ListResult.groups` — label, element count,
+  per-column sums) plus a whole-result `summary` (count + sums). Group by any
+  column (type, material, classification, storey, property value) and total
+  numeric columns per group and overall.
+
+  Also exports `summariseListRows(definition, rows)` so federated callers can
+  re-derive groups/summary after merging rows from several models.
+
+- [#932](https://github.com/LTplus-AG/ifc-lite/pull/932) [`3f697e8`](https://github.com/LTplus-AG/ifc-lite/commit/3f697e8818ee8da9dd45403bc00835ed421d94ca) Thanks [@louistrue](https://github.com/louistrue)! - Lists can now target elements beyond IFC class ([#925](https://github.com/LTplus-AG/ifc-lite/issues/925)).
+
+  - `ListDefinition` with an empty `entityTypes` targets all model elements
+    (resolved via the new optional `ListDataProvider.getAllEntityIds()`).
+  - `PropertyCondition.source` gains `material` | `classification` | `spatial`
+    (storey), backed by optional provider accessors `getMaterialNames`,
+    `getClassifications`, and `getStoreyName`.
+
+  All new provider methods are optional, so existing `ListDataProvider`
+  implementers keep working unchanged.
+
+## 1.14.13
+
+### Patch Changes
+
+- Updated dependencies [[`e73ac09`](https://github.com/LTplus-AG/ifc-lite/commit/e73ac0931b85cd299ae9b723073e956b6b124c85)]:
+  - @ifc-lite/data@2.0.0
+
+## 1.14.12
+
+### Patch Changes
+
+- Updated dependencies [[`2ab0e4c`](https://github.com/louistrue/ifc-lite/commit/2ab0e4c0eafc21feb22bfc7cd96c467b8b9ff599)]:
+  - @ifc-lite/data@1.17.0
+
+## 1.14.11
+
+### Patch Changes
+
+- Updated dependencies [[`7c85376`](https://github.com/louistrue/ifc-lite/commit/7c853760ef96e6f0f88ebdc29c17aefae724ff43)]:
+  - @ifc-lite/data@1.16.0
+
+## 1.14.10
+
+### Patch Changes
+
+- Updated dependencies [[`082eadd`](https://github.com/louistrue/ifc-lite/commit/082eaddd10b158d1b3fe6067f9abf949596a0162)]:
+  - @ifc-lite/data@1.15.2
+
+## 1.14.9
+
+### Patch Changes
+
+- [#494](https://github.com/louistrue/ifc-lite/pull/494) [`ec0d3a0`](https://github.com/louistrue/ifc-lite/commit/ec0d3a0e4c7f9eaeb26ab0a724fd76d955e52ac5) Thanks [@louistrue](https://github.com/louistrue)! - Remove recursive package `prebuild` hooks and run TypeScript via `pnpm exec` so workspace builds resolve correctly on Windows.
+
+- Updated dependencies [[`ec0d3a0`](https://github.com/louistrue/ifc-lite/commit/ec0d3a0e4c7f9eaeb26ab0a724fd76d955e52ac5)]:
+  - @ifc-lite/data@1.15.1
+  - @ifc-lite/encoding@1.14.6
+
+## 1.14.8
+
+### Patch Changes
+
+- Updated dependencies [[`6ce40dd`](https://github.com/louistrue/ifc-lite/commit/6ce40ddb0cace5f83c2438d2d4c4bd47703468f7), [`6ce40dd`](https://github.com/louistrue/ifc-lite/commit/6ce40ddb0cace5f83c2438d2d4c4bd47703468f7)]:
+  - @ifc-lite/data@1.15.0
+  - @ifc-lite/encoding@1.14.5
+
+## 1.14.7
+
+### Patch Changes
+
+- Updated dependencies [[`113bafc`](https://github.com/louistrue/ifc-lite/commit/113bafc07436c809a8cb24d8682cf63ae5ed99e9)]:
+  - @ifc-lite/data@1.14.6
+
+## 1.14.6
+
+### Patch Changes
+
+- Updated dependencies [[`af1ef14`](https://github.com/louistrue/ifc-lite/commit/af1ef1422d41fb4f7bb7f63720cca96ef7fe5515)]:
+  - @ifc-lite/data@1.14.5
+
+## 1.14.5
+
+### Patch Changes
+
+- Updated dependencies [[`d2ebb34`](https://github.com/louistrue/ifc-lite/commit/d2ebb3457e261934df41c8f7f647531de6198078)]:
+  - @ifc-lite/data@1.14.4
+
+## 1.14.4
+
+### Patch Changes
+
+- Updated dependencies [[`40bf3d0`](https://github.com/louistrue/ifc-lite/commit/40bf3d00cb5d5ef3512b96cd5e066442adcaab87)]:
+  - @ifc-lite/encoding@1.14.4
+
+## 1.14.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.14.3
+  - @ifc-lite/encoding@1.14.3
+
+## 1.14.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.14.2
+  - @ifc-lite/encoding@1.14.2
+
+## 1.14.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.14.1
+  - @ifc-lite/encoding@1.14.1
+
+## 1.14.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.14.0
+  - @ifc-lite/encoding@1.14.0
+
+## 1.13.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.13.0
+  - @ifc-lite/encoding@1.13.0
+
+## 1.12.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.12.0
+  - @ifc-lite/encoding@1.12.0
+
+## 1.11.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.11.3
+  - @ifc-lite/encoding@1.11.3
+
+## 1.11.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.11.1
+  - @ifc-lite/encoding@1.11.1
+
+## 1.11.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.11.0
+  - @ifc-lite/encoding@1.11.0
+
+## 1.10.0
+
+### Patch Changes
+
+- Updated dependencies [[`3823bd0`](https://github.com/louistrue/ifc-lite/commit/3823bd03bb0b5165d811cfd1ddfed671b8af97d8)]:
+  - @ifc-lite/data@1.10.0
+  - @ifc-lite/encoding@1.10.0
+
+## 1.9.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.9.0
+  - @ifc-lite/encoding@1.9.0
+
+## 1.8.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/data@1.8.0
+  - @ifc-lite/encoding@1.8.0
+
+## 1.7.0
+
+### Minor Changes
+
+- [#196](https://github.com/louistrue/ifc-lite/pull/196) [`0967cfe`](https://github.com/louistrue/ifc-lite/commit/0967cfe9a203141ee6fc7604153721396f027658) Thanks [@louistrue](https://github.com/louistrue)! - Add @ifc-lite/encoding and @ifc-lite/lists packages
+
+  - `@ifc-lite/encoding`: IFC string decoding and property value parsing (zero dependencies)
+  - `@ifc-lite/lists`: Configurable property list engine with column discovery, presets, and CSV export
+  - Both packages expose headless APIs via `ListDataProvider` interface for framework-agnostic usage
+  - Viewer updated to consume these packages via `createListDataProvider()` adapter
+
+### Patch Changes
+
+- [#202](https://github.com/louistrue/ifc-lite/pull/202) [`e0af898`](https://github.com/louistrue/ifc-lite/commit/e0af898608c2f706dc2d82154c612c64e2de010c) Thanks [@louistrue](https://github.com/louistrue)! - Fix empty Description, ObjectType, and Tag columns in lists and show all IFC attributes in property panel
+
+  - Lists: add on-demand attribute extraction fallback with per-provider caching for Description, ObjectType, and Tag columns that were previously always empty
+  - Property panel: show ALL string/enum IFC attributes dynamically using the schema registry (Name, Description, ObjectType, Tag, PredefinedType, etc.) instead of hardcoding only Name/Description/ObjectType
+  - Parser: add `extractAllEntityAttributes()` for schema-aware full attribute extraction, extend `extractEntityAttributesOnDemand()` to include Tag (IfcElement index 7)
+  - Query: add `EntityNode.tag` getter and `EntityNode.allAttributes()` method for comprehensive attribute access
+  - Performance: cache `getAttributeNames()` inheritance walks, hoist module-level constants
+  - Fix type name casing bug where multi-word UPPERCASE STEP types (e.g., IFCWALLSTANDARDCASE) failed schema lookup
+
+- Updated dependencies [[`0967cfe`](https://github.com/louistrue/ifc-lite/commit/0967cfe9a203141ee6fc7604153721396f027658), [`6c43c70`](https://github.com/louistrue/ifc-lite/commit/6c43c707ead13fc482ec367cb08d847b444a484a)]:
+  - @ifc-lite/encoding@1.7.0
+  - @ifc-lite/data@1.7.0

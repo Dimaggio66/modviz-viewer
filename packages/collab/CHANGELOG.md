@@ -1,0 +1,824 @@
+# @ifc-lite/collab
+
+## 0.6.0
+
+### Minor Changes
+
+- [#3090](https://github.com/LTplus-AG/ifc-lite/pull/3090) [`228bbe7`](https://github.com/LTplus-AG/ifc-lite/commit/228bbe730522148ea797780c5acd08502b18a3a3) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `mergeBranch(parent, branch, 'layer')` silently dropping every edit the branch made to an entity that already existed in the parent.
+  
+  The `'layer'` strategy snapshotted the branch as IFCX and fed the result to
+  `seedFromIfcx`. That seeder routes every node through `createEntity`, which
+  is a deliberate no-op on a path the doc already holds — right for seeding a
+  doc from a snapshot, wrong for merging. Since a branch forks from its
+  parent, essentially every entity the branch *modified* was already present
+  in the merge target, so the merge landed only the branch's brand-new
+  entities and discarded all of the modifications: attributes, children,
+  inherits, psets, quantities, classifications, materials and geometry refs
+  alike.
+  
+  A new `applyIfcxOverlay(doc, file)` applies an IFCX file as a layer of
+  opinions rather than as a seed, and `mergeBranch('layer')` now uses it. It
+  creates entities the doc lacks exactly as the seeder does; for entities
+  already present it writes the file's opinions on top — values overwrite,
+  `null` removes a flat attribute, child or inherit, an `ifclite::deleted:
+  true` node deletes — and leaves untouched anything the file says nothing
+  about.
+  
+  Read that last clause narrowly. `mergeBranch('layer')` sends a FULL snapshot,
+  so the file has an opinion on nearly everything: a value the parent changed
+  after the fork is overwritten by the branch's fork-time value even when the
+  branch never edited it. This is the trade the release makes: previously a
+  layer merge dropped the branch's edits, now it applies them, and the price is
+  that the branch's fork-time value can win over a newer parent one. Attributes
+  and geometry behave the same way here; geometry is not a special case.
+  
+  One consequence is specific to geometry. Blob GC derives the set it RETAINS
+  from the live doc and sweeps the complement, so reverting a `blobHash` flips
+  which blob counts as an orphan; a sweep between the parent's re-mesh and the
+  merge can leave the restored reference pointing at a blob that has been
+  deleted.
+  
+  Geometry records go through `upsertGeometry` rather than `createGeometry`,
+  which returns an existing record untouched. Without that, a branch that
+  re-meshed geometry the parent already had merged "successfully" and left the
+  parent on the old blob hash.
+  
+  `seedFromIfcx` is unchanged in both its behaviour and its options: it stays
+  additive and idempotent, because `apps/viewer` and `snapshot/worker.ts` use
+  it to seed live session docs, where overlaying a snapshot onto live edits
+  would be the worse bug on the more common path.
+  
+  One limit is worth stating plainly, since it is a property of the wire
+  format and not of this fix: a full IFCX snapshot emits only what an entity
+  *has*, so an entity or attribute the branch deleted is simply absent rather
+  than nulled or tombstoned. `mergeBranch('layer')` therefore still does not
+  propagate deletions made on the branch. `applyIfcxOverlay` does honour
+  deletions when a layer states them explicitly.
+  
+  A second limit, this one in the code: a nulled pset or quantity property is
+  NOT removed. `extractMinimalLayer` flattens those into
+  `bsi::ifc::v5a::<Set>::<Prop>` attribute keys, so the removal arrives as an
+  attribute null and is looked for in the flat attribute map, where it never
+  was. The property survives and the call returns normally. Only flat
+  attributes, children and inherits are removed today.
+
+- [#3092](https://github.com/LTplus-AG/ifc-lite/pull/3092) [`e6caf11`](https://github.com/LTplus-AG/ifc-lite/commit/e6caf11a8f8d9d8634a6811b6705ab3367cd02e0) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Stop a collab snapshot round trip from inventing per-entity provenance, and carry the real thing on the wire.
+  
+  `snapshotToIfcx` wrote nothing about who created an entity or when, because
+  IFCX nodes had no provenance slot. `seedFromIfcx` then filled both fields in
+  from the file header — which names whoever serialized the *file*, not
+  whoever authored each entity, and for a snapshot of a collab doc that is the
+  snapshotter plus the write clock. An entity carrying `createdBy: 'ada'` /
+  `createdAt: '2019-05-05'` came back claiming a different author and a
+  different date, in a shape indistinguishable from genuine attribution. A
+  missing field reads as "unknown"; a fabricated one gets trusted.
+  
+  Two changes:
+  
+  - **A wire carrier.** `ifclite::meta` (new member of `IFCLITE_ATTR`, the
+    extension namespace that already carries collab's classifications,
+    materials and geometry refs) holds `createdBy`, `createdAt`,
+    `lastEditedBy`, `lastEditedAt` and `previousPath`, so real provenance
+    survives snapshot → seed. Values are shape-gated on the way in: only
+    strings are read, and a foreign value under the key stays an ordinary
+    flat attribute. Every field carried is written once at entity creation
+    and never re-stamped — a per-edit stamp would put this attribute in
+    every minimal layer and give the merge engine a component that conflicts
+    on every concurrent edit.
+  - **No more header defaults.** `seedFromIfcx` and `seedFromStep` no longer
+    copy `header.author` / `header.timestamp` onto every entity, and no longer
+    stamp the read clock as `createdAt`. What the wire does not say now stays
+    unset. The file-level record is still available as `meta.header` /
+    `meta.stepHeader`.
+  
+  `createEntity` also now writes the `bsi::ifc::class` attribute when given an
+  `ifcClass`. `meta.ifcClass` is doc-local bookkeeping with no wire form, so
+  an entity whose class was only ever passed as that option snapshotted
+  without a class and came back classless; the MCP draft path had already
+  open-coded the attribute at its own call site to work around this.
+  
+  Scope: `lastEditedBy` / `lastEditedAt` survive only because nothing
+  re-stamps them today. Relationships (the doc's separate `relationships`
+  map) still do not survive a snapshot — IFCX has no relationship node and
+  no first-party writer populates that map; `snapshot-relationships.test.ts`
+  pins that as a tripwire rather than papering over it.
+
+### Patch Changes
+
+- [#3022](https://github.com/LTplus-AG/ifc-lite/pull/3022) [`66697fc`](https://github.com/LTplus-AG/ifc-lite/commit/66697fc57de1de4475a2c5eed4361e0e378e0f7a) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `sweepBlobs` reporting a blob as reclaimed even when the underlying `store.delete()` call failed.
+  
+  `sweepBlobs` computed how many deletes actually succeeded but then discarded that count and returned `decision.reclaimBytes` unconditionally — the full byte total `planBlobSweep` had planned to free, regardless of whether any individual `delete()` call reported failure (a remote backend 404, a race with another sweep, a transient error). A caller using the return value for storage-capacity accounting would believe more space was freed than actually was, while the undeleted blob kept consuming storage. `planBlobSweep` now records each dropped hash's byte length on the `SweepDecision`, and `sweepBlobs` sums only the bytes for hashes whose `delete()` actually returned `true`.
+
+- [#3004](https://github.com/LTplus-AG/ifc-lite/pull/3004) [`2580830`](https://github.com/LTplus-AG/ifc-lite/commit/25808308bbbc63eb0fd8b25e6dd0c08864adb6a8) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `snapshotToIfcx` writing a literal `null` for a flat attribute value that its own counterpart, `seedFromIfcx`, treats as an IFCX removal opinion and silently drops.
+  
+  A doc attribute can legitimately hold `null` (e.g. a user clearing a root
+  attribute like `Description` through the viewer's mutation bridge). Before
+  this fix, `snapshotToIfcx` serialized that value verbatim, so a
+  snapshot -> seed -> snapshot cycle was not idempotent: the first snapshot
+  carried `"Description": null`, the intervening seed dropped the key per
+  `from-ifcx.ts`'s documented contract, and the second snapshot of the
+  re-seeded doc omitted the key entirely - two snapshots of "the same" doc
+  state disagreeing with each other.
+  
+  `snapshotToIfcx` now drops null-valued attributes on the way out, matching
+  the reader's contract instead of handing it a value it is guaranteed to
+  discard on the next round-trip.
+- Updated dependencies [[`e6caf11`](https://github.com/LTplus-AG/ifc-lite/commit/e6caf11a8f8d9d8634a6811b6705ab3367cd02e0), [`9359bc4`](https://github.com/LTplus-AG/ifc-lite/commit/9359bc488173585b2b90e124cc66dcf8292c4be9), [`f6febcc`](https://github.com/LTplus-AG/ifc-lite/commit/f6febcc2d4986e79b3c44d63853bb72a16475c65), [`f7e26e4`](https://github.com/LTplus-AG/ifc-lite/commit/f7e26e4200e1475728d4976142b49cb408400a8e), [`412f78c`](https://github.com/LTplus-AG/ifc-lite/commit/412f78c1bf4907f8c230fc149bbb00e0711b6689), [`487866d`](https://github.com/LTplus-AG/ifc-lite/commit/487866dac131bf50a0b3008ddce5db933768dca2), [`00f6e79`](https://github.com/LTplus-AG/ifc-lite/commit/00f6e79c22641ff59bfb3327d910b04f9a164d8b), [`116a3e9`](https://github.com/LTplus-AG/ifc-lite/commit/116a3e94de753b95fa94b2d6c41a0171cd254729)]:
+  - @ifc-lite/ifcx@3.0.0
+  - @ifc-lite/data@3.4.1
+  - @ifc-lite/mutations@1.27.0
+
+## 0.5.0
+
+### Minor Changes
+
+- [#2801](https://github.com/LTplus-AG/ifc-lite/pull/2801) [`b14e710`](https://github.com/LTplus-AG/ifc-lite/commit/b14e710ae8d56f518f84abb4d4ec8d1f98aacad8) Thanks [@louistrue](https://github.com/louistrue)! - `BlobStore.put` now accepts an optional `AbortSignal`, and `HttpBlobStore`
+  forwards it to `fetch`.
+  
+  A hung upload was worse than a failed one: a rejection is counted, retried and
+  can trip a caller's failure ceiling, but a request that never settles produces
+  no failure at all, so nothing retries, no ceiling trips, and a geometry seed
+  never resolves while the UI reports work in progress. `LayeredBlobStore` also
+  forwards the signal, since its `Promise.all` cannot settle while the remote half
+  hangs and its `.catch` never runs when nothing rejects.
+  
+  Additive and optional: existing callers are unaffected, and implementations that
+  cannot abort may ignore the option.
+
+### Patch Changes
+
+- [#2706](https://github.com/LTplus-AG/ifc-lite/pull/2706) [`4ce3879`](https://github.com/LTplus-AG/ifc-lite/commit/4ce38798211b6b5f84e5b21ed335aa80fe1514c4) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Dispose the presence object (and its two live timers — the awareness eviction sweep and y-protocols' own outdated-clients timer) when `createCollabSession` fails after `createPresence` has already run, instead of leaking it. `presence` is constructed before either persistence provider comes up; if the IndexedDB or WebSocket provider then throws (for example `createIndexedDbProvider` rejecting outside a browser, where `indexedDB` is undefined), the function rejected without a `session` object for the caller to call `.dispose()` on, so nothing ever cleared those timers. In a browser this went unnoticed because navigating away reclaims everything; in a Node test process it kept the event loop alive indefinitely — `startCollab`'s entry-race regression test, run together with its sibling collab test files in one process, would pass every assertion and then never let the process exit.
+- Updated dependencies [[`05592f8`](https://github.com/LTplus-AG/ifc-lite/commit/05592f8c1ef5b34a00c2ea077542dc68107a7ae5), [`be6b43c`](https://github.com/LTplus-AG/ifc-lite/commit/be6b43c2b334811422c1cbfbea5d6e6d1b9a401d), [`a29b040`](https://github.com/LTplus-AG/ifc-lite/commit/a29b04069fec3c6b726f49fc58054e535c255034), [`cc19a8d`](https://github.com/LTplus-AG/ifc-lite/commit/cc19a8d4a79a5e8563a90ab663b28e1b93ef9c18), [`36e4eca`](https://github.com/LTplus-AG/ifc-lite/commit/36e4eca3b19a2fe02f1679acc9a2a43cd90aa163), [`a7b8a20`](https://github.com/LTplus-AG/ifc-lite/commit/a7b8a201eaecd411a4246421893e887bf55aafd3), [`6ce17fa`](https://github.com/LTplus-AG/ifc-lite/commit/6ce17fa903d38ab8ee3e6ebaf6da8453726d3ce2)]:
+  - @ifc-lite/mutations@1.26.1
+  - @ifc-lite/data@3.4.0
+  - @ifc-lite/ifcx@2.3.7
+
+## 0.4.2
+
+### Patch Changes
+
+- [#2336](https://github.com/LTplus-AG/ifc-lite/pull/2336) [`a220406`](https://github.com/LTplus-AG/ifc-lite/commit/a2204062ba1fc555e4529896cbc82efccc7a5146) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `promoteEntityType` silently discarding data when its target path already exists. `createEntity` is documented as idempotent — a pre-existing path is a no-op that returns the existing entity unchanged — but `promoteEntityType` deletes the source path unconditionally before calling it. If the target already existed (e.g. seeded by a concurrent peer, or a prior promotion that landed on the same path), the call reported success with a truthy `Y.Map` while the source entity's carried attributes, children and meta were permanently lost and the target kept its stale data. `promoteEntityType` now throws before deleting the source when the target path is already occupied, matching this file's existing convention of throwing on precondition violations (`setAttribute`, `setChild`, etc.) instead of silently discarding data.
+
+- [#2337](https://github.com/LTplus-AG/ifc-lite/pull/2337) [`29409e5`](https://github.com/LTplus-AG/ifc-lite/commit/29409e57227d3c458707dbc2cf0cb2e8ae8fcf7b) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix two gaps found while auditing files with no direct test coverage:
+
+  - `createConflictDetector` classified concurrent writes to a Pset property as a `pset-property` conflict but had no matching case for the structurally identical Qset (quantity) shape — concurrent quantity writes from two peers landed silently with no conflict event, a false negative. `classify()` now handles `ENTITY_KEY.QUANTITIES` the same way it handles `ENTITY_KEY.PSETS`, emitting a new `quantity` `ConflictKind`.
+  - `redactAuthorMeta` (the "anonymise this project" GDPR helper) blanked `createdBy`/`lastEditedBy` on every entity but never touched the `annotations` map, so a markup pin's `authorId`/`authorName` (real display name) survived redaction untouched. It now blanks both fields on every annotation alongside the existing entity-meta redaction; annotation `note` text and position are left as-is.
+
+- [#2220](https://github.com/LTplus-AG/ifc-lite/pull/2220) [`512406f`](https://github.com/LTplus-AG/ifc-lite/commit/512406f0d21c7e33b8c84a83865ffaff299e7cc1) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix a snapshot -> seed round trip silently dropping an explicitly-cleared `classifications` or `materials` attribute.
+
+  `inflateStructuredAttributes` (`packages/collab/src/snapshot/structured-attrs.ts`) shape-gated these attributes with `Array.isArray(value) && value.every(isClassificationRefShaped)` (same for materials). `[].every(...)` is vacuously true, so an entity whose classifications/materials were explicitly cleared to `[]` passed the gate, got pulled out of the flat attributes into the structured branch, and `flattenStructuredBranches` only re-emits that branch when it's non-empty — so the key never came back on the next snapshot. A reader who took a snapshot after the clearing landed would see the attribute vanish entirely rather than resolve to `[]`, and could keep serving a stale non-empty value from before the clear. Both branches now require a non-empty array before taking the structured path (mirroring the existing `geometryRefs` guard), so an explicit `[]` stays in the flat attributes and survives the round trip.
+
+- Updated dependencies [[`d75786f`](https://github.com/LTplus-AG/ifc-lite/commit/d75786f631047d234f204289426f708f0be8674b), [`58fbc63`](https://github.com/LTplus-AG/ifc-lite/commit/58fbc634994742c79375830c1983508752fd78e9), [`a220406`](https://github.com/LTplus-AG/ifc-lite/commit/a2204062ba1fc555e4529896cbc82efccc7a5146), [`c866bee`](https://github.com/LTplus-AG/ifc-lite/commit/c866bee62a7d6e40b15a7de63948354cbbe049a7), [`262b9df`](https://github.com/LTplus-AG/ifc-lite/commit/262b9df485e4bfd3760f73c30d93bb518e599b72), [`710fd83`](https://github.com/LTplus-AG/ifc-lite/commit/710fd83638b51b2e4744a1ac364827a27dc0fc73), [`d9490e6`](https://github.com/LTplus-AG/ifc-lite/commit/d9490e6e2ecacb65aea42fcaef73fd292a4c3095), [`8751ba4`](https://github.com/LTplus-AG/ifc-lite/commit/8751ba41dc4d1893530b0f1db6ad0f8fa0d5d3fd), [`deb54d3`](https://github.com/LTplus-AG/ifc-lite/commit/deb54d3ff75f35c3c9206c8ea9a1e875426352c6), [`35e37ac`](https://github.com/LTplus-AG/ifc-lite/commit/35e37ac99ab444773bfec669cfc5cf3937443942)]:
+  - @ifc-lite/data@3.2.2
+  - @ifc-lite/ifcx@2.3.4
+  - @ifc-lite/mutations@1.24.2
+
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [[`6792dd1`](https://github.com/LTplus-AG/ifc-lite/commit/6792dd11ad7049acb7329221ea8809d6333aefb7), [`6869d5c`](https://github.com/LTplus-AG/ifc-lite/commit/6869d5ced2d19ac4ab8b2591847f3ffd52236d14), [`22bffac`](https://github.com/LTplus-AG/ifc-lite/commit/22bffac737efa9bdd6ca583518f637593cb4d4bc), [`205a136`](https://github.com/LTplus-AG/ifc-lite/commit/205a136ee69e378ea01cd0d0a8a6dc81cf2fb08f), [`205a136`](https://github.com/LTplus-AG/ifc-lite/commit/205a136ee69e378ea01cd0d0a8a6dc81cf2fb08f)]:
+  - @ifc-lite/data@3.0.0
+  - @ifc-lite/mutations@1.21.1
+  - @ifc-lite/ifcx@2.3.2
+
+## 0.4.0
+
+### Minor Changes
+
+- [#1730](https://github.com/LTplus-AG/ifc-lite/pull/1730) [`c1695d7`](https://github.com/LTplus-AG/ifc-lite/commit/c1695d777263483110460df767ec86ca691048ab) Thanks [@louistrue](https://github.com/louistrue)! - `CollabSession.captureDocState()`: full-state fork point (`Y.encodeStateAsUpdate`) for whole-doc layer publishing via `publishLayer`, distinct from `captureBaseline()`'s state vector for the per-user `extractUserLayer` path. Backs the viewer's live-session draft publishing ([#1717](https://github.com/LTplus-AG/ifc-lite/issues/1717)).
+
+### Patch Changes
+
+- Updated dependencies [[`cd6c9bd`](https://github.com/LTplus-AG/ifc-lite/commit/cd6c9bda1066b7c7cda19e164d787d15b57e3483)]:
+  - @ifc-lite/mutations@1.20.0
+
+## 0.3.0
+
+### Minor Changes
+
+- [#1027](https://github.com/LTplus-AG/ifc-lite/pull/1027) [`6ed4de6`](https://github.com/LTplus-AG/ifc-lite/commit/6ed4de6a46100e097b41137a65e91b581df34486) Thanks [@louistrue](https://github.com/louistrue)! - Layer PRs foundation (docs/architecture/layer-prs):
+
+  - **ifcx**: deletion-overlay tombstones (`ifclite::deleted`) with shadow/resurrect semantics and child-path shadowing in both composition engines; `bakeLayers` tombstone-free materialization; canonical serialization with blake3 content addressing (`computeLayerId`, `computeStackHash`); provenance manifest v1 (`createProvenanceManifest`, `getProvenance`/`setProvenance`, `validateProvenance`).
+  - **diff**: opt-in per-componentKey sub-hash mode (`buildComponentFingerprints`) and `changedComponents` on diff entries; the whole-blob `dataHash` default is unchanged.
+  - **extensions**: scope-claim grammar — capability expressions extended with entity selectors (`model.mutate:Pset_FireSafety*@IfcWall&storey=EG`), with grant-coverage and op-level enforcement matching.
+  - **mutations**: `changeSetToOps` expressId→GlobalId bridge with blake3 content-derived identity fallback recorded for the manifest `identity_map`.
+  - **collab**: `extractMinimalLayer` now expresses deletions (entity tombstones plus `null` removals), closing the documented additive-only deferral; new `publishLayer` freezes a draft into an immutable, content-addressed, provenance-stamped layer.
+  - **merge** (new package): three-way merge engine over (entity, componentKey) states with explicit conflict records, resolution application, merge-layer emission with `manifest.merge`, revert (inverse-op layers), and rebase.
+
+- [#1027](https://github.com/LTplus-AG/ifc-lite/pull/1027) [`6ed4de6`](https://github.com/LTplus-AG/ifc-lite/commit/6ed4de6a46100e097b41137a65e91b581df34486) Thanks [@louistrue](https://github.com/louistrue)! - Serialize structured entity branches (psets, quantities, classifications, materials, geometryRef) through the IFCX snapshot pipeline ([#1031](https://github.com/LTplus-AG/ifc-lite/issues/1031)): `snapshotToIfcx` folds them into namespaced attributes (`bsi::ifc::v5a::<Set>::<Name>` for psets/quantities, `ifclite::` carriers for the rest), `seedFromIfcx` re-inflates them, and `extractMinimalLayer` diffs the same flattened view so structured edits and deletions survive snapshot → seed round-trips and minimal layers. The typed `TypedPropertyValue` record is the canonical wire shape: the MCP `set_property` draft op emits it, property extraction decodes it (and skips `ifclite::` carriers), composition resolves `null` attribute opinions as removals, and `bakeLayers` preserves the persistent carriers while stripping bookkeeping.
+
+### Patch Changes
+
+- Updated dependencies [[`6ed4de6`](https://github.com/LTplus-AG/ifc-lite/commit/6ed4de6a46100e097b41137a65e91b581df34486), [`6ed4de6`](https://github.com/LTplus-AG/ifc-lite/commit/6ed4de6a46100e097b41137a65e91b581df34486)]:
+  - @ifc-lite/ifcx@2.3.0
+  - @ifc-lite/mutations@1.19.0
+
+## 0.2.7
+
+### Patch Changes
+
+- [#1692](https://github.com/LTplus-AG/ifc-lite/pull/1692) [`4ef69e9`](https://github.com/LTplus-AG/ifc-lite/commit/4ef69e903def842a9d94cd656a5caa176dd344bb) Thanks [@louistrue](https://github.com/louistrue)! - Link-based multiuser collaboration plumbing (ports draft [#937](https://github.com/LTplus-AG/ifc-lite/issues/937)):
+
+  - `@ifc-lite/collab`: STEP → IFCX room seeding (`seedFromStep`), entity placement
+    helpers (`usd::xformop` read/write + baselines), shared annotation pins,
+    multi-mesh geometry refs (`geomIds` with legacy `geomId` read fallback,
+    `addGeometryRef`, `iterGeometries`), presence `role` field, and a browser fix
+    for `HttpBlobStore` (bind global `fetch` to avoid "Illegal invocation").
+  - `@ifc-lite/collab-server`: signed room tokens (HS256 mint / verify / revoke /
+    kick endpoints + `createRoomTokenAuthenticator`), CORS for the HTTP routes,
+    disk-backed `FsBlobStorage`, `Room.kickClient` / `RoomManager.peek`, and a CLI
+    that wires token auth + disk blobs from `COLLAB_TOKEN_SECRET` /
+    `COLLAB_DATA_DIR` (plus a reference Dockerfile + railway.toml).
+  - `@ifc-lite/renderer`: `rotateMeshesForEntity/-Entities` — in-place yaw rotation
+    of an entity's flat meshes about a pivot (local-frame-origin aware), used by
+    live collab placement sync and the viewer's rotate action.
+
+- Updated dependencies [[`ec53138`](https://github.com/LTplus-AG/ifc-lite/commit/ec53138f252578253b55e1caf28a23dc9cc61de9)]:
+  - @ifc-lite/ifcx@2.2.3
+
+## 0.2.6
+
+### Patch Changes
+
+- [#1691](https://github.com/LTplus-AG/ifc-lite/pull/1691) [`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a) Thanks [@louistrue](https://github.com/louistrue)! - Documentation moved to https://ifclite.dev/docs/ - README links and package homepage fields now point at the new home (the GitHub Pages site remains as a mirror whose canonical URLs point there).
+
+- Updated dependencies [[`26af236`](https://github.com/LTplus-AG/ifc-lite/commit/26af236a9128f5fc97493d75d7c9642958343a7a)]:
+  - @ifc-lite/data@2.5.2
+  - @ifc-lite/ifcx@2.2.2
+  - @ifc-lite/mutations@1.18.1
+
+## 0.2.5
+
+### Patch Changes
+
+- [#1676](https://github.com/LTplus-AG/ifc-lite/pull/1676) [`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39) Thanks [@louistrue](https://github.com/louistrue)! - Docs refresh: correct stale README claims and API samples against the current codebase; add READMEs to the ten published packages that shipped without one (cli, create, sdk, sandbox, lens, lists, embed-sdk, embed-protocol, encoding, viewer-core).
+
+- Updated dependencies [[`da04601`](https://github.com/LTplus-AG/ifc-lite/commit/da0460183dcb4e2b26ceb53cfebd8cca33c78c39)]:
+  - @ifc-lite/data@2.5.1
+  - @ifc-lite/ifcx@2.2.1
+
+## 0.2.4
+
+### Patch Changes
+
+- [#1071](https://github.com/LTplus-AG/ifc-lite/pull/1071) [`891efef`](https://github.com/LTplus-AG/ifc-lite/commit/891efef5fa9fca04bf2e01be9a1de04bbb84aafe) Thanks [@louistrue](https://github.com/louistrue)! - Dead-code and dependency hygiene: remove unused internal barrels/shims (clash engine-ts re-exports, collab doc barrel, sdk transport/types) and drop unused dependencies (renderer/cli: @ifc-lite/wasm; cli/mcp: @ifc-lite/encoding; mcp: @types/node out of runtime dependencies; collab: ws devDeps; data: @types/proj4). No public API changes.
+
+- Updated dependencies [[`891efef`](https://github.com/LTplus-AG/ifc-lite/commit/891efef5fa9fca04bf2e01be9a1de04bbb84aafe)]:
+  - @ifc-lite/data@2.0.3
+
+## 0.2.3
+
+### Patch Changes
+
+- [#1036](https://github.com/LTplus-AG/ifc-lite/pull/1036) [`0205c4d`](https://github.com/LTplus-AG/ifc-lite/commit/0205c4d50995572ef796ce66877aa389f19c6fbc) Thanks [@louistrue](https://github.com/louistrue)! - Add a `default` condition to every package's exports map. The maps only
+  declared `import` + `types`, so any resolver hitting the CJS/default
+  condition path (tsx, jest, plain `require`, some bundlers) failed with
+  ERR_PACKAGE_PATH_NOT_EXPORTED. The `default` entry points at the same
+  ESM dist file; pure ESM consumers are unaffected.
+- Updated dependencies [[`0205c4d`](https://github.com/LTplus-AG/ifc-lite/commit/0205c4d50995572ef796ce66877aa389f19c6fbc)]:
+  - @ifc-lite/data@2.0.2
+  - @ifc-lite/ifcx@2.1.4
+  - @ifc-lite/mutations@1.15.3
+
+## 0.2.2
+
+### Patch Changes
+
+- [#946](https://github.com/LTplus-AG/ifc-lite/pull/946) [`6378998`](https://github.com/LTplus-AG/ifc-lite/commit/6378998ec146f7f9297ef5fcc5953b155fd6b5e0) Thanks [@louistrue](https://github.com/louistrue)! - Fix a batch of verified findings from a full-codebase review (security, correctness,
+  data-loss, and resource/memory leaks). Highlights:
+
+  **Security**
+
+  - collab-server: a malformed WebSocket frame no longer crashes the whole process
+    (decode is wrapped; a bad frame is rejected/audited instead of throwing).
+  - mcp: the local HTTP transport now validates `Host`/`Origin` and no longer sends a
+    wildcard `Access-Control-Allow-Origin`, closing a DNS-rebinding/CSRF hole; the
+    `AuthScope.modelIds` allowlist is now enforced at model resolution.
+  - server-bin: `extractZip` uses `execFileSync` (argv, no shell), removing command
+    injection via archive/destination paths.
+  - export / sdk / cli / mcp / lists / viewer CSV exporters now neutralize spreadsheet
+    formula injection (CWE-1236) consistently.
+  - create-ifc-lite: validates the project name (no path traversal) and drops the
+    unused `execSync`-based downloader.
+  - embed-sdk: inbound `postMessage` now validates `event.origin`.
+
+  **Correctness / data-loss**
+
+  - parser: `lengthUnitScale` survives the worker transport; the nested STEP list
+    parser is string-aware (commas/parens inside quoted values no longer mis-split).
+  - mutations: deleting a property from a session-created pset and replaying
+    `UPDATE_ATTRIBUTE` / `CREATE_PROPERTY_SET` mutations now work.
+  - export: merged-export ID remapping no longer rewrites `#N` inside quoted strings.
+  - drawing-2d: GPU section cutter triangle upload/readback use correct WGSL std-layout
+    offsets and strides.
+  - ifcx: cyclic children no longer abort the parse; spatial children round-trip; the
+    mesh transform guards a zero/non-finite homogeneous `w`.
+  - data / cache: a `NULL` string property value stays `null` instead of becoming `""`.
+  - pointcloud, bcf, server-client, query, viewer-core, viewer store/federation: assorted
+    decoding, federation-id, and selection-state fixes.
+
+  **Resource / memory leaks**
+
+  - geometry, query (DuckDB), renderer (GPU buffers), collab (federation presence),
+    sandbox (host log capture + runtime), mcp (clash mesh cache), server-bin (signal
+    listeners), and the viewer renderer on unmount now release resources deterministically.
+
+  **Hardening (apps, not published)**
+
+  - server: a dedicated `server-release` Cargo profile (`panic = "unwind"`) plus a
+    `CatchPanicLayer` contain a malformed-IFC parse panic to the offending request
+    instead of aborting the whole server.
+  - desktop (Tauri): a Content-Security-Policy is set, and unused `shell:*` /
+    `fs:allow-write|mkdir|remove` capabilities (and the unused shell plugin) are removed.
+
+  **Second pass** (additional verified findings)
+
+  - collab-server: S3 log load now follows `ListObjectsV2` pagination (no dropped frames);
+    awareness frames are size-capped + rate-limited; path-lock verify runs after role/rate-limit;
+    the blob route requires auth and `/metrics` can be token-gated.
+  - server-bin: downloaded binaries are SHA-256 verified against a release sidecar (fail-closed on
+    mismatch, warn-if-absent for older releases).
+  - extensions: inner-ring capability check fails _closed_ for unknown namespaces; signing
+    canonicalization is now injective (length-prefixed).
+  - correctness/leaks: mutations quantity type+unit preserved on replay; `findByProperty` boolean
+    comparisons; Parquet REAL columns kept as Float64; blob GC fail-safe on missing `uploadedAt`;
+    spatial-hierarchy + codegen cycle guards; BVH NaN edge; bSDD/playground caches bounded;
+    point-cloud GPU asset freed on federation error; mcp `parseColor` rejects non-hex; bcf/SVG/STEP
+    output escaping; and more.
+
+- Updated dependencies [[`6378998`](https://github.com/LTplus-AG/ifc-lite/commit/6378998ec146f7f9297ef5fcc5953b155fd6b5e0)]:
+  - @ifc-lite/mutations@1.15.2
+  - @ifc-lite/data@2.0.1
+  - @ifc-lite/ifcx@2.1.3
+
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [[`e73ac09`](https://github.com/LTplus-AG/ifc-lite/commit/e73ac0931b85cd299ae9b723073e956b6b124c85)]:
+  - @ifc-lite/data@2.0.0
+  - @ifc-lite/ifcx@2.1.2
+  - @ifc-lite/mutations@1.15.1
+
+## 0.2.0
+
+### Minor Changes
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Final integration batch. Closes the last cross-cutting items in the
+  plan: the spec §16.3 mutations bridge, open problem #7 (per-section
+  locks), the viewer-mount one-liner, the TLS bundle helper, and a
+  runnable performance benchmark suite. **+11 tests, total 175 passing.**
+
+  `@ifc-lite/collab`
+
+  - **`bindMutationsToCollab(view, session, opts)`** (spec §16.3): wraps
+    `@ifc-lite/mutations` `MutablePropertyView` so legacy STEP property
+    edits mirror to the Y.Doc whenever a collab session is bound. The
+    view's existing observers / change-set tracking still fire; reads
+    pass through. `resolveEntity(id)` translates numeric expressIds to
+    IFCX paths; returning `null` skips the mirror for that mutation.
+    `PROPERTY_TYPE_NAMES` maps `PropertyValueType` enum values to the
+    IFCX type strings stored on `PropertyValue`.
+  - **`mountPresenceInViewer({ session, container, viewport })`** (spec
+    §7 viewer mount): one-line glue that creates a presence overlay,
+    forwards `mousemove → setCursor2d`, and returns a `teardown()`.
+  - **`runPerfBenchmarks(budget?)`** (§15): self-contained Node-runnable
+    benchmarks measuring single-attribute update size, cold-load time
+    for a 1k-entity fixture, and (gated by `COLLAB_BENCH_HEAVY`) state-
+    vector size at 100k entities. Each result reports
+    `{ name, value, unit, budget, ok }`. Useful for `vitest` perf
+    regression coverage and CI smoke tests.
+
+  `@ifc-lite/collab-server`
+
+  - **Per-section locks (open #7).** `createPathLockRegistry()` →
+    `add({ prefix, label?, exemptUserIds?, exemptRoles? })` /
+    `remove(lock)` / `matches(path, principal)` / `clear()`.
+    `verifyAgainstPathLocks(registry)` returns a `VerifyMessageFn`
+    that decodes incoming sync-update frames, runs them through a
+    throwaway Y.Doc to harvest touched paths, and rejects writes that
+    intersect any locked prefix (audit reason `locked:<label>`).
+    `harvestUpdatePaths(update)` is exposed for tests + custom
+    filtering. Path format: `entities/wall`, `geometry/g7`, etc.
+  - **`startSecureCollabServer(opts)`**: bundles `createSecureHttpServer`
+    - `secureHttpHandler` + `startCollabServer` so deployers get
+      TLS-in-process plus the OWASP-baseline header wrapper without
+      writing the wiring.
+
+  Tests added (+11): mutations bridge happy path / null-resolve / delete
+  mirror, path-lock registry add/match/remove + path harvesting + raw-WS
+  rejection of writes to a locked prefix, perf benchmarks for
+  single-attr-update / cold-load / runPerfBenchmarks happy paths,
+  secure-bundle smoke test (rejects missing cert paths), viewer-bridge
+  overlay mounting + mousemove forwarding + clean teardown via a
+  hand-rolled DOM stub.
+
+  Plan doc: v0.1 ☑ (mutations bridge added), v0.2 ☑ (mount-in-viewer
+  shipped), v0.5 ☑ (TLS bundle + per-section locks). Open problems are
+  closed in this batch as follows: problem #7 (per-section locks) is
+  new in this PR; problems #1, #2, #3, #4, #5, #6, #8, #9, #10 were
+  already closed in prior batches.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Big reach-for-the-stars batch. Closes (or near-closes) the remaining
+  substantial items in `docs/architecture/collab-plan.md` for v0.2,
+  v0.5, v0.7, and v1.0. **+21 tests, total 140 passing.**
+
+  `@ifc-lite/collab`
+
+  - **History sidecar (v0.7).** `HistorySidecar` interface with
+    `MemoryHistorySidecar` ship and an `AutomergeHistorySidecar` slot
+    reserved (matching the same interface). Records, time-travels, diffs
+    per-entity-id, branches, merges. `attachHistorySidecar(session,
+sidecar, opts)` drives a sidecar from a live `CollabSession` on a
+    configurable interval + on demand, with optional differential
+    layers in each entry for cheap diff queries.
+  - **End-to-end encryption (v1.0).** WebCrypto-based suite:
+    `deriveRoomKey` (PBKDF2-SHA256, 200k iterations default),
+    `generateRoomKey` / `exportRoomKey` / `importRoomKey`,
+    `encryptFrame` / `decryptFrame` with versioned
+    `[1B ver][12B IV][N B AES-GCM]` framing, and a `KeyRing`
+    (`createKeyRing(initial, { gracePeriodMs })`) so in-flight frames
+    decode through retired keys for the configured grace window.
+  - **Presence-renderer math (v0.2).** `peerVisuals(peers, opts)` turns
+    a `PresenceMap` into render-ready `{ color, label, opacity,
+isStale, cursor3d, cursor2d, selection, modelId }`. Color resolution
+    uses `colorForUser` against either the human or agent palette
+    depending on the `(agent)` suffix; opacity fades over `staleAfterMs`.
+    `cursorScreenPosition` projects 2D cursors per viewport.
+
+  `@ifc-lite/collab-server`
+
+  - **S3 persistence (v0.5).** `S3Persistence` against an injectable
+    `S3LikeClient` + `S3Commands` shape — AWS SDK, R2, MinIO, or any
+    S3-compatible client all fit without forcing
+    `@ifc-lite/collab-server` to depend on `@aws-sdk/client-s3`.
+    Per-room layout: `<prefix><room>.snap` for compacted state plus
+    `<prefix><room>.log/<NNNNNNNNNN>.bin` for rolling log frames.
+    Implements load / append / compact / drop with `frameMaxBytes`
+    enforcement.
+  - **Anti-replay wired into the message path (v0.5 / open #8).**
+    `RoomOptions.verifyMessage: VerifyMessageFn` runs before rate-limit
+    / role-check. Rejects audit as `reject` with the supplied reason.
+    `verifyWithReplayProtector(protector, { requireSigned })` adapts the
+    existing `ReplayProtector` for the hook. `encodeSignedFrame` /
+    `decodeSignedFrame` ship a default
+    `[0xff][4B clientId][4B clock][64B HMAC][N B payload]` envelope so
+    apps don't have to invent one.
+  - **TLS / secure-server helpers (v0.5).** `createSecureHttpServer`
+    with strong defaults (TLS 1.2+, conservative cipher list, ALPN
+    `http/1.1`, optional CA bundle for mTLS), `applySecurityHeaders` for
+    the OWASP-baseline response headers (HSTS, no-sniff, frame deny,
+    no-referrer), and `secureHttpHandler(inner)` to wrap an existing
+    request handler with the headers + TRACE/TRACK rejection.
+
+  Tests added (+21):
+
+  - `history` — record / list / time-trace, diff added/removed/changed,
+    branch + merge, session-driven captures with diff entries.
+  - `e2e-encryption` — derive → encrypt → decrypt round-trip,
+    cross-salt rejection, wrong-key rejection, export/import preserves
+    decryption, key ring grace period, post-grace key drop.
+  - `render` — color/label/opacity resolution, stale fading, local-peer
+    exclusion, cursor projection by viewport.
+  - `replay-wired` — server rejects unsigned frames when
+    `requireSigned`, signed frame decodes + clock-tracks, replay
+    rejected.
+  - `secure-server` — security headers applied, TRACE/TRACK rejected
+    via raw socket (undici blocks TRACE client-side).
+  - `persistence-s3` — append + load round-trip, compact replaces snap
+    and clears log, drop removes everything.
+
+  Plan doc has updated v0.2 / v0.5 / v0.7 / v1.0 status badges. v0.5
+  and v0.7 and v1.0 are now ☑ on every item that lives inside these
+  two packages; remaining work for v0.5 (Redis persistence,
+  full-bucket histograms) and v0.7 (`AutomergeHistorySidecar`) is
+  opt-in extension that doesn't block GA.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Tackle-everything batch. Closes the remaining substantial items in the
+  plan for v0.2, v0.3, v0.4, v0.5, v0.7, and v1.0. **+37 tests, total
+  164 passing.**
+
+  `@ifc-lite/collab`
+
+  - **`AutomergeHistorySidecar`** (v0.7): real `@automerge/automerge`
+    3.x implementation. Same `HistorySidecar` interface as the in-memory
+    variant; adds binary `save()` / `load(bytes)` for
+    cross-restart persistence. Branches and merges round-trip through
+    the Automerge doc.
+  - **`buildBranchTree(sidecar)`** (v0.7): pure-data branch-tree
+    builder. Returns `{ nodes, edges, branches }` with `branch-anchor` /
+    `entry` / `merge` node kinds and `history` / `fork` / `merge` edge
+    kinds. Apps render this directly into git-log columns or
+    force-directed graphs.
+  - **Parametric mesh primitives** (v0.3): pure-TS reference kernel.
+    `paramsToMesh(source, params)` ships `extruded-area-solid`, `box`,
+    `cylinder`, and `revolved-area-solid`. `hashMesh(mesh)` returns a
+    32-hex content hash for cache keys.
+  - **Determinism harness** (v0.3 / open #5):
+    `runDeterminismHarness(kernel, fixtures, expected)` + a
+    `DEFAULT_FIXTURES` set covering every primitive. CI runs this on
+    every platform and fails on drift.
+  - **`createWebRtcProvider`** (v0.2 §8.1): wraps `y-webrtc` lazily so
+    consumers who don't use it pay no bundle cost. Same status /
+    whenSynced shape as the websocket provider.
+  - **`createNumericRegistryAdapter(registry)`** (v0.4): bridges the
+    renderer's existing numeric-offset `FederationRegistry` into our
+    string-shaped `FederationResolver` without forcing
+    `@ifc-lite/collab` to depend on the renderer.
+  - **`installIfc4ToIfc4x3Migration()`** (v1.0): sample registered
+    schema migration that renames `Pset_<…>::<key>` attributes into
+    the `bsi::ifc::v5a::Pset_<…>::<key>` namespace. Demonstrates the
+    migration plumb for consumers.
+  - **`createPresenceOverlay({ container, viewport })`** (v0.2): drop-in
+    2D canvas overlay that consumes a `PresenceMap` and draws other
+    peers' cursors + label badges. `update(peers)` redraws; auto-resizes
+    via `ResizeObserver`. Pairs with `peerVisuals` for any DOM viewer.
+
+  `@ifc-lite/collab-server`
+
+  - **`RedisPersistence`** (v0.5): `Persistence` against a
+    `RedisLikeClient` interface (ioredis / node-redis 4+ satisfy it).
+    Layout: `<prefix><roomId>:snap` for compacted state, list
+    `<prefix><roomId>:log` for rolling frames. Implements
+    load / append / compact / drop.
+  - **Bucketed histograms** (v0.5): `MetricsRegistry.bucketedHistogram(
+name, buckets, help)` accumulates observations into upper-bound
+    buckets and renders as a proper Prometheus `histogram` type with
+    `le="<bound>"` bucket labels.
+
+  Tests added (+37): Automerge sidecar record / save+load / diff /
+  branch+merge; branch-tree anchor + history edges, fork edges, merge
+  edges with merge-from-branch annotation; parametric primitives shapes
+
+  - deterministic hashes + dispatch errors; determinism harness happy
+    path + drift detection; numeric registry adapter forwarding + numeric
+    guard; IFC4 → IFC4X3 sample migration verifying renames; Redis
+    persistence append/load + compact/clear + drop; bucketed histograms
+    counts + label dimensions + empty-bucket guard.
+
+  Plan doc: v0.2 ☑ (overlay shipped), v0.3 ☑ (parametric kernel +
+  determinism harness), v0.4 ☑ (numeric registry adapter), v0.5 ☑
+  (Redis + bucket histograms), v0.7 ☑ (Automerge sidecar + branch
+  tree). v1.0 was already ☑; the sample migration finishes the §1.x
+  "actually IFC schema migrations" caveat.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - `@ifc-lite/collab` follow-up: deterministic per-user color hash exposed
+  publicly (`colorForUser`, `DEFAULT_USER_PALETTE`, `fnv1a`) and consumed
+  automatically by `Presence.setUser` when the caller doesn't supply a color.
+  `UserIdentity.color` is now optional.
+
+  Conflict detector tightened: only flags concurrent deletes (not creates) at
+  the entity top level, and now also surfaces concurrent Pset-creation as a
+  `pset-property` event keyed by Pset name.
+
+  `@ifc-lite/collab-server` follow-up: an append-only audit log
+  (`AuditSink`, `MemoryAuditSink`, `noopAuditSink`, `shortHash`) that records
+  `(timestamp, user, room, op-type, op-hash)` for every connect, sync,
+  update, awareness, and reject event; and a per-peer rate limiter
+  (`createRateLimiter`, `RateLimitOptions`) wired into the room's update
+  filter. Editor-or-better roles get a 200-token / 60-tps default bucket;
+  `startCollabServer` accepts a function form so service accounts can have
+  tighter budgets than humans.
+
+  Tests added: 23 new (color, audit + rate limit, disconnect/reconnect,
+  property-based convergence with seeded random traces, conflict scenarios
+  for each `ConflictKind`, broader entity-op coverage). Total now 49.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - v0.1 Foundation of `@ifc-lite/collab` — real-time collaborative BIM via CRDT
+  on IFCX, plus a reference websocket sync server. New packages.
+
+  `@ifc-lite/collab` ships:
+
+  - Y.Doc schema with `entities` / `relationships` / `geometry` top-level
+    shared types and helpers for every operation in the spec §6 table
+    (create, delete, set attribute, set Pset property, hierarchy move, type
+    promotion, relationship target add/remove, geometry param/blob updates).
+  - IFCX seed (`seedFromIfcx`) and snapshot (`snapshotToIfcx`) with full
+    round-trip against the buildingSMART hello-wall fixture.
+  - Per-user layer extraction filtered by `clientID`.
+  - IndexedDB and websocket providers, plus an in-memory provider for tests.
+  - Awareness / presence helpers (3D + 2D cursors, selection, camera, view,
+    section, isolation, tool, status) at 30 Hz with stale eviction.
+  - Y.UndoManager wrapper scoped to a local-origin tag, so a peer's `undo()`
+    only rolls back their own edits.
+  - Conflict detector backed by `Transaction.changed` (catches LWW losses
+    even when `YEvent.keys` is empty).
+  - `createCollabSession` glues the above into the public façade documented
+    in spec §16.2.
+
+  `@ifc-lite/collab-server` ships:
+
+  - `y-websocket`-compatible sync (`y-protocols/sync` + awareness on the
+    same socket).
+  - In-memory and append-only-file persistence with periodic compaction.
+  - JWT auth hook (`AuthenticateFn`) and role-based write capability check.
+  - Healthcheck endpoint and clean shutdown.
+  - `ifc-lite-collab-server` CLI binary.
+
+  Tests cover schema round-trips, the buildingSMART hello-wall fixture,
+  two-peer convergence with conflict-detector firing on both peers,
+  end-to-end sync through the websocket server, undo isolation, and
+  per-user layer extraction.
+
+  See `docs/architecture/collab-plan.md` for the v0.1 → v1.0 roadmap.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Continuing the v0.1 → v1.0 plan. Lands foundational pieces of v0.3
+  (geometry), v0.4 (federation), and v0.6 (MCP) so each upstack consumer
+  has stable shapes to build on.
+
+  `@ifc-lite/collab`
+
+  - Blob store: content-addressed put/get/has/delete/list with a stable
+    32-hex `fnv128` hasher. Backends: `MemoryBlobStore`,
+    `createIndexedDbBlobStore` (browser only, lazy-loaded), `HttpBlobStore`,
+    and `LayeredBlobStore(local, remote)` for local-first read-through and
+    parallel write-through.
+  - CSG-tree CRDT: `ensureCSGTree`, `appendCSGOp`, `insertCSGOp`,
+    `removeCSGOp`, `moveCSGOp`, `getCSGOps`. Stored as `Y.Array<CSGOp>` on
+    the geometry node's `params.ops` so concurrent appends interleave
+    per-peer-relative-order. Order-dependence of the resulting solid is
+    documented as a v0.1 limitation; full CRDT-tree merging is open
+    problem #4 (v1.x).
+  - Conflict UI bridge: `createConflictUIBridge(detector)` folds detector
+    events into stable `(kind, path, field)` buckets and emits
+    `open` / `update` / `close` lifecycle events. Buckets close on
+    idle (`closeAfterMs`, default 4 s) or via explicit `resolve(key)`.
+  - Agent presence helper: `markAsAgent`, `agentIdentityFromMcp`,
+    `AGENT_PALETTE`. Standardized convention so the viewer can render MCP
+    tool peers with a `(agent)` suffix and a distinct color band.
+  - `FederationSession` (spec §10): hosts N per-model `CollabSession`s
+    plus a shared `_federation` Y.Doc for cross-model
+    `FederationRecord`s (clash, RFI, view, BCF refs). Presence is
+    project-scoped via the `_federation` doc per §10.2. APIs:
+    `createFederationSession`, `addModel`, `removeModel`, `upsertRecord`,
+    `getRecord`, `removeRecord`, `listRecords`, `observeRecords`.
+
+  `@ifc-lite/collab-server`
+
+  - Blob HTTP route: `PUT /blobs/<hash>`, `GET /blobs/<hash>`,
+    `HEAD /blobs/<hash>`, `DELETE /blobs/<hash>`, `GET /blobs` (list).
+    Pluggable `ServerBlobStorage` (default `InMemoryBlobStorage`,
+    swappable for S3/disk) and configurable `blobMaxBytes` (default
+    100 MB) for payload-too-large rejection.
+
+  Tests added (+22, now 71 total — all passing): blob store backends,
+  CSG concurrent appends, UI-bridge open/update/close + explicit resolve,
+  agent presence (suffix idempotence, deterministic id from MCP input),
+  FederationSession (multi-model rooms, record CRUD, observeRecords), and
+  the server's blob route end-to-end (round-trip, malformed-hash 400,
+  413 on payload-too-large).
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Continuing the plan. Lands the production observability stack (v0.5),
+  blob GC (v0.3 / open #6), GDPR helpers (v1.0), and the worker-safe
+  snapshot entry point (v0.1 deferred).
+
+  `@ifc-lite/collab-server`
+
+  - `SnapshotWorker`: periodic per-room IFCX export to a writable
+    directory. `runOnce()` for tests / cron. Skips idle rooms by default;
+    `includeIdle: true` covers them too. Adds `@ifc-lite/collab` as a
+    dep so we can call `snapshotToIfcx` directly.
+  - `MetricsRegistry` + Prometheus-text `/metrics` endpoint. Ships
+    counter/gauge/lightweight-histogram. Built dependency-free so we can
+    swap in `prom-client` later without API churn. Surfaces
+    `collab_rooms`, `collab_room_peers{room}`, `collab_updates_total`,
+    `collab_rejects_total{reason}`.
+  - `RoomManager.setCounters({ update, reject })` so the server can
+    inject metric counters without leaking the registry into the manager.
+  - `createReplayProtector({ secret })` (open problem #8): HMAC-SHA256
+    verifier for `(clientId, clock, payload)` envelopes with strict
+    monotonic-clock enforcement. `computeHmac` is exported so non-Node
+    clients can produce matching tags.
+
+  `@ifc-lite/collab`
+
+  - `BlobStore.stat(hash)` (optional): returns `BlobMeta` without
+    downloading the bytes. Implemented for `MemoryBlobStore`,
+    `createIndexedDbBlobStore`, and `HttpBlobStore` (HEAD).
+  - Blob GC (open problem #6): `collectReferencedBlobHashes(doc)`,
+    `planBlobSweep(store, referenced, { epochMs })`, `sweepBlobs(store,
+decision)`. Walks every entity's `geometryRef.geomId` → resolves
+    `blobHash`, also collects any 32-hex string in `geometry.params.*`
+    so apps that store auxiliary refs in params survive.
+  - GDPR helpers: `exportAndLeave(session, { snapshot, serverDelete })`
+    snapshots to IFCX, marks presence offline, runs the optional remote
+    hard-delete hook, then disposes. `redactAuthorMeta(session)` blanks
+    per-entity `createdBy` / `lastEditedBy` for anonymised exports.
+  - Worker-safe snapshot entry: new sub-export
+    `@ifc-lite/collab/snapshot/worker` ships `runSnapshotWorker(self)`,
+    a postMessage adapter that mounts a `(snapshot|seed)` request handler
+    on a `DedicatedWorkerGlobalScope`. The pure `snapshotToIfcx` /
+    `seedFromIfcx` helpers are also re-exported from this entry point so
+    consumers that don't want the adapter still get a worker-clean
+    surface.
+
+  Tests added (+18, total 101 passing): blob GC end-to-end (collect →
+  plan → sweep, plus epoch grace window), GDPR `exportAndLeave` happy
+  path / hook ok / hook failure / `redactAuthorMeta`, snapshot worker
+  postMessage round-trip (snapshot, seed, error report), server-side
+  `SnapshotWorker` writing IFCX files, metrics counters / gauges /
+  histogram and the `/metrics` endpoint serving Prometheus text, and
+  replay-protector HMAC happy path / tampered MAC / replay / payload
+  mismatch.
+
+  Plan doc updated with v0.3 / v0.5 / v1.0 status badges.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Continuing the plan. Lands operational v0.5 pieces, the v0.7 branching
+  starter, and v1.0 schema-migration scaffolding.
+
+  `@ifc-lite/collab-server`
+
+  - `JsonlFileAuditSink`: append-only NDJSON file sink with size-based
+    rotation (`rotateAtBytes`) and an opt-in `fsync`-after-append mode for
+    durable audit trails.
+  - Idle room unloading: `idleUnloadMs` knob plumbed end to end. The
+    manager runs an internal `unref()`'d sweep timer at half the idle
+    window; `sweepIdle()` is also callable directly. Persistence keeps the
+    durable copy, so unloading is non-destructive.
+  - Retention policy: `planRetention(dir, policy)` + `applyRetention`.
+    Honors `fullLogDays` (default 90), `snapshotsDays` (default 5y), and
+    `maxBytesPerRoom` (trim oldest first). Pluggable file classifier so
+    custom naming schemes work too.
+  - `RoomManager.stats()` returns `(roomId, peerCount, idleMs)` triples
+    for diagnostics and tests.
+
+  `@ifc-lite/collab`
+
+  - Schema-version helpers (open problem #2 prep): `getSchemaVersion`,
+    `setSchemaVersion`, `registerSchemaMigration`, `migrateSchema`, plus
+    a `MIGRATION_ORIGIN` symbol so observers can filter migration
+    transactions out of e.g. undo stacks.
+  - v0.7 branching starter: `forkSession(parent, { name })` snapshots the
+    parent's Y.Doc, seeds a fresh sibling session, and stamps
+    `meta.branch.parentRoomId` / `branch.name` / `branch.forkedAt`.
+    `mergeBranch(parent, branch, strategy)` implements both `'ops'`
+    (Y-update apply with last-write-wins on conflicts) and `'layer'`
+    (IFCX snapshot + non-resetting re-seed). Returns a small
+    `MergeReport`. `readBranchMeta` exposes the metadata back.
+
+  Tests added (+12, total 83 passing): JSONL append + rotation, retention
+  plan + apply (full-log days, snapshots days, maxBytesPerRoom),
+  RoomManager idle sweep with both empty and busy rooms, schema-version
+  round-trip + a sample migration that renames an attribute namespace,
+  and end-to-end branch fork → divergent edits → merge for both strategies
+  including a non-conflicting parent-edit-survives case.
+
+- [#616](https://github.com/louistrue/ifc-lite/pull/616) [`2fc15b4`](https://github.com/louistrue/ifc-lite/commit/2fc15b45fbd06ebb57120d87db9a0ab06ed18142) Thanks [@louistrue](https://github.com/louistrue)! - Continuing the plan. Lands the differential layer composer (v0.7), the
+  property unit converter (v1.0 / open problem #3), conflict resolver
+  actions on the UI bridge, the `FederationResolver` interface, and the
+  network-latency simulation perf harness (v0.2).
+
+  - `extractMinimalLayer(doc, baseline, opts)`: produces an IFCX layer
+    containing only the entities and fields that changed since
+    `baseline`. Entities created since baseline are emitted whole;
+    entities that already existed only get their changed attributes /
+    children / inherits keys. Toggle whether updated values count as
+    diffs via `includeUpdatedValues`.
+
+  - `convertEntityUnits(doc, from, to)` walks every Pset and converts
+    numeric `PropertyValue`s with a matching `unit`. Ships SI-relative
+    scale tables for length (m/cm/mm/in/ft), area (m²/cm²/mm²/ft²/in²),
+    volume (m³/cm³/mm³/L), and angle (rad/deg). `convertValue(value,
+from, to)` is exposed for one-shot conversions. `familyOf(unit)`
+    classifies a unit string.
+
+  - Conflict UI bridge: `bridge.keepMine(key)` and `bridge.acceptTheirs(key)`
+    run registered handlers (per `ConflictKind`) and close the bucket.
+    Handlers receive `{ bucket }` and are responsible for emitting the
+    follow-up CRDT edit.
+
+  - `FederationResolver` interface: typed `toGlobalId / fromGlobalId /
+getModelForGlobalId` contract. `passThroughResolver` is the default
+    for IFCX UUID paths (globally unique by construction).
+    `createMapBackedResolver(table)` covers explicit lookup tables. The
+    renderer's existing numeric-offset `FederationRegistry` can be
+    wrapped to satisfy the interface without forcing `@ifc-lite/collab`
+    to depend on the renderer (adapter snippet documented in source).
+
+  - `createLatencyChannel(a, b, { baseMs, jitterMs, dropRate, random })`
+    wraps a pair of Y.Docs with a queued, time-bucketed update channel.
+    `flushUntil(t)` advances simulated time and dispatches due updates.
+    Useful for benchmarking the §15 perf budget under simulated network
+    conditions.
+
+  Tests added (+18, total 119 passing): minimal-layer round-trips and
+  diff-only behaviour, unit conversion across families plus skipping on
+  mismatched unit, bridge `keepMine` / `acceptTheirs` lifecycle including
+  follow-up CRDT writes from handlers, resolver pass-through and
+  map-backed lookups, latency channel arrival-time behaviour and
+  deterministic drop rate under a seeded PRNG.
+
+## 0.1.0
+
+### Minor Changes
+
+- Initial release. v0.1 Foundation per `docs/architecture/collab-plan.md`:
+  - Y.Doc schema with `entities`, `relationships`, `geometry` top-level maps.
+  - IFCX seed (`from-ifcx`) and snapshot (`to-ifcx`) round-trip.
+  - Per-user layer extraction.
+  - IndexedDB and websocket providers.
+  - Awareness / presence helpers (3D + 2D cursors, selection, camera).
+  - Y.UndoManager wrapper scoped to local origin.
+  - Conflict detector + UI-bridge event emitter.
+  - `createCollabSession` public API binding the above together.
