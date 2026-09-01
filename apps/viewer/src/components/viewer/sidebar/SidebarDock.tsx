@@ -23,17 +23,23 @@ import { SidebarPanelHost } from './SidebarPanelHost';
 
 export const SIDEBAR_ACTIVITY_BAR_WIDTH = 48; // w-12
 
-export function SidebarDock() {
+export function SidebarDock({
+  railOnly = false,
+  withActivityBar = true,
+}: {
+  railOnly?: boolean;
+  withActivityBar?: boolean;
+}) {
   const mode = useViewerStore((s) => s.sidebarMode);
 
   return (
     <div className="viewer-sidebar-dock flex h-full min-w-0">
-      {mode === 'expanded' && (
+      {mode === 'expanded' && !railOnly && (
         <div className="viewer-panel-surface h-full min-w-0 flex-1 overflow-hidden panel-container">
           <SidebarPanelHost />
         </div>
       )}
-      <ActivityBar />
+      {withActivityBar && <ActivityBar />}
     </div>
   );
 }

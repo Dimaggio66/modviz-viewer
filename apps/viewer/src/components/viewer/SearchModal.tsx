@@ -27,6 +27,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Kbd } from '@/components/ui/kbd';
 import { useViewerStore } from '@/store';
 import { runTier0Scan, type SearchResult, type ScanModel } from '@/lib/search/tier0-scan';
 import { queryTier1Indexes, type Tier1Index } from '@/lib/search/tier1-index';
@@ -215,7 +216,7 @@ export function SearchModal() {
               </TabsTrigger>
             </TabsList>
             <div className="text-[11px] text-muted-foreground">
-              <kbd className="rounded border border-zinc-300 bg-zinc-100 px-1 font-mono text-[10px] dark:border-zinc-700 dark:bg-zinc-900">Esc</kbd>
+              <Kbd>Esc</Kbd>
               <span className="ml-1">close</span>
             </div>
           </div>

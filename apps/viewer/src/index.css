@@ -1027,6 +1027,76 @@ body {
   background-color: color-mix(in srgb, var(--color-muted-foreground) 50%, transparent);
 }
 
+/* Scroll areas — the Radix component above handles custom tracks, while
+   these shared rules give every existing native overflow container the same
+   subtle, rounded shadcn-style thumb. This keeps virtualised lists, dialogs
+   and code panels behaving exactly as before without a risky component swap. */
+:where(#root) :is(
+  .overflow-auto,
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-x-scroll,
+  .overflow-y-scroll,
+  .scrollbar-thin,
+  [data-radix-scroll-area-viewport]
+) {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-muted-foreground) 32%, transparent) transparent;
+}
+
+:where(#root) :is(
+  .overflow-auto,
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-x-scroll,
+  .overflow-y-scroll,
+  .scrollbar-thin,
+  [data-radix-scroll-area-viewport]
+)::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:where(#root) :is(
+  .overflow-auto,
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-x-scroll,
+  .overflow-y-scroll,
+  .scrollbar-thin,
+  [data-radix-scroll-area-viewport]
+)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:where(#root) :is(
+  .overflow-auto,
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-x-scroll,
+  .overflow-y-scroll,
+  .scrollbar-thin,
+  [data-radix-scroll-area-viewport]
+)::-webkit-scrollbar-thumb {
+  min-height: 2rem;
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-muted-foreground) 32%, transparent);
+  background-clip: padding-box;
+}
+
+:where(#root) :is(
+  .overflow-auto,
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-x-scroll,
+  .overflow-y-scroll,
+  .scrollbar-thin,
+  [data-radix-scroll-area-viewport]
+)::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--color-muted-foreground) 52%, transparent);
+}
+
 /* Panel resize handle */
 .resize-handle {
   background: transparent;
@@ -1229,6 +1299,36 @@ html:not(.colorful) .viewer-statusbar {
   box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
 }
 
+/* ModViz ribbon: a stable dark application header inspired by the Tailwind
+   application-shell pattern. It stays dark in both viewer themes so the
+   primary navigation remains easy to scan. */
+html:not(.colorful) .viewer-topbar.modviz-ribbon,
+.dark:not(.colorful) .viewer-topbar.modviz-ribbon,
+.colorful .viewer-topbar.modviz-ribbon {
+  background-color: #0f172a !important;
+  border-color: rgb(51 65 85) !important;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.22);
+}
+
+.modviz-ribbon .modviz-ribbon-search input {
+  border-color: rgb(71 85 105) !important;
+  color: #e2e8f0;
+}
+
+.modviz-ribbon .modviz-ribbon-search input::placeholder {
+  color: #94a3b8;
+}
+
+.modviz-ribbon .modviz-ribbon-search input:focus-visible {
+  border-color: #5eead4 !important;
+  --tw-ring-color: rgb(94 234 212 / 0.6);
+}
+
+.modviz-ribbon .modviz-ribbon-search .text-muted-foreground,
+.modviz-ribbon .modviz-ribbon-theme label {
+  color: #94a3b8;
+}
+
 html:not(.colorful) .viewer-floating-panel,
 html:not(.colorful) [role="dialog"] {
   background-color: var(--color-card);
@@ -1285,6 +1385,7 @@ html:not(.colorful) .properties-tab-trigger.raw-step-tab-trigger[data-state="act
     padding: 0.75rem;
   }
 
+  html:not(.colorful) .viewer-desktop-panels,
   html:not(.colorful) .viewer-panel-group,
   html:not(.colorful) .viewer-sidebar-dock {
     gap: 0.75rem;
@@ -1453,4 +1554,523 @@ html:not(.colorful) .properties-tab-trigger.raw-step-tab-trigger[data-state="act
   background-color: var(--color-muted);
   border-radius: 0.25rem;
   animation: skeleton-pulse 2s ease-in-out infinite;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   MODVIZ / SHADCN APPLICATION SYSTEM
+
+   A calm, component-first layer inspired by shadcn's application layouts:
+   neutral surfaces, a restrained teal action color, generous but purposeful
+   radii and clear elevation. It intentionally comes last so old Tokyo-theme
+   utility overrides cannot fragment the workspace into competing styles.
+   The colourful easter-egg theme remains opt-in and untouched.
+   ─────────────────────────────────────────────────────────────────────── */
+:root:not(.colorful) {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1rem;
+  --color-background: #f8fafc !important;
+  --color-foreground: #0f172a !important;
+  --color-card: #ffffff !important;
+  --color-card-foreground: #0f172a !important;
+  --color-popover: #ffffff !important;
+  --color-popover-foreground: #0f172a !important;
+  --color-primary: #0f766e !important;
+  --color-primary-foreground: #ffffff !important;
+  --color-secondary: #f1f5f9 !important;
+  --color-secondary-foreground: #1e293b !important;
+  --color-muted: #f1f5f9 !important;
+  --color-muted-foreground: #64748b !important;
+  --color-accent: #f1f5f9 !important;
+  --color-accent-foreground: #0f172a !important;
+  --color-destructive: #dc2626 !important;
+  --color-destructive-foreground: #ffffff !important;
+  --color-border: #e2e8f0 !important;
+  --color-input: #cbd5e1 !important;
+  --color-ring: #14b8a6 !important;
+}
+
+:root.dark:not(.colorful) {
+  --color-background: #0b1220 !important;
+  --color-foreground: #e2e8f0 !important;
+  --color-card: #111827 !important;
+  --color-card-foreground: #e2e8f0 !important;
+  --color-popover: #111827 !important;
+  --color-popover-foreground: #e2e8f0 !important;
+  --color-primary: #2dd4bf !important;
+  --color-primary-foreground: #042f2e !important;
+  --color-secondary: #172033 !important;
+  --color-secondary-foreground: #e2e8f0 !important;
+  --color-muted: #172033 !important;
+  --color-muted-foreground: #94a3b8 !important;
+  --color-accent: #1e293b !important;
+  --color-accent-foreground: #f8fafc !important;
+  --color-destructive: #fb7185 !important;
+  --color-destructive-foreground: #4c0519 !important;
+  --color-border: #273449 !important;
+  --color-input: #334155 !important;
+  --color-ring: #5eead4 !important;
+}
+
+:root:not(.colorful) body,
+:root:not(.colorful) #root {
+  font-family: var(--font-sans);
+  background: var(--color-background) !important;
+  color: var(--color-foreground) !important;
+}
+
+:root:not(.colorful) .viewer-shell,
+:root:not(.colorful) .viewer-workspace {
+  background:
+    radial-gradient(circle at 50% -30%, rgb(255 255 255 / 0.96), transparent 42rem),
+    var(--color-background) !important;
+}
+
+:root.dark:not(.colorful) .viewer-shell,
+:root.dark:not(.colorful) .viewer-workspace {
+  background:
+    radial-gradient(circle at 50% -40%, rgb(30 41 59 / 0.55), transparent 44rem),
+    var(--color-background) !important;
+}
+
+/* The redesigned ribbon follows the same semantic surface as every other
+   application region. This intentionally supersedes the earlier fixed navy
+   ribbon so the Light theme has genuine contrast, not dark text on navy. */
+:root:not(.colorful) .viewer-topbar.modviz-ribbon,
+:root:not(.colorful) .modviz-ribbon-band {
+  background-color: var(--color-card) !important;
+  border-color: var(--color-border) !important;
+  color: var(--color-foreground) !important;
+}
+
+:root.dark:not(.colorful) .viewer-topbar.modviz-ribbon,
+:root.dark:not(.colorful) .modviz-ribbon-band {
+  background-color: #0f172a !important;
+  border-color: var(--color-border) !important;
+}
+
+:root:not(.colorful) .viewer-statusbar {
+  background-color: color-mix(in srgb, var(--color-card) 92%, var(--color-background)) !important;
+  border-color: var(--color-border) !important;
+  box-shadow: 0 -1px 0 rgb(15 23 42 / 0.03) !important;
+}
+
+:root.dark:not(.colorful) .viewer-statusbar {
+  background-color: #0f172a !important;
+  box-shadow: 0 -1px 0 rgb(148 163 184 / 0.08) !important;
+}
+
+@media (min-width: 768px) {
+  :root:not(.colorful) .viewer-workspace {
+    gap: 0.875rem;
+    padding: 0.875rem;
+  }
+
+  :root:not(.colorful) .viewer-desktop-panels,
+  :root:not(.colorful) .viewer-panel-group,
+  :root:not(.colorful) .viewer-sidebar-dock {
+    gap: 0.875rem;
+  }
+
+  :root:not(.colorful) .viewer-panel-surface,
+  :root:not(.colorful) .viewer-viewport-frame,
+  :root:not(.colorful) .viewer-sidebar-dock [data-activity-bar],
+  :root:not(.colorful) .viewer-workspace > [data-detach-root] {
+    border: 1px solid var(--color-border) !important;
+    border-radius: 1rem;
+    background-color: var(--color-card) !important;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.05), 0 12px 28px rgb(15 23 42 / 0.05);
+  }
+
+  :root.dark:not(.colorful) .viewer-panel-surface,
+  :root.dark:not(.colorful) .viewer-viewport-frame,
+  :root.dark:not(.colorful) .viewer-sidebar-dock [data-activity-bar],
+  :root.dark:not(.colorful) .viewer-workspace > [data-detach-root] {
+    background-color: var(--color-card) !important;
+    border-color: var(--color-border) !important;
+    box-shadow: 0 16px 32px rgb(0 0 0 / 0.18);
+  }
+
+  :root:not(.colorful) .viewer-resize-handle > div {
+    width: 0.875rem;
+    height: 1.25rem;
+    border-radius: 9999px;
+    border-color: var(--color-border);
+    background-color: var(--color-card);
+    box-shadow: 0 2px 6px rgb(15 23 42 / 0.1);
+  }
+}
+
+:root:not(.colorful) .viewer-floating-panel,
+:root:not(.colorful) [role="dialog"] {
+  border-color: var(--color-border) !important;
+  border-radius: 1rem;
+  background-color: var(--color-card) !important;
+  box-shadow: 0 22px 48px rgb(15 23 42 / 0.16) !important;
+}
+
+:root.dark:not(.colorful) .viewer-floating-panel,
+:root.dark:not(.colorful) [role="dialog"] {
+  background-color: var(--color-card) !important;
+  border-color: var(--color-border) !important;
+  box-shadow: 0 24px 56px rgb(0 0 0 / 0.38) !important;
+}
+
+:root.dark:not(.colorful) .bg-white,
+:root.dark:not(.colorful) .bg-card,
+:root.dark:not(.colorful) .bg-background,
+:root.dark:not(.colorful) .bg-zinc-50,
+:root.dark:not(.colorful) .bg-zinc-100,
+:root.dark:not(.colorful) .bg-zinc-900,
+:root.dark:not(.colorful) .bg-zinc-950,
+:root.dark:not(.colorful) .bg-black {
+  background-color: var(--color-card) !important;
+}
+
+:root.dark:not(.colorful) .bg-primary,
+:root.dark:not(.colorful) .hover\:bg-primary:hover {
+  background-color: var(--color-primary) !important;
+}
+
+:root.dark:not(.colorful) .text-primary {
+  color: var(--color-primary) !important;
+}
+
+:root.dark:not(.colorful) .border-primary {
+  border-color: var(--color-primary) !important;
+}
+
+:root.dark:not(.colorful) [data-state="active"] {
+  background-color: var(--color-background) !important;
+  color: var(--color-foreground) !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :root:not(.colorful) .viewer-panel-surface,
+  :root:not(.colorful) .viewer-viewport-frame,
+  :root:not(.colorful) .viewer-floating-panel,
+  :root:not(.colorful) [role="dialog"] {
+    transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+  }
+}
+
+/* ── Shadcn surface geometry ─────────────────────────────────────────────
+   Borders establish the layout; shadows only communicate elevation. Large
+   permanent regions (viewport and docks) stay almost flat, while transient
+   floating surfaces retain a restrained lift. */
+:root:not(.colorful) {
+  --color-border: #e8edf3 !important;
+}
+
+:root.dark:not(.colorful) {
+  --color-border: #253247 !important;
+}
+
+@media (min-width: 768px) {
+  /* The right-hand divider belongs to the viewport/Inspector pair only.
+     Keep it compact so it reads as a resize seam, not unused workspace. */
+  :root:not(.colorful) .viewer-workspace-split,
+  :root:not(.colorful) .viewer-hierarchy-split {
+    gap: 0 !important;
+  }
+
+  :root:not(.colorful) .viewer-inspector-resize-handle,
+  :root:not(.colorful) .viewer-hierarchy-resize-handle {
+    flex: 0 0 0.75rem;
+    width: 0.75rem;
+    background: transparent !important;
+  }
+
+  :root:not(.colorful) .viewer-inspector-resize-handle > div,
+  :root:not(.colorful) .viewer-hierarchy-resize-handle > div {
+    width: 0.625rem;
+    height: 1.5rem;
+  }
+
+  :root:not(.colorful) .viewer-panel-surface,
+  :root:not(.colorful) .viewer-viewport-frame,
+  :root:not(.colorful) .viewer-sidebar-dock [data-activity-bar] {
+    border-color: var(--color-border) !important;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.035) !important;
+  }
+
+  :root:not(.colorful) .viewer-viewport-frame,
+  :root:not(.colorful) .viewer-sidebar-dock [data-activity-bar] {
+    box-shadow: none !important;
+  }
+
+  :root.dark:not(.colorful) .viewer-panel-surface {
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.16) !important;
+  }
+
+  :root.dark:not(.colorful) .viewer-viewport-frame,
+  :root.dark:not(.colorful) .viewer-sidebar-dock [data-activity-bar] {
+    box-shadow: none !important;
+  }
+
+  :root:not(.colorful) .viewer-resize-handle > div {
+    width: 0.625rem;
+    height: 1.5rem;
+    border-color: var(--color-border) !important;
+    box-shadow: none !important;
+  }
+}
+
+:root:not(.colorful) .viewer-floating-panel,
+:root:not(.colorful) [role="dialog"] {
+  box-shadow: 0 10px 22px rgb(15 23 42 / 0.10), 0 2px 6px rgb(15 23 42 / 0.04) !important;
+}
+
+:root.dark:not(.colorful) .viewer-floating-panel,
+:root.dark:not(.colorful) [role="dialog"] {
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.30), 0 2px 8px rgb(0 0 0 / 0.16) !important;
+}
+
+/* ── Hierarchy browser: compact data explorer ──────────────────────────────
+   The hierarchy is read far more often than it is edited. Keep it dense like
+   a data table, but use calm surfaces and small cards only for the controls
+   and selected rows. This mirrors the focused-board approach used by modern
+   BIM dashboards without turning thousands of elements into thousands of
+   visual cards. */
+:root:not(.colorful) .hierarchy-panel {
+  container-type: inline-size;
+  background-color: var(--color-card);
+}
+
+:root:not(.colorful) .hierarchy-panel .hierarchy-item:not(.selected):hover {
+  background-color: color-mix(in srgb, var(--color-accent) 72%, transparent) !important;
+}
+
+:root:not(.colorful) .hierarchy-panel .hierarchy-item.selected {
+  background-color: color-mix(in srgb, var(--color-primary) 11%, var(--color-card)) !important;
+  color: var(--color-foreground) !important;
+}
+
+:root.dark:not(.colorful) .hierarchy-panel .hierarchy-item.selected {
+  background-color: color-mix(in srgb, var(--color-primary) 14%, var(--color-card)) !important;
+}
+
+:root:not(.colorful) .hierarchy-panel .hierarchy-item:focus-within {
+  border-color: color-mix(in srgb, var(--color-ring) 46%, var(--color-border));
+}
+
+@container (max-width: 410px) {
+  .hierarchy-panel .hierarchy-mode-tab {
+    padding-inline: 0.25rem;
+  }
+
+  .hierarchy-panel .hierarchy-mode-label {
+    display: none;
+  }
+}
+
+/* ── Inspector: match the hierarchy's calm data-explorer surface ─────────── */
+:root:not(.colorful) .properties-panel {
+  container-type: inline-size;
+  background-color: var(--color-card);
+}
+
+:root:not(.colorful) .properties-panel .properties-tabs-list {
+  margin: 0.75rem 0.75rem 0;
+  border-color: var(--color-border);
+  background-color: color-mix(in srgb, var(--color-muted) 72%, var(--color-card));
+}
+
+:root:not(.colorful) .properties-panel .properties-tab-trigger[data-state="active"] {
+  background-color: var(--color-card) !important;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.08) !important;
+}
+
+:root.dark:not(.colorful) .properties-panel .properties-tab-trigger[data-state="active"] {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.22) !important;
+}
+
+:root:not(.colorful) .properties-panel-section {
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.045);
+}
+
+:root.dark:not(.colorful) .properties-panel-section {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.16);
+}
+
+/* ── Unified application toolbar ──────────────────────────────────────────
+   Ribbon and classic mode expose the same commands. Treat them as two
+   densities of one control system: rounded, quiet action groups and one
+   consistent utility capsule instead of unrelated strips of small icons. */
+:root:not(.colorful) .modviz-toolbar-shell {
+  background: color-mix(in srgb, var(--color-card) 94%, var(--color-background)) !important;
+  border-color: var(--color-border) !important;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.035) !important;
+}
+
+:root.dark:not(.colorful) .modviz-toolbar-shell {
+  background: #0f172a !important;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2) !important;
+}
+
+:root:not(.colorful) .modviz-toolbar-strip {
+  background: color-mix(in srgb, var(--color-card) 88%, var(--color-background));
+}
+
+:root.dark:not(.colorful) .modviz-toolbar-strip {
+  background: color-mix(in srgb, #0f172a 90%, var(--color-background));
+}
+
+/* The ribbon's framing is the rounded command surface. The outer toolbar is
+   deliberately transparent so it does not add a second rectangular panel or
+   separator line around it. */
+:root:not(.colorful) .viewer-topbar.modviz-ribbon,
+:root.dark:not(.colorful) .viewer-topbar.modviz-ribbon {
+  background: transparent !important;
+  border-width: 0 !important;
+  box-shadow: none !important;
+}
+
+:root:not(.colorful) .modviz-ribbon .modviz-toolbar-strip,
+:root.dark:not(.colorful) .modviz-ribbon .modviz-toolbar-strip {
+  background: transparent !important;
+  border-width: 0 !important;
+}
+
+:root:not(.colorful) .modviz-ribbon-tablist {
+  scrollbar-width: none;
+  padding: 0.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.625rem;
+  background: color-mix(in srgb, var(--color-muted) 54%, var(--color-card));
+  box-shadow: inset 0 1px 1px rgb(15 23 42 / 0.025);
+}
+
+:root:not(.colorful) .modviz-ribbon-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+:root:not(.colorful) .modviz-ribbon [role="tab"] {
+  min-height: 2rem;
+  border-radius: 0.375rem;
+}
+
+:root:not(.colorful) .modviz-ribbon [role="tab"][aria-selected="true"] {
+  background: var(--color-card);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.09);
+}
+
+:root.dark:not(.colorful) .modviz-ribbon [role="tab"][aria-selected="true"] {
+  background: #172033;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.24);
+}
+
+:root:not(.colorful) .modviz-ribbon-band {
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--color-card) 86%, var(--color-background)) !important;
+}
+
+:root.dark:not(.colorful) .modviz-ribbon-band {
+  background: var(--color-background) !important;
+}
+
+@media (min-width: 768px) {
+  /* Use the same 14px visual edge as the panel borders. The added height
+     leaves a dedicated line for group captions such as Tools and Measure. */
+  :root:not(.colorful) .modviz-ribbon-band {
+    height: 6rem !important;
+    margin: 0.75rem 0.875rem;
+    border: 1px solid var(--color-border) !important;
+    border-radius: 0.875rem;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.035);
+  }
+
+  :root.dark:not(.colorful) .modviz-ribbon-band {
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+  }
+}
+
+:root:not(.colorful) .modviz-command-group {
+  min-width: max-content;
+  margin: 0;
+  padding-inline: 0.375rem;
+  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+  border-radius: 0.875rem;
+  background: color-mix(in srgb, var(--color-muted) 38%, var(--color-card));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.45);
+}
+
+:root.dark:not(.colorful) .modviz-command-group {
+  background: color-mix(in srgb, var(--color-card) 78%, var(--color-background));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
+}
+
+:root:not(.colorful) .modviz-command-group button {
+  border-radius: 0.625rem;
+}
+
+:root:not(.colorful) .modviz-command-divider {
+  display: none;
+}
+
+:root:not(.colorful) .modviz-toolbar-utilities {
+  padding: 0.1875rem;
+  border: 1px solid var(--color-border);
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-muted) 50%, var(--color-card));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.45);
+}
+
+:root.dark:not(.colorful) .modviz-toolbar-utilities {
+  background: #172033;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
+}
+
+:root:not(.colorful) .modviz-toolbar-utilities button {
+  border-radius: 9999px;
+}
+
+/* Match the compact Dark Mode utility area to the ribbon tab frame. The
+   classic toolbar keeps its pill utility group; only the ribbon shell needs
+   this shared, more architectural corner treatment. */
+:root:not(.colorful) .modviz-ribbon .modviz-toolbar-utilities {
+  border-radius: 0.625rem;
+}
+
+:root:not(.colorful) .modviz-ribbon .modviz-toolbar-utilities button {
+  border-radius: 0.375rem;
+}
+
+:root:not(.colorful) .modviz-classic-toolbar {
+  gap: 0.25rem;
+  padding-inline: 0.625rem;
+}
+
+:root:not(.colorful) .modviz-classic-toolbar > button {
+  border: 1px solid transparent;
+  border-radius: 0.625rem;
+}
+
+:root:not(.colorful) .modviz-classic-toolbar > button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-border) 84%, transparent);
+  background: var(--color-muted);
+}
+
+:root:not(.colorful) .modviz-classic-toolbar > button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--color-primary) 36%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-card));
+  color: var(--color-primary);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35);
+}
+
+:root:not(.colorful) .modviz-toolbar-separator {
+  width: 1px !important;
+  height: 1.5rem !important;
+  margin-inline: 0.25rem !important;
+  border-radius: 9999px;
+  background: var(--color-border) !important;
+}
+
+:root:not(.colorful) .modviz-ribbon-notice {
+  min-height: 1.875rem;
+  padding-inline: 1rem;
+  background: color-mix(in srgb, var(--color-muted) 46%, var(--color-card));
 }

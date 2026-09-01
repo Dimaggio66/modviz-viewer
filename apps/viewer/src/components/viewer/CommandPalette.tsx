@@ -14,6 +14,7 @@ import {
   Dialog,
   DialogContent,
 } from '@/components/ui/dialog';
+import { Kbd, ShortcutKbd } from '@/components/ui/kbd';
 import {
   Search,
   Play,
@@ -783,9 +784,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             autoComplete="off"
             spellCheck={false}
           />
-          <kbd className="hidden sm:inline-flex h-5 items-center gap-1 rounded border bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
-            Esc
-          </kbd>
+          <Kbd className="hidden sm:inline-flex">Esc</Kbd>
         </div>
 
         {/* Results */}
@@ -826,9 +825,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       <span className="text-[11px] text-muted-foreground shrink-0">{cmd.detail}</span>
                     )}
                     {cmd.shortcut && (
-                      <kbd className="ml-auto hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border bg-muted px-1.5 text-[10px] font-medium text-muted-foreground shrink-0">
-                        {cmd.shortcut}
-                      </kbd>
+                      <ShortcutKbd shortcut={cmd.shortcut} className="ml-auto hidden sm:inline-flex shrink-0" />
                     )}
                   </button>
                 );
@@ -839,9 +836,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 
         {/* Footer */}
         <div className="flex items-center gap-4 px-3 py-1.5 border-t text-[10px] text-muted-foreground select-none">
-          <span><kbd className="font-mono">↑↓</kbd> navigate</span>
-          <span><kbd className="font-mono">↵</kbd> run</span>
-          <span><kbd className="font-mono">esc</kbd> close</span>
+          <span className="inline-flex items-center gap-1"><Kbd>↑↓</Kbd> navigate</span>
+          <span className="inline-flex items-center gap-1"><Kbd>↵</Kbd> run</span>
+          <span className="inline-flex items-center gap-1"><Kbd>Esc</Kbd> close</span>
         </div>
       </DialogContent>
     </Dialog>

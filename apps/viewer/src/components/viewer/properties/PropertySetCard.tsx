@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Sparkles, PenLine, Building2 } from 'lucide-react';
+import { Sparkles, PenLine, Building2, ChevronRight } from 'lucide-react';
 import { PropertyEditor, type PropertyEditScope } from '../PropertyEditor';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -59,12 +59,12 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
 
   // Dynamic styling based on mutation state and source
   const borderClass = isNewPset
-    ? 'border-2 border-amber-400/50 dark:border-amber-500/30'
+    ? 'border-amber-400/45 dark:border-amber-500/35'
     : hasMutations
-    ? 'border-2 border-purple-300/50 dark:border-purple-500/30'
+    ? 'border-purple-300/55 dark:border-purple-500/35'
     : isTypeProperty
-    ? 'border-2 border-indigo-200/60 dark:border-indigo-800/40'
-    : 'border-2 border-zinc-200 dark:border-zinc-800';
+    ? 'border-indigo-200/70 dark:border-indigo-800/55'
+    : 'border-border';
 
   const bgClass = isNewPset
     ? 'bg-amber-50/30 dark:bg-amber-950/20'
@@ -72,11 +72,11 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
     ? 'bg-purple-50/20 dark:bg-purple-950/10'
     : isTypeProperty
     ? 'bg-indigo-50/20 dark:bg-indigo-950/10'
-    : 'bg-white dark:bg-zinc-950';
+    : 'bg-card';
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className={`${borderClass} ${bgClass} group w-full max-w-full overflow-hidden`}>
-      <CollapsibleTrigger className="flex items-center gap-2 w-full p-2.5 hover:bg-zinc-50 dark:hover:bg-zinc-900 text-left transition-colors overflow-hidden">
+    <Collapsible open={open} onOpenChange={setOpen} className={`${borderClass} ${bgClass} w-full max-w-full overflow-hidden rounded-xl border shadow-sm`}>
+      <CollapsibleTrigger className="group flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 overflow-hidden">
         {isNewPset && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -101,11 +101,12 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
             <TooltipContent>Inherited from type — edits apply to all instances of this type</TooltipContent>
           </Tooltip>
         )}
-        <span className="font-bold text-xs text-zinc-900 dark:text-zinc-100 truncate flex-1 min-w-0">{pset.name}</span>
-        <span className="text-[10px] font-mono bg-zinc-100 dark:bg-zinc-900 px-1.5 py-0.5 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 shrink-0">{pset.properties.length}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{pset.name}</span>
+        <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground">{pset.properties.length}</Badge>
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="border-t-2 border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-900">
+        <div className="divide-y divide-border/60 border-t border-border/60 bg-muted/[0.18]">
           {pset.properties.map((prop: { name: string; value: unknown; isMutated?: boolean; type?: number; dataType?: string }) => {
             const parsed = parsePropertyValue(prop.value);
             // Names render VERBATIM: the parse path already decoded them (see
@@ -126,7 +127,7 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
                     ? 'bg-amber-100/70 dark:bg-amber-900/40 ring-2 ring-inset ring-amber-400 dark:ring-amber-500 motion-safe:animate-pulse-subtle'
                     : isMutated
                     ? 'bg-purple-50/50 dark:bg-purple-950/30 hover:bg-purple-100/50 dark:hover:bg-purple-900/30'
-                    : 'hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50'
+                  : 'hover:bg-muted/50'
                 }`}
               >
                 <div className="flex flex-col gap-0.5 flex-1 min-w-0">
@@ -145,7 +146,7 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
                     {parsed.ifcType ? (
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <span className={`font-medium cursor-help break-words ${isMutated ? 'text-purple-600 dark:text-purple-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`font-medium cursor-help break-words ${isMutated ? 'text-purple-600 dark:text-purple-400' : 'text-muted-foreground'}`}>
                             {prop.name}
                           </span>
                         </TooltipTrigger>
@@ -156,7 +157,7 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
                         </TooltipContent>
                       </Tooltip>
                     ) : (
-                      <span className={`font-medium break-words ${isMutated ? 'text-purple-600 dark:text-purple-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`font-medium break-words ${isMutated ? 'text-purple-600 dark:text-purple-400' : 'text-muted-foreground'}`}>
                         {prop.name}
                       </span>
                     )}
@@ -173,10 +174,10 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
                       editScope={typeEditScope}
                     />
                   ) : (
-                    <span className={`font-mono select-all break-words ${isMutated ? 'text-purple-900 dark:text-purple-100 font-semibold' : 'text-zinc-900 dark:text-zinc-100'}`}>
+                    <span className={`font-mono select-all break-words ${isMutated ? 'text-purple-900 dark:text-purple-100 font-semibold' : 'text-foreground'}`}>
                       {disp.converted !== null ? formatConverted(disp.converted) : parsed.displayValue}
                       {unit && parsed.displayValue !== '\u2014' && (
-                        <span className="ml-1 text-zinc-400 dark:text-zinc-500">{unit}</span>
+                        <span className="ml-1 text-muted-foreground/70">{unit}</span>
                       )}
                     </span>
                   )}

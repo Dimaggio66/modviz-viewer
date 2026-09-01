@@ -66,7 +66,7 @@ export function HomeTab() {
           label="Annotate"
           shortcut="P"
           active={activeTool === 'annotate'}
-          activeClassName="bg-amber-500/20 text-foreground ring-1 ring-inset ring-amber-500/50"
+          activeClassName="bg-amber-500/20 text-white ring-1 ring-inset ring-amber-500/50"
           onClick={() => setActiveTool('annotate')}
           {...tourAnchor(toolAnchor('annotate'))}
         />

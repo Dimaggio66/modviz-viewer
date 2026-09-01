@@ -121,12 +121,14 @@ function SplitMenu({ primaryId }: { primaryId: WorkspacePanelId }) {
   );
 }
 
-/** Slim grab bar atop the docked panel: drag the grip to lift it into a live
- *  floating window, Split to stack a second panel below, chevron to collapse the
- *  pane to the rail. Title-less and close-less: the panel body owns those. */
+/** Slim grab bar atop detachable docked panels. Information intentionally has
+ *  no grab bar: it is a fixed inspector that is shown/hidden from its activity
+ *  rail button instead of being lifted into a free-floating window. */
 function PanelChromeBar({ detachId }: { detachId: WorkspacePanelId }) {
   const setSidebarMode = useViewerStore((s) => s.setSidebarMode);
   const onPointerDown = usePanelDetachDrag(detachId);
+
+  if (detachId === 'properties') return null;
 
   return (
     <div

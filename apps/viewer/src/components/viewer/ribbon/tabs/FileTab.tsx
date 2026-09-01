@@ -16,6 +16,7 @@ import type { FileCommands } from '../../toolbar/useFileCommands';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { RibbonExportGroup } from './RibbonExportGroup';
 import { RIBBON_EXPORT_ICONS } from './ribbon-export-icons';
+import { Badge } from '@/components/ui/badge';
 import {
   RibbonGroup,
   RibbonGroupDivider,
@@ -95,9 +96,9 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
               disabled={!hasModelsLoaded}
               onClick={openShareDialog}
               badge={collabPeerCount > 0 ? (
-                <span className="absolute right-1 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
+                <Badge className="pointer-events-none absolute right-1 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 py-0 text-[9px] font-medium">
                   {collabPeerCount + 1}
-                </span>
+                </Badge>
               ) : undefined}
             />
             {/* Room panel toggle — live presence + management. Shown whenever
@@ -113,9 +114,9 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
               active={collabPanelVisible}
               onClick={() => useViewerStore.getState().toggleWorkspacePanel('collab')}
               badge={collabPeerCount > 0 ? (
-                <span className="absolute right-1 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-medium text-white">
+                <Badge className="pointer-events-none absolute right-1 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border-0 bg-emerald-500 px-1 py-0 text-[9px] font-medium text-white dark:bg-emerald-500 dark:text-white">
                   {collabPeerCount + 1}
-                </span>
+                </Badge>
               ) : undefined}
             />
           </RibbonGroup>

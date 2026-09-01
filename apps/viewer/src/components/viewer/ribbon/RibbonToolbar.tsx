@@ -27,7 +27,6 @@ import { useIfc } from '@/hooks/useIfc';
 import { cn } from '@/lib/utils';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { ThemeSwitch } from '../ThemeSwitch';
-import { SearchInline } from '../SearchInline';
 import { ExportChangesButton } from '../ExportChangesButton';
 import { ExtensionToolbarSlot } from '@/components/extensions/ExtensionToolbarSlot';
 import { useFileCommands } from '../toolbar/useFileCommands';
@@ -79,107 +78,77 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
   };
 
   return (
-    <div className="viewer-topbar relative z-50 border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-black">
+    <div className="viewer-topbar modviz-toolbar-shell modviz-ribbon relative z-50 border-b border-border bg-card text-foreground shadow-sm">
       {fileCommands.fileInputs}
 
       {/* ── Tab strip ── */}
-      <div className="flex h-10 items-center gap-0.5 border-b border-zinc-200/70 px-2 dark:border-zinc-800/70">
-        <div
-          role="tablist"
-          aria-label="Ribbon tabs"
-          className="flex h-full items-end gap-0.5"
-          {...tourAnchor(TOUR_ANCHORS.ribbonTabs)}
-        >
-          {RIBBON_TABS.map((tab) => {
-            const isActive = tab.id === activeTab;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => handleTabClick(tab.id)}
-                onDoubleClick={() => {
-                  if (isActive) setRibbonCollapsed(!ribbonCollapsed);
-                }}
-                className={cn(
-                  'relative flex h-8 select-none items-center rounded-t-md px-3 text-xs font-medium tracking-wide transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                  isActive
-                    ? 'text-foreground'
-                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
-                )}
-              >
-                {tab.label}
-                {/* Drafting-pen underline for the active tab — reads in
-                    every theme without a filled pill. */}
-                {isActive && (
+      <div className="modviz-toolbar-strip flex h-14 min-w-0 items-center gap-3 border-b border-border/80 px-3.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <div
+            role="tablist"
+            aria-label="Ribbon tabs"
+            className="modviz-ribbon-tablist flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-2"
+            {...tourAnchor(TOUR_ANCHORS.ribbonTabs)}
+          >
+            {RIBBON_TABS.map((tab) => {
+              const isActive = tab.id === activeTab;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => handleTabClick(tab.id)}
+                  onDoubleClick={() => {
+                    if (isActive) setRibbonCollapsed(!ribbonCollapsed);
+                  }}
+                  className={cn(
+                    'relative flex h-9 shrink-0 select-none items-center rounded-lg px-3 text-sm font-medium transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+                    isActive
+                      ? 'bg-muted text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                  )}
+                >
+                  {tab.label}
+                  {isActive && (
                   <span aria-hidden="true" className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Loading progress — lives in the strip so it survives collapse.
-            Left of the spacer, next to the tabs: anything to the RIGHT of
-            it would slide sideways every time a load starts or ends, and
-            the search field is over there. */}
-        {loading && activeProgress && (
-          <div className="ml-3 flex min-w-0 items-center gap-2">
-            <span className="max-w-56 truncate text-xs text-muted-foreground">
-              {activeProgress.phase}
-              {geometryProgress && metadataProgress ? ` | ${metadataProgress.phase}` : ''}
-            </span>
-            {activeProgress.indeterminate ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-            ) : (
-              <>
-                <Progress value={activeProgress.percent ?? 0} className="h-2 w-28" />
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {Math.round(activeProgress.percent ?? 0)}%
-                </span>
-              </>
-            )}
+                  )}
+                </button>
+              );
+            })}
           </div>
-        )}
 
-        {/* Error Display */}
-        {error && (
-          <span className="ml-3 max-w-72 truncate text-xs text-destructive">{error}</span>
-        )}
+          {loading && activeProgress && (
+            <div className="hidden min-w-0 items-center gap-2 2xl:flex">
+              <span className="max-w-32 truncate text-xs text-muted-foreground">
+                {activeProgress.phase}
+                {geometryProgress && metadataProgress ? ` | ${metadataProgress.phase}` : ''}
+              </span>
+              {activeProgress.indeterminate ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+              ) : (
+                <>
+                  <Progress value={activeProgress.percent ?? 0} className="h-2 w-20" />
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {Math.round(activeProgress.percent ?? 0)}%
+                  </span>
+                </>
+              )}
+            </div>
+          )}
 
-        <div className="flex-1" />
-
-        {/* Inline search — the very component the classic strip hosts, not
-            a ribbon copy of it, so `/` and ⌘F focus a field here too, the
-            n/N result cycle is reachable, and the recent-search popover
-            plus the "N filter rules active" badge (with its one-click
-            clear) exist in both styles. It sits in the tab strip rather
-            than inside a tab so it survives collapse and tab switches,
-            matching the classic strip's always-visible field.
-
-            Right-oriented: the tab strip's left edge is tab geography, so
-            a field parked there competes with the tabs for the same
-            reading position and slides sideways whenever the tab set
-            changes. Docked to the right it lands where a search field is
-            looked for, beside the rest of the always-on chrome. */}
-        <div className="mr-2">
-          <SearchInline />
+          {error && <span className="max-w-40 truncate text-xs text-destructive">{error}</span>}
         </div>
 
-        {/* Extension toolbar contributions (right-aligned, same slot as
-            the classic toolbar). */}
-        <ExtensionToolbarSlot slot="toolbar.right" />
+        <div className="ml-auto flex min-w-0 items-center">
+          <ExtensionToolbarSlot slot="toolbar.right" />
+          <ExportChangesButton />
 
-        {/* Export Changes — pending-mutation affordance must stay visible
-            regardless of the active tab or collapse state. */}
-        <ExportChangesButton />
-
-        <div className="ml-1 flex items-center gap-1 border-l border-zinc-200 pl-2 dark:border-zinc-700/60">
+          <div className="modviz-toolbar-utilities ml-1 flex shrink-0 items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
-              <div>
+              <div className="modviz-ribbon-theme">
                 <ThemeSwitch />
               </div>
             </TooltipTrigger>
@@ -193,6 +162,7 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
                 size="icon-sm"
                 aria-label="Info and keyboard shortcuts"
                 onClick={() => onShowShortcuts?.()}
+                className="text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <HelpCircle className="h-4 w-4" />
               </Button>
@@ -209,12 +179,14 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
                 aria-expanded={!ribbonCollapsed}
                 onClick={() => setRibbonCollapsed(!ribbonCollapsed)}
                 {...tourAnchor(TOUR_ANCHORS.ribbonCollapse)}
+                className="text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 {ribbonCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
               </Button>
             </TooltipTrigger>
             <TooltipContent>{ribbonCollapsed ? 'Expand the ribbon' : 'Collapse the ribbon'}</TooltipContent>
           </Tooltip>
+          </div>
         </div>
       </div>
 
@@ -223,7 +195,7 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
         <div
           role="tabpanel"
           aria-label={`${activeTab} commands`}
-          className="flex h-[88px] items-stretch overflow-x-auto overflow-y-hidden px-1"
+          className="modviz-ribbon-band flex h-[96px] items-stretch overflow-x-auto overflow-y-hidden border-b border-border/80 bg-card/95 px-2"
         >
           {activeTab === 'file' && <FileTab fileCommands={fileCommands} />}
           {activeTab === 'home' && <HomeTab />}

@@ -32,6 +32,7 @@ import {
 } from '@/store/basket/basketCommands';
 import { useIfc } from '@/hooks/useIfc';
 import { toast } from '@/components/ui/toast';
+import { ShortcutKbd } from '@/components/ui/kbd';
 import { useSlotContributions } from '@/hooks/useSlotContributions';
 import { useOptionalExtensionHost } from '@/sdk/ExtensionHostProvider';
 import { evaluateWhen, parseWhen, type CommandContribution, type ResolvedContextMenuContribution } from '@ifc-lite/extensions';
@@ -517,7 +518,7 @@ function DuplicateRow({ onDuplicate }: { onDuplicate: (dir: DuplicateDirection) 
       >
         <CopyPlus className="h-4 w-4 text-muted-foreground" />
         <span>Duplicate</span>
-        <span className="ml-auto text-[10px] font-mono text-muted-foreground/70">⌘D</span>
+        <ShortcutKbd shortcut="⌘D" className="ml-auto" />
       </button>
       <div className="flex items-center gap-0.5 shrink-0 border-l border-border/60 pl-2">
         <DirectionChip dir="+X" label="→" tooltip="Duplicate +X (east)" onClick={() => onDuplicate('+X')} />
@@ -573,11 +574,7 @@ function MenuItem({ icon: Icon, label, onClick, disabled, shortcut, tone = 'defa
     >
       <Icon className={iconClass} />
       <span className="flex-1 min-w-0">{label}</span>
-      {shortcut && (
-        <span className="text-[10px] font-mono text-muted-foreground/70 shrink-0">
-          {shortcut}
-        </span>
-      )}
+      {shortcut && <ShortcutKbd shortcut={shortcut} className="shrink-0" />}
     </button>
   );
 }

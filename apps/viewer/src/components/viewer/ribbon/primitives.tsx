@@ -13,6 +13,7 @@
 import React, { forwardRef } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { ShortcutKbd } from '@/components/ui/kbd';
 import { cn } from '@/lib/utils';
 
 /** Subtle pressed-state tint shared by ribbon toggles (loud solid fills
@@ -20,7 +21,7 @@ import { cn } from '@/lib/utils';
  *  as "latched"). Per-tool accents (amber annotate, purple edit) pass
  *  their own class instead. */
 export const RIBBON_ACTIVE_CLASS =
-  'bg-primary/15 text-foreground ring-1 ring-inset ring-primary/40';
+  'bg-primary/15 text-primary ring-1 ring-inset ring-primary/30';
 
 interface RibbonTooltipProps {
   label: string;
@@ -38,8 +39,8 @@ function RibbonTooltip({ label, shortcut, tooltip, children }: RibbonTooltipProp
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent>
-        {tooltip ?? label}
-        {shortcut && <span className="ml-2 text-xs opacity-60">({shortcut})</span>}
+        <span>{tooltip ?? label}</span>
+        {shortcut && <ShortcutKbd shortcut={shortcut} className="ml-2 align-middle" />}
       </TooltipContent>
     </Tooltip>
   );
@@ -85,10 +86,10 @@ export const RibbonLargeButton = forwardRef<HTMLButtonElement, RibbonButtonProps
             onClick?.(e);
           }}
           className={cn(
-            'relative flex h-full w-14 shrink-0 select-none flex-col items-center justify-start gap-1 rounded-md px-1 py-1',
-            'text-[10px] font-medium leading-[1.15] text-foreground/90 transition-colors',
-            'hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40',
-            'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'relative flex h-full w-14 shrink-0 select-none flex-col items-center justify-start gap-1 rounded-lg px-1 py-1',
+            'text-[10px] font-medium leading-[1.15] text-muted-foreground transition-colors',
+            'hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
             active && (activeClassName ?? RIBBON_ACTIVE_CLASS),
             className,
           )}
@@ -127,10 +128,10 @@ export const RibbonSmallButton = forwardRef<HTMLButtonElement, RibbonButtonProps
             onClick?.(e);
           }}
           className={cn(
-            'relative flex h-[20px] w-full min-w-0 select-none items-center gap-1.5 rounded px-1.5',
-            'text-[11px] leading-none text-foreground/90 transition-colors',
-            'hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40',
-            'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'relative flex h-[20px] w-full min-w-0 select-none items-center gap-1.5 rounded-md px-1.5',
+            'text-[11px] leading-none text-muted-foreground transition-colors',
+            'hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
             active && (activeClassName ?? RIBBON_ACTIVE_CLASS),
             className,
           )}
@@ -169,11 +170,15 @@ export function RibbonGroup({ label, children, className }: {
   className?: string;
 }) {
   return (
-    <div role="group" aria-label={label} className={cn('flex h-full shrink-0 flex-col px-1.5', className)}>
+    <div
+      role="group"
+      aria-label={label}
+      className={cn('modviz-command-group flex h-full shrink-0 flex-col px-1.5', className)}
+    >
       <div className="flex min-h-0 flex-1 items-stretch justify-center gap-0.5 pt-1">
         {children}
       </div>
-      <div className="pb-1 pt-0.5 text-center text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground/70">
+      <div className="pb-1 pt-0.5 text-center text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </div>
     </div>
@@ -182,5 +187,5 @@ export function RibbonGroup({ label, children, className }: {
 
 /** Hairline divider between ribbon groups. */
 export function RibbonGroupDivider() {
-  return <div aria-hidden="true" className="my-2 w-px shrink-0 self-stretch bg-border/70" />;
+  return <div aria-hidden="true" className="modviz-command-divider my-2 w-px shrink-0 self-stretch bg-border" />;
 }

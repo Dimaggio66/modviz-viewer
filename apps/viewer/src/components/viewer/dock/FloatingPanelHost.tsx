@@ -28,12 +28,26 @@ export function FloatingPanelHost() {
   const bringFloatingPanelToFront = useViewerStore((s) => s.bringFloatingPanelToFront);
   const { closePanel, dockPanel } = usePanelControls();
 
+  // Information used to be persistable as an edge-snapped floating window.
+  // That makes it look attached while still overlaying (and resizing) the 3D
+  // viewport. Convert any legacy state back into the real fixed dock before it
+  // can be painted; from there the activity-rail button owns show/hide.
+  useLayoutEffect(() => {
+    if (floatingPanels.some((panel) => panel.id === 'properties')) {
+      dockPanel('properties');
+    }
+  }, [dockPanel, floatingPanels]);
+
+  // Do not render a legacy Information float during the layout-effect handoff.
+  // This avoids even a single frame where it overlays the model.
+  const visibleFloatingPanels = floatingPanels.filter((panel) => panel.id !== 'properties');
+
   // The region edge-snapped panels dock into: the 3D viewport, in window
   // coordinates. Tracked only while a panel is actually snapped so free-float /
   // empty states stay observer-free. Kept in sync with sidebar / hierarchy
   // resizes (and window resizes) so a dock never drifts under the toolbar or
   // over the rail (#1245).
-  const hasSnapped = floatingPanels.some((p) => p.snap !== 'free');
+  const hasSnapped = visibleFloatingPanels.some((p) => p.snap !== 'free');
   const [snapBounds, setSnapBounds] = useState<SnapBounds | null>(null);
   useLayoutEffect(() => {
     if (!hasSnapped) {
@@ -63,7 +77,7 @@ export function FloatingPanelHost() {
     };
   }, [hasSnapped]);
 
-  if (floatingPanels.length === 0) return null;
+  if (visibleFloatingPanels.length === 0) return null;
 
   return (
     // Fixed viewport overlay: FloatingPanelState.x/y are documented as viewport
@@ -71,7 +85,7 @@ export function FloatingPanelHost() {
     // `absolute` host would add ViewerLayout's content-container offset (it sits
     // below the toolbar), making freshly detached panels jump (#1208).
     <div className="fixed inset-0 z-30 pointer-events-none">
-      {floatingPanels.map((panel, i) => {
+      {visibleFloatingPanels.map((panel, i) => {
         const def = getPanelDef(panel.id);
         return (
           <FloatingPanel

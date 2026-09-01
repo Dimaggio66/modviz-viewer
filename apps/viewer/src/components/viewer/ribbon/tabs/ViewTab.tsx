@@ -12,6 +12,7 @@ import { Orthographic, Viewpoint, SpaceMouse, Lighting } from '@/icons';
 import { useViewerStore } from '@/store';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { useCameraCommands } from '../../toolbar/CameraCommands';
+import { Badge } from '@/components/ui/badge';
 import {
   RibbonGroup,
   RibbonGroupDivider,
@@ -138,7 +139,7 @@ export function ViewTab() {
             label="World"
             tooltip={cesiumEnabled ? 'Hide 3D world context (Cesium)' : 'Show 3D world context (Cesium)'}
             active={cesiumEnabled}
-            activeClassName="bg-teal-600/20 text-foreground ring-1 ring-inset ring-teal-600/50"
+            activeClassName="bg-teal-600/20 text-white ring-1 ring-inset ring-teal-600/50"
             onClick={() => {
               toggleCesium();
               if (cesiumEnabled) {
@@ -153,7 +154,7 @@ export function ViewTab() {
           label="Lighting"
           tooltip="Sun, sky and lighting presets"
           active={envPanelOpen || solarEnabled || envSkyEnabled || envPreset !== 'default'}
-          activeClassName="bg-amber-500/20 text-foreground ring-1 ring-inset ring-amber-500/50"
+          activeClassName="bg-amber-500/20 text-white ring-1 ring-inset ring-amber-500/50"
           onClick={toggleEnvPanel}
         />
         <RibbonSmallStack>
@@ -163,7 +164,7 @@ export function ViewTab() {
               label="Move georef"
               tooltip={cesiumPlacementEditMode ? 'Stop moving georeference' : 'Move georeference in Cesium'}
               active={cesiumPlacementEditMode}
-              activeClassName="bg-amber-500/20 text-foreground ring-1 ring-inset ring-amber-500/50"
+              activeClassName="bg-amber-500/20 text-white ring-1 ring-inset ring-amber-500/50"
               onClick={() => {
                 const next = !cesiumPlacementEditMode;
                 setCesiumPlacementEditMode(next);
@@ -176,7 +177,7 @@ export function ViewTab() {
             label="SpaceMouse"
             tooltip="Connect a 3Dconnexion SpaceMouse (WebHID)"
             active={spaceMousePanelOpen || spaceMouseConnected}
-            activeClassName="bg-teal-600/20 text-foreground ring-1 ring-inset ring-teal-600/50"
+            activeClassName="bg-teal-600/20 text-white ring-1 ring-inset ring-teal-600/50"
             onClick={toggleSpaceMousePanel}
           />
         </RibbonSmallStack>
@@ -193,9 +194,9 @@ export function ViewTab() {
           disabled={!hasModels}
           onClick={toggleBasketPresentationVisible}
           badge={(basketViewCount > 0 || pinboardEntities.size > 0) ? (
-            <span className="absolute -top-0.5 right-0.5 flex h-[14px] min-w-[14px] items-center justify-center rounded-full border border-background bg-primary px-0.5 text-[9px] font-bold text-primary-foreground">
+            <Badge className="pointer-events-none absolute -top-0.5 right-0.5 flex h-[14px] min-w-[14px] items-center justify-center rounded-full border border-background px-0.5 py-0 text-[9px] font-bold">
               {basketViewCount > 0 ? `${basketViewCount}/${pinboardEntities.size}` : pinboardEntities.size}
-            </span>
+            </Badge>
           ) : undefined}
         />
         <RibbonSmallStack>

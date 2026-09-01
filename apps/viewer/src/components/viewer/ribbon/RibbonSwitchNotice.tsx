@@ -61,9 +61,9 @@ export function RibbonSwitchNotice() {
   };
 
   return (
-    <div className="flex items-center gap-2 border-t border-primary/25 bg-primary/5 px-3 py-1 text-[11px] text-muted-foreground">
+    <div className="modviz-ribbon-notice flex items-center gap-2 border-t border-border/80 bg-muted/50 px-3 py-1 text-[11px] text-muted-foreground">
       <PanelTop className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-      <span className="min-w-0 truncate text-foreground/80">
+      <span className="min-w-0 truncate text-foreground">
         The tabbed ribbon is now the default toolbar. Same commands, grouped by task.
       </span>
       {!isMobile && (
@@ -77,11 +77,11 @@ export function RibbonSwitchNotice() {
           >
             Show me what moved
           </button>
-          <span aria-hidden="true" className="text-muted-foreground/40">|</span>
+          <span aria-hidden="true" className="text-border">|</span>
         </>
       )}
       <button
-        className="shrink-0 hover:text-foreground hover:underline"
+        className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
         onClick={() => {
           close();
           setToolbarStyle('classic');
@@ -92,7 +92,7 @@ export function RibbonSwitchNotice() {
       <div className="flex-1" />
       <button
         aria-label="Dismiss toolbar notice"
-        className="shrink-0 rounded p-0.5 text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground"
+        className="shrink-0 rounded-md p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={close}
       >
         <X className="h-3 w-3" />

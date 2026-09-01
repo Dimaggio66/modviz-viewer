@@ -1256,16 +1256,16 @@ export function PropertiesPanel() {
     }
     // Multi-model or no model loaded: show empty state
     return (
-      <div {...tourAnchor(TOUR_ANCHORS.propertiesPanel)} className="h-full flex flex-col border-l-2 border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-black">
-        <div className="p-3 border-b-2 border-zinc-200 dark:border-zinc-800 bg-white dark:bg-black">
-          <h2 className="font-bold uppercase tracking-wider text-xs text-zinc-900 dark:text-zinc-100">Inspector</h2>
+      <div {...tourAnchor(TOUR_ANCHORS.propertiesPanel)} className="properties-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[inherit] bg-card text-card-foreground">
+        <div className="border-b border-border bg-card px-3 py-3">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-foreground">Inspector</h2>
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-white dark:bg-black">
-          <div className="w-16 h-16 border-2 border-dashed border-zinc-300 dark:border-zinc-800 flex items-center justify-center mb-4 bg-zinc-100 dark:bg-zinc-950">
-            <MousePointer2 className="h-8 w-8 text-zinc-400 dark:text-zinc-500" />
+        <div className="flex flex-1 flex-col items-center justify-center bg-card p-6 text-center">
+          <div className="mb-4 flex size-16 items-center justify-center rounded-xl border border-dashed border-border bg-muted/40">
+            <MousePointer2 className="size-7 text-muted-foreground" />
           </div>
-          <p className="font-bold uppercase text-zinc-900 dark:text-zinc-100 mb-2">No Selection</p>
-          <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 max-w-[150px]">
+          <p className="mb-1 text-sm font-semibold text-foreground">No selection</p>
+          <p className="max-w-[170px] text-xs text-muted-foreground">
             {models.size > 1 ? 'Select a model or element to view details' : 'Select an element to view details'}
           </p>
         </div>
@@ -1281,16 +1281,16 @@ export function PropertiesPanel() {
   const entityObjectType = renderedEntityObjectType;
 
   return (
-    <div {...tourAnchor(TOUR_ANCHORS.propertiesPanel)} className="h-full flex flex-col border-l-2 border-zinc-200 dark:border-zinc-800 bg-white dark:bg-black">
+    <div {...tourAnchor(TOUR_ANCHORS.propertiesPanel)} className="properties-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[inherit] bg-card text-card-foreground">
       {/* Entity Header */}
-      <div className="p-4 border-b-2 border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-black space-y-3">
+      <div className="properties-entity-header space-y-3 border-b border-border bg-card px-3 py-3">
         <div className="flex items-start gap-3">
-          <div className="p-2 border-2 border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shrink-0 shadow-[2px_2px_0px_0px_rgba(0,0,0,0.1)] dark:shadow-[2px_2px_0px_0px_rgba(255,255,255,0.1)]">
-            <Building2 className="h-5 w-5 text-zinc-700 dark:text-zinc-300" />
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 text-foreground shadow-sm">
+            <Building2 className="size-5" />
           </div>
           <div className="flex-1 min-w-0 pt-0.5">
             <div className="flex items-start gap-2">
-              <h3 className="font-bold text-sm truncate uppercase tracking-tight text-zinc-900 dark:text-zinc-100 min-w-0">
+              <h3 className="min-w-0 truncate text-sm font-semibold tracking-tight text-foreground">
                 {entityName || `${entityType}`}
               </h3>
               {/* Issue #540: indicate that the wall solid the user is
@@ -1316,7 +1316,7 @@ export function PropertiesPanel() {
                 </Tooltip>
               )}
             </div>
-            <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400">{entityType}</p>
+            <p className="text-xs font-mono text-muted-foreground">{entityType}</p>
             {/* Show associated type entity for occurrences */}
             {!renderedIsTypeEntity && renderedTypeProperties && (
               <p className="text-[11px] font-mono text-indigo-500 dark:text-indigo-400 truncate" title={`${activeDataStore?.entities.getTypeName(renderedTypeProperties.typeId) || 'Type'}: ${renderedTypeProperties.typeName}`}>
@@ -1325,13 +1325,13 @@ export function PropertiesPanel() {
               </p>
             )}
           </div>
-          <div className="flex gap-1 shrink-0">
+          <div className="flex shrink-0 gap-1">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  className="rounded-none hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                  className="rounded-md hover:bg-accent"
                   onClick={() => {
                     if (selectedEntityId && cameraCallbacks.frameSelection) {
                       cameraCallbacks.frameSelection();
@@ -1348,7 +1348,7 @@ export function PropertiesPanel() {
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  className="rounded-none hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                  className="rounded-md hover:bg-accent"
                   onClick={() => {
                     if (selectedEntityId) {
                       toggleEntityVisibility(selectedEntityId);
@@ -1375,12 +1375,12 @@ export function PropertiesPanel() {
 
         {/* GlobalId */}
         {entityGlobalId && (
-          <div className={`flex items-center gap-0 border transition-colors duration-200 ${
+          <div className={`flex items-center gap-0 overflow-hidden rounded-lg border bg-background/60 transition-colors duration-200 ${
             copied
               ? 'border-emerald-400 dark:border-emerald-600'
-              : 'border-zinc-200 dark:border-zinc-800'
+              : 'border-border'
           }`}>
-            <code className="flex-1 text-[10px] bg-white dark:bg-zinc-950 px-2 py-1 truncate font-mono select-all text-zinc-900 dark:text-zinc-100">
+            <code className="flex-1 truncate px-2.5 py-1.5 font-mono text-[10px] text-foreground select-all">
               {entityGlobalId}
             </code>
             <Button
@@ -1389,14 +1389,14 @@ export function PropertiesPanel() {
               className={`h-6 w-6 rounded-none border-l transition-all duration-200 ${
                 copied
                   ? 'border-emerald-400 dark:border-emerald-600 bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400'
-                  : 'border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-950'
+                  : 'border-border hover:bg-accent'
               }`}
               onClick={() => copyToClipboard(entityGlobalId)}
             >
               {copied ? (
                 <Check className="h-3 w-3" />
               ) : (
-                <Copy className="h-3 w-3 text-zinc-600 dark:text-zinc-400" />
+                  <Copy className="h-3 w-3 text-muted-foreground" />
               )}
             </Button>
           </div>
@@ -1404,7 +1404,7 @@ export function PropertiesPanel() {
 
         {/* Spatial Location */}
         {renderedSpatialInfo && (
-          <div className="flex items-center gap-2 text-xs border border-emerald-500/30 bg-emerald-50/50 dark:bg-emerald-900/10 px-2 py-1.5 text-emerald-800 dark:text-emerald-400 min-w-0">
+          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-2.5 py-2 text-xs text-emerald-700 dark:text-emerald-400">
             <Layers className="h-3.5 w-3.5 shrink-0" />
             <span className="font-bold uppercase tracking-wide truncate min-w-0 flex-1">{renderedSpatialInfo.storeyName}</span>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -1441,7 +1441,7 @@ export function PropertiesPanel() {
         {/* World coordinates + Georeferencing — single consolidated section */}
         {(entityCoordinates || renderedGeoref || editMode) && (
           <Collapsible open={coordOpen} onOpenChange={setCoordOpen}>
-            <CollapsibleTrigger className="flex items-center gap-2 w-full text-xs border border-teal-500/30 px-2 py-1.5 text-teal-800 dark:text-teal-400 min-w-0 text-left group/coord">
+            <CollapsibleTrigger className="group/coord flex w-full min-w-0 items-center gap-2 rounded-lg border border-teal-500/25 bg-teal-500/5 px-2.5 py-2 text-left text-xs text-teal-700 transition-colors hover:bg-teal-500/10 dark:text-teal-400">
               <Crosshair className="h-3.5 w-3.5 shrink-0" />
               <span className="font-bold uppercase tracking-wide shrink-0">World</span>
               {!coordOpen && (
@@ -1518,17 +1518,19 @@ export function PropertiesPanel() {
 
       {/* IFC Attributes */}
       {renderedAttributes.length > 0 && (
-        <Collapsible defaultOpen className="border-b">
-          <CollapsibleTrigger className="flex items-center gap-2 w-full p-3 hover:bg-muted/50 text-left">
-            <Tag className="h-4 w-4 text-muted-foreground" />
-            <span className="font-medium text-sm">Attributes</span>
+        <Collapsible defaultOpen className="properties-panel-section mx-3 mt-3 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/50">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/50 text-muted-foreground">
+              <Tag className="size-3.5" />
+            </span>
+            <span className="text-sm font-semibold text-foreground">Attributes</span>
             {editMode && <PenLine className="h-3 w-3 text-purple-500 ml-1" />}
-            <span className="text-xs text-muted-foreground ml-auto">{renderedAttributes.length}</span>
+            <Badge variant="outline" className="ml-auto font-mono text-[10px] text-muted-foreground">{renderedAttributes.length}</Badge>
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="divide-y border-t">
+            <div className="divide-y divide-border/60 border-t border-border/60 bg-muted/[0.18]">
               {renderedAttributes.map((attr) => (
-                <div key={attr.name} className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-1.5 text-sm">
+                <div key={attr.name} className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-2 text-sm transition-colors hover:bg-muted/50">
                   <span className="text-muted-foreground truncate" title={attr.name}>{attr.name}</span>
                   {editMode && selectedEntity ? (
                     <AttributeEditorField
@@ -1553,16 +1555,18 @@ export function PropertiesPanel() {
 
       {/* Spatial Containment - for spatial containers (Project, Site, Building, Storey) */}
       {renderedSpatialContainment && (
-        <Collapsible defaultOpen className="border-b">
-          <CollapsibleTrigger className="flex items-center gap-2 w-full p-3 hover:bg-muted/50 text-left">
-            <Layers className="h-4 w-4 text-emerald-600" />
-            <span className="font-medium text-sm">Structure</span>
-            <span className="text-xs text-muted-foreground ml-auto">{renderedSpatialContainment.length}</span>
+        <Collapsible defaultOpen className="properties-panel-section mx-3 mt-3 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/50">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+              <Layers className="size-3.5" />
+            </span>
+            <span className="text-sm font-semibold text-foreground">Structure</span>
+            <Badge variant="outline" className="ml-auto font-mono text-[10px] text-muted-foreground">{renderedSpatialContainment.length}</Badge>
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="divide-y border-t">
+            <div className="divide-y divide-border/60 border-t border-border/60 bg-muted/[0.18]">
               {renderedSpatialContainment.map((item) => (
-                <div key={item.label} className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-1.5 text-sm">
+                <div key={item.label} className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-2 text-sm transition-colors hover:bg-muted/50">
                   <span className="text-muted-foreground truncate" title={item.label}>{item.label}</span>
                   <span className="font-medium font-mono">{item.value}</span>
                 </div>
@@ -1576,17 +1580,19 @@ export function PropertiesPanel() {
           element falls in, per zone set. Read-only: editing zones happens in
           the Zones panel, not here. */}
       {zoneMembership && (
-        <Collapsible defaultOpen className="border-b">
-          <CollapsibleTrigger className="flex items-center gap-2 w-full p-3 hover:bg-muted/50 text-left">
-            <Box className="h-4 w-4 text-amber-600" />
-            <span className="font-medium text-sm">Zones</span>
-            <span className="text-xs text-muted-foreground ml-auto">{zoneMembership.length}</span>
+        <Collapsible defaultOpen className="properties-panel-section mx-3 mt-3 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/50">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              <Box className="size-3.5" />
+            </span>
+            <span className="text-sm font-semibold text-foreground">Zones</span>
+            <Badge variant="outline" className="ml-auto font-mono text-[10px] text-muted-foreground">{zoneMembership.length}</Badge>
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="divide-y border-t">
+            <div className="divide-y divide-border/60 border-t border-border/60 bg-muted/[0.18]">
               {zoneMembership.map((item) => (
                 <div key={item.setId}>
-                  <div className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-1.5 text-sm">
+                  <div className="grid grid-cols-[minmax(80px,1fr)_minmax(0,2fr)] gap-2 px-3 py-2 text-sm transition-colors hover:bg-muted/50">
                     <span className="text-muted-foreground truncate" title={item.label}>{item.label}</span>
                     <span className="font-medium font-mono truncate" title={item.value}>{item.value}</span>
                   </div>
@@ -1613,7 +1619,7 @@ export function PropertiesPanel() {
       <Tabs
         value={propertiesActiveTab}
         onValueChange={(v) => setPropertiesActiveTab(v as 'properties' | 'quantities' | 'bsdd' | 'raw-step')}
-        className="flex-1 flex flex-col overflow-hidden"
+        className="mt-3 flex flex-1 flex-col overflow-hidden border-t border-border"
       >
         <TabsList className="properties-tabs-list w-full shrink-0">
           <TabsTrigger
@@ -1654,7 +1660,7 @@ export function PropertiesPanel() {
           </TabsTrigger>
         </TabsList>
 
-        <ScrollArea className="flex-1 bg-white dark:bg-black">
+        <ScrollArea className="flex-1 bg-card">
           <TabsContent value="properties" className="m-0 p-3 overflow-hidden">
             {/* Task edit card — renders when exactly one Gantt task is
                 selected. Shown above any entity properties because the
@@ -1993,17 +1999,17 @@ function MultiEntityPanel({
   ifcDataStore: IfcDataStore | null;
 }) {
   return (
-    <div className="h-full flex flex-col border-l-2 border-zinc-200 dark:border-zinc-800 bg-white dark:bg-black">
+    <div className="properties-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[inherit] bg-card text-card-foreground">
       {/* Header */}
-      <div className="p-3 border-b-2 border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-black">
+      <div className="border-b border-border bg-card px-3 py-3">
         <div className="flex items-center gap-2">
-          <Layers className="h-4 w-4 text-emerald-600" />
-          <h2 className="font-bold uppercase tracking-wider text-xs text-zinc-900 dark:text-zinc-100">
+          <span className="flex size-8 items-center justify-center rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+            <Layers className="size-4" />
+          </span>
+          <h2 className="text-sm font-semibold text-foreground">
             Unified Storey
           </h2>
-          <span className="text-[10px] font-mono bg-emerald-100 dark:bg-emerald-900 px-1.5 py-0.5 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-            {entities.length} models
-          </span>
+          <Badge variant="outline" className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300">{entities.length} models</Badge>
           {/* Display-unit converter (issue #1573 proposal 2) — one control
               for the whole stacked list below, not per-entity section. */}
           <div className="ml-auto">
@@ -2014,7 +2020,7 @@ function MultiEntityPanel({
 
       {/* Scrollable content with each entity's data */}
       <ScrollArea className="flex-1">
-        <div className="divide-y-2 divide-zinc-200 dark:divide-zinc-800">
+        <div className="space-y-3 p-3">
           {entities.map((entityRef, index) => (
             <EntityDataSection
               key={`${entityRef.modelId}-${entityRef.expressId}`}
@@ -2126,19 +2132,19 @@ function EntityDataSection({
   }
 
   return (
-    <div className="bg-white dark:bg-black">
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       {/* Entity Header with model name */}
-      <div className="p-3 bg-zinc-50 dark:bg-zinc-900/50 space-y-2">
+      <div className="space-y-2 border-b border-border bg-muted/[0.18] p-3">
         {showModelName && model && (
           <ModelBadge modelId={model.id} className="gap-2 text-[11px] max-w-full" />
         )}
         <div className="flex items-center gap-2">
           <Layers className="h-4 w-4 text-emerald-600" />
           <div className="flex-1 min-w-0">
-            <h3 className="font-bold text-sm truncate text-zinc-900 dark:text-zinc-100">
+            <h3 className="truncate text-sm font-semibold text-foreground">
               {entityNode.name || `${displayType} #${entityRef.expressId}`}
             </h3>
-            <p className="text-xs font-mono text-zinc-500">{displayType}</p>
+            <p className="font-mono text-xs text-muted-foreground">{displayType}</p>
           </div>
           {elevationInfo !== null && (
             <span className="text-[10px] font-mono bg-emerald-100 dark:bg-emerald-950 px-1.5 py-0.5 border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400">

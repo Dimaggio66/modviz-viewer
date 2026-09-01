@@ -26,6 +26,7 @@ import {
   MonitorUp,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -100,6 +101,24 @@ export function ActivityBar() {
       toggle(id);
       return;
     }
+    // Information is the viewer's fixed inspector. It is deliberately not a
+    // detachable workspace panel: the rail button simply shows or hides the
+    // docked inspector while the activity rail itself remains in place.
+    if (id === 'properties') {
+      const propertiesIsDocked = panelLocation('properties') === 'docked'
+        && activePanel === 'properties';
+      if (mode === 'collapsed') {
+        setSidebarMode('expanded');
+        openInHome('properties');
+      } else if (propertiesIsDocked) {
+        setSidebarMode('collapsed');
+      } else {
+        // Re-dock a legacy floating / popped-out Information panel instead of
+        // creating or preserving a free-floating inspector window.
+        openInHome('properties');
+      }
+      return;
+    }
     if (mode === 'collapsed') {
       // Collapsed icons open + expand the right pane; they never toggle off.
       setSidebarMode('expanded');
@@ -120,7 +139,10 @@ export function ActivityBar() {
           if (!def) return null;
           const Icon = def.Icon;
           const loc = panelLocation(id);
-          const active = loc === 'docked';
+          // Information is only visually active while its docked pane is
+          // visible. In collapsed mode the rail stays present, but the 3D view
+          // gets the reclaimed space and the button reads as "show".
+          const active = loc === 'docked' && (id !== 'properties' || mode === 'expanded');
           const open = isOpen(id);
           const showDivider = prevGroup !== null && def.group !== prevGroup;
           prevGroup = def.group;
@@ -131,6 +153,8 @@ export function ActivityBar() {
           // panels render here now, #1263).
           const ariaLabel = customizing
             ? `${def.title}, activate to hide from the sidebar`
+            : id === 'properties' && mode === 'collapsed'
+              ? 'Show information'
             : `${def.title}${loc === 'floating' ? ' (floating)' : loc === 'popped' ? ' (popped out)' : ''}`;
 
           return (
@@ -170,19 +194,15 @@ export function ActivityBar() {
                       overId === id && dragId && dragId !== id && 'ring-1 ring-primary/60',
                     )}
                   >
-                    {/* Active accent bar (VS Code idiom) */}
-                    {active && !customizing && (
-                      <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-primary" aria-hidden />
-                    )}
                     <Icon className="h-4 w-4" />
                     {/* Unpublished-edits badge on the Layers icon. */}
                     {!customizing && id === 'layers' && pendingLayerEdits > 0 && (
-                      <span
-                        className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-medium text-white ring-1 ring-background"
+                      <Badge
+                        className="pointer-events-none absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border-0 bg-amber-500 px-1 py-0 text-[9px] font-medium text-white ring-1 ring-background dark:bg-amber-500 dark:text-white"
                         aria-hidden
                       >
                         {pendingLayerEdits > 99 ? '99+' : pendingLayerEdits}
-                      </span>
+                      </Badge>
                     )}
                     {/* Detached indicator dot — floating (primary) vs popped out (emerald). */}
                     {!customizing && open && loc !== 'docked' && (
@@ -271,16 +291,20 @@ export function ActivityBar() {
               <RotateCcw className="h-4 w-4 text-muted-foreground" />
               Reset layout
             </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {/* Keyboard-accessible detach (the grip drag is mouse-only). */}
-            <DropdownMenuItem onSelect={() => floatPanel(activePanel)} className="gap-2">
-              <SquareArrowOutUpRight className="h-4 w-4 text-muted-foreground" />
-              Float current panel
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => popOutPanel(activePanel)} className="gap-2">
-              <MonitorUp className="h-4 w-4 text-muted-foreground" />
-              Pop out to another screen
-            </DropdownMenuItem>
+            {activePanel !== 'properties' && (
+              <>
+                <DropdownMenuSeparator />
+                {/* Keyboard-accessible detach (the grip drag is mouse-only). */}
+                <DropdownMenuItem onSelect={() => floatPanel(activePanel)} className="gap-2">
+                  <SquareArrowOutUpRight className="h-4 w-4 text-muted-foreground" />
+                  Float current panel
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => popOutPanel(activePanel)} className="gap-2">
+                  <MonitorUp className="h-4 w-4 text-muted-foreground" />
+                  Pop out to another screen
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

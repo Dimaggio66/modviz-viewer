@@ -48,6 +48,8 @@ import {
   Users,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { ShortcutKbd } from '@/components/ui/kbd';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
@@ -135,7 +137,7 @@ function ToolButton({
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        {label} {shortcut && <span className="ml-2 text-xs opacity-60">({shortcut})</span>}
+        <span>{label}</span>{shortcut && <ShortcutKbd shortcut={shortcut} className="ml-2 align-middle" />}
       </TooltipContent>
     </Tooltip>
   );
@@ -182,7 +184,7 @@ function UndoRedoButtons() {
           </Button>
         </TooltipTrigger>
         <TooltipContent>
-          Undo <span className="ml-2 text-xs opacity-60">⌘Z</span>
+          <span>Undo</span><ShortcutKbd shortcut="⌘Z" className="ml-2 align-middle" />
         </TooltipContent>
       </Tooltip>
       <Tooltip>
@@ -201,7 +203,7 @@ function UndoRedoButtons() {
           </Button>
         </TooltipTrigger>
         <TooltipContent>
-          Redo <span className="ml-2 text-xs opacity-60">⌘⇧Z</span>
+          <span>Redo</span><ShortcutKbd shortcut="⌘⇧Z" className="ml-2 align-middle" />
         </TooltipContent>
       </Tooltip>
     </>
@@ -236,7 +238,7 @@ function ActionButton({ icon: Icon, label, onClick, shortcut, disabled }: Action
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        {label} {shortcut && <span className="ml-2 text-xs opacity-60">({shortcut})</span>}
+        <span>{label}</span>{shortcut && <ShortcutKbd shortcut={shortcut} className="ml-2 align-middle" />}
       </TooltipContent>
     </Tooltip>
   );
@@ -370,7 +372,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
   }, []);
 
   return (
-    <div className="viewer-topbar flex items-center gap-1 px-2 h-12 border-b bg-white dark:bg-black border-zinc-200 dark:border-zinc-800 relative z-50">
+    <div className="viewer-topbar modviz-toolbar-shell modviz-classic-toolbar relative z-50 flex h-12 items-center gap-1 border-b border-zinc-200 bg-white px-2 dark:border-zinc-800 dark:bg-black">
       {/* ── File Operations (hidden <input> fallbacks live in the shared hook) ── */}
       {fileInputs}
 
@@ -503,9 +505,9 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
               >
                 <Share2 className="h-4 w-4" />
                 {collabPeerCount > 0 && (
-                  <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
+                  <Badge className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 py-0 text-[9px] font-medium">
                     {collabPeerCount + 1}
-                  </span>
+                  </Badge>
                 )}
               </Button>
             </TooltipTrigger>
@@ -525,9 +527,9 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
                 >
                   <Users className="h-4 w-4" />
                   {collabPeerCount > 0 && (
-                    <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-medium text-white">
+                    <Badge className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border-0 bg-emerald-500 px-1 py-0 text-[9px] font-medium text-white dark:bg-emerald-500 dark:text-white">
                       {collabPeerCount + 1}
-                    </span>
+                    </Badge>
                   )}
                 </Button>
               </TooltipTrigger>
@@ -713,12 +715,12 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Separator orientation="vertical" className="h-6 mx-1" />
+      <Separator orientation="vertical" className="modviz-toolbar-separator h-6 mx-1" />
 
       {/* ── Search (Tier-0 inline; ⌘F or / to focus) ── */}
       <SearchInline />
 
-      <Separator orientation="vertical" className="h-6 mx-1" />
+      <Separator orientation="vertical" className="modviz-toolbar-separator h-6 mx-1" />
 
       {/* ── Navigation Tools ── */}
       <ToolButton tool="select" icon={MousePointer2} label="Select" shortcut="V" activeTool={activeTool} onToolChange={setActiveTool} />
@@ -792,7 +794,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           the AddElement panel and added clutter. */}
       {/* (no draw pills here — by design) */}
 
-      <Separator orientation="vertical" className="h-6 mx-1" />
+      <Separator orientation="vertical" className="modviz-toolbar-separator h-6 mx-1" />
 
       {/* ── Measurement & Section ── */}
       <ToolButton tool="measure" icon={Ruler} label="Measure" shortcut="M" activeTool={activeTool} onToolChange={setActiveTool} />
@@ -813,7 +815,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           adjacent storey buttons that used to sit here (Quick Floorplan +
           Level display) were retired to fix the duplicate-button confusion. */}
 
-      <Separator orientation="vertical" className="h-6 mx-1" />
+      <Separator orientation="vertical" className="modviz-toolbar-separator h-6 mx-1" />
 
       {/* ── Basket Presentation ── */}
       <Tooltip>
@@ -919,7 +921,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
         <ClassVisibilityMenuContent align="start" />
       </DropdownMenu>
 
-      <Separator orientation="vertical" className="h-6 mx-1" />
+      <Separator orientation="vertical" className="modviz-toolbar-separator h-6 mx-1" />
 
       {/* ── Camera & View ── */}
       <ActionButton icon={Home} label="Home (Isometric + Reset Visibility)" onClick={handleHome} shortcut="H" />
@@ -1134,7 +1136,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
       {/* Right Side Actions — /mcp moved to the Info dialog header so
           the toolbar's meta cluster stays focused on shell chrome
           (Settings · Theme · Help). */}
-      <div className="flex items-center gap-2 ml-2 pl-2 border-l border-zinc-200 dark:border-zinc-700/60">
+      <div className="modviz-toolbar-utilities ml-2 flex items-center gap-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <div>

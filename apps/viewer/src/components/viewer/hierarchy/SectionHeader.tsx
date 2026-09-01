@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { Badge } from '@/components/ui/badge';
+
 export interface SectionHeaderProps {
   icon: React.ElementType;
   title: string;
@@ -10,15 +12,17 @@ export interface SectionHeaderProps {
 
 export function SectionHeader({ icon: IconComponent, title, count }: SectionHeaderProps) {
   return (
-    <div className="flex items-center gap-2 px-3 py-2 bg-zinc-100 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
-      <IconComponent className="h-3.5 w-3.5 text-zinc-500" />
-      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-600 dark:text-zinc-400">
+    <div className="flex items-center gap-2 border-b border-border/70 bg-muted/30 px-3 py-2.5">
+      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-background text-muted-foreground shadow-sm">
+        <IconComponent className="h-3.5 w-3.5" />
+      </span>
+      <span className="text-[11px] font-semibold tracking-tight text-foreground">
         {title}
       </span>
       {count !== undefined && (
-        <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500 ml-auto">
-          {count}
-        </span>
+        <Badge variant="secondary" className="ml-auto h-5 rounded-md px-1.5 font-mono text-[10px] text-muted-foreground">
+          {count.toLocaleString()}
+        </Badge>
       )}
     </div>
   );

@@ -14,6 +14,7 @@
 import React, { useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { X, Download, FileDown, Eye, EyeOff, Maximize2, ZoomIn, ZoomOut, Loader2, Printer, GripVertical, MoreHorizontal, RefreshCw, Pin, PinOff, Palette, Ruler, Trash2, FileText, Shapes, Box, BoxSelect, PenTool, Hexagon, Type, Cloud, MousePointer2, Tag, Layers, ScanLine } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Kbd } from '@/components/ui/kbd';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1220,7 +1221,7 @@ export function Section2DPanel({
         {measure2DMode && measure2DStart && (
           <div className="absolute bottom-2 right-2 pointer-events-none z-10">
             <div className="flex items-center gap-1.5 text-[10px] text-black">
-              <kbd className={`px-1 py-0.5 text-[9px] font-mono font-semibold ${measure2DShiftLocked ? 'text-primary' : 'text-black'}`}>Shift</kbd>
+              <Kbd className={`text-[9px] font-semibold ${measure2DShiftLocked ? 'text-primary' : 'text-black'}`}>Shift</Kbd>
               <span className="text-black">perpendicular</span>
             </div>
           </div>

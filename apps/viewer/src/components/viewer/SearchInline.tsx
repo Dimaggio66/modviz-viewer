@@ -27,7 +27,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Clock, X, SlidersHorizontal } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { ButtonGroup } from '@/components/ui/button-group';
 import { Input } from '@/components/ui/input';
+import { Kbd, ShortcutKbd } from '@/components/ui/kbd';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { cn } from '@/lib/utils';
@@ -55,7 +60,12 @@ function isEditableFocused(): boolean {
   return false;
 }
 
-export function SearchInline() {
+interface SearchInlineProps {
+  /** Compact toolbar search, or the centred command-style search on the canvas. */
+  variant?: 'default' | 'command';
+}
+
+export function SearchInline({ variant = 'default' }: SearchInlineProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // Tracks the latest scheduled `frameSelection` timer so back-to-back
@@ -446,66 +456,148 @@ export function SearchInline() {
   const showPopover = searchOpen && (results.length > 0 || queryTrimmedLen > 0 || recents.length > 0);
   const showRecents = searchOpen && queryTrimmedLen === 0 && recents.length > 0;
 
+  const inputHandlers = {
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      setSearchQuery(e.target.value);
+      if (!searchOpen) setSearchOpen(true);
+    },
+    onFocus: () => setSearchOpen(true),
+    onKeyDown: handleInputKeyDown,
+  };
+
   return (
-    <div ref={containerRef} className="relative w-72">
-      <Input
-        ref={inputRef}
-        type="text"
-        placeholder="Search GUID, name, type… ( / )"
-        value={searchQuery}
-        leftIcon={<Search className="h-4 w-4" />}
-        onChange={(e) => {
-          setSearchQuery(e.target.value);
-          if (!searchOpen) setSearchOpen(true);
-        }}
-        onFocus={() => setSearchOpen(true)}
-        onKeyDown={handleInputKeyDown}
-        className={cn(hasFilters ? 'pr-[4.5rem]' : 'pr-9')}
-        aria-label="Search entities"
-        aria-autocomplete="list"
-        aria-expanded={showPopover}
-        aria-controls="search-inline-popover"
-      />
-      {/* Advanced-filter affordance — always visible so structured
-          filtering is discoverable without the ⌘⇧F shortcut. Shows the
-          active rule count and a quick-clear when a filter is applied. */}
-      <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-        {hasFilters && (
-          <button
-            type="button"
-            aria-label="Clear filters"
-            title="Clear filters"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              clearFilterRules();
-            }}
-            className="rounded p-1 text-muted-foreground transition-colors hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        )}
-        <button
-          type="button"
-          aria-label={hasFilters ? `Advanced filter — ${activeRuleCount} active` : 'Advanced filter'}
-          aria-pressed={hasFilters}
-          title="Advanced filter (⌘⇧F)"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            openAdvancedFilter();
-          }}
-          className={cn(
-            'flex items-center gap-1 rounded px-1.5 py-1 text-xs transition-colors',
-            hasFilters
-              ? 'bg-primary/10 text-primary hover:bg-primary/15'
-              : 'text-muted-foreground hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800',
-          )}
-        >
-          <SlidersHorizontal className="h-3.5 w-3.5" />
-          {hasFilters && (
-            <span className="font-mono text-[10px] font-semibold leading-none">{activeRuleCount}</span>
-          )}
-        </button>
-      </div>
+    <div ref={containerRef} className={cn('relative', variant === 'command' ? 'w-full' : 'w-72')}>
+      {variant === 'command' ? (
+        <ButtonGroup aria-label="Entity search" className="w-full items-center gap-2">
+          <div className="relative shrink-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label={hasFilters ? `Advanced filter — ${activeRuleCount} active` : 'Advanced filter'}
+                  aria-pressed={hasFilters}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    openAdvancedFilter();
+                  }}
+                  className={cn(
+                    'h-10 w-10 rounded-full border-slate-600 bg-slate-950/60 text-slate-300 shadow-none',
+                    'hover:bg-slate-800 hover:text-white focus-visible:ring-2 focus-visible:ring-teal-300/70',
+                    hasFilters && 'border-primary/70 bg-primary/15 text-primary hover:bg-primary/20',
+                  )}
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <span>Advanced filter</span>
+                <ShortcutKbd shortcut="⌘⇧F" className="ml-2 align-middle" />
+              </TooltipContent>
+            </Tooltip>
+            {hasFilters && (
+              <Badge
+                aria-label={`${activeRuleCount} active filters`}
+                className="pointer-events-none absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full px-1 py-0 font-mono text-[9px] font-bold leading-none"
+              >
+                {activeRuleCount}
+              </Badge>
+            )}
+          </div>
+
+          <div className="relative min-w-0 flex-1">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-slate-400"
+            />
+            <Input
+              ref={inputRef}
+              type="text"
+              placeholder="Search GUID, name, type… ( / )"
+              value={searchQuery}
+              {...inputHandlers}
+              className="h-10 rounded-full border-slate-600 bg-slate-950/60 py-2 pl-9 pr-10 text-slate-100 shadow-none placeholder:text-slate-400 hover:border-slate-500 focus-visible:border-teal-300 focus-visible:ring-2 focus-visible:ring-teal-300/60"
+              aria-label="Search entities"
+              aria-autocomplete="list"
+              aria-expanded={showPopover}
+              aria-controls="search-inline-popover"
+            />
+            {hasFilters && (
+              <div className="absolute right-2 top-1/2 z-10 -translate-y-1/2 text-slate-400">
+                <button
+                  type="button"
+                  aria-label="Clear filters"
+                  title="Clear filters"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    clearFilterRules();
+                  }}
+                  className="rounded-full p-1 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        </ButtonGroup>
+      ) : (
+        <>
+          <Input
+            ref={inputRef}
+            type="text"
+            placeholder="Search GUID, name, type… ( / )"
+            value={searchQuery}
+            leftIcon={<Search className="h-4 w-4" />}
+            {...inputHandlers}
+            className={cn(hasFilters ? 'pr-[4.5rem]' : 'pr-9')}
+            aria-label="Search entities"
+            aria-autocomplete="list"
+            aria-expanded={showPopover}
+            aria-controls="search-inline-popover"
+          />
+          {/* Advanced-filter affordance — always visible so structured
+              filtering is discoverable without the ⌘⇧F shortcut. Shows the
+              active rule count and a quick-clear when a filter is applied. */}
+          <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+            {hasFilters && (
+              <button
+                type="button"
+                aria-label="Clear filters"
+                title="Clear filters"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  clearFilterRules();
+                }}
+                className="rounded p-1 text-muted-foreground transition-colors hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button
+              type="button"
+              aria-label={hasFilters ? `Advanced filter — ${activeRuleCount} active` : 'Advanced filter'}
+              aria-pressed={hasFilters}
+              title="Advanced filter (⌘⇧F)"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                openAdvancedFilter();
+              }}
+              className={cn(
+                'flex items-center gap-1 rounded px-1.5 py-1 text-xs transition-colors',
+                hasFilters
+                  ? 'bg-primary/10 text-primary hover:bg-primary/15'
+                  : 'text-muted-foreground hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800',
+              )}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              {hasFilters && (
+                <span className="font-mono text-[10px] font-semibold leading-none">{activeRuleCount}</span>
+              )}
+            </button>
+          </div>
+        </>
+      )}
       {/* Vim cycle hint — shows below the input whenever a cycle is active
           and the popover is closed. Clicking it exits the cycle. */}
       {searchVimCycle && !showPopover && (
@@ -569,9 +661,9 @@ function VimCycleHint({ query, index, total, onExit }: VimCycleHintProps) {
         <span className="opacity-70">cycling </span>
         <span className="font-mono">&quot;{query}&quot;</span>
         <span className="opacity-70"> — press </span>
-        <kbd className="rounded border border-zinc-300 bg-zinc-100 px-1 font-mono text-[10px] dark:border-zinc-700 dark:bg-zinc-900">n</kbd>
+        <Kbd>n</Kbd>
         <span className="opacity-70"> / </span>
-        <kbd className="rounded border border-zinc-300 bg-zinc-100 px-1 font-mono text-[10px] dark:border-zinc-700 dark:bg-zinc-900">N</kbd>
+        <Kbd>N</Kbd>
       </span>
       <button
         type="button"
@@ -726,7 +818,7 @@ function SearchPopover({
             onOpenAdvanced();
           }}
         >
-          Advanced <kbd className="ml-0.5 rounded border border-zinc-300 bg-zinc-100 px-1 font-mono text-[9px] dark:border-zinc-700 dark:bg-zinc-900">⌘↵</kbd>
+          Advanced <ShortcutKbd shortcut="⌘↵" className="ml-1 align-middle" keyClassName="text-[9px]" />
         </button>
       </div>
     </div>

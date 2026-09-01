@@ -155,6 +155,13 @@ export function usePanelControls(): PanelControls {
   }, []);
 
   const floatPanel = useCallback((id: WorkspacePanelId) => {
+    // Information is the fixed inspector. Its rail button controls visibility,
+    // so it must always return to the right dock instead of opening a free
+    // floating window through an alternative action or keyboard path.
+    if (id === 'properties') {
+      useViewerStore.getState().openPanelInHome(id);
+      return;
+    }
     // The left nav panel stays docked on the left; it never floats (#1267).
     if (isLeftPanel(id)) {
       useViewerStore.getState().setLeftPanelCollapsed(false);
@@ -166,6 +173,10 @@ export function usePanelControls(): PanelControls {
   }, []);
 
   const popOutPanel = useCallback((id: WorkspacePanelId) => {
+    if (id === 'properties') {
+      useViewerStore.getState().openPanelInHome(id);
+      return;
+    }
     if (isLeftPanel(id)) {
       useViewerStore.getState().setLeftPanelCollapsed(false);
       return;

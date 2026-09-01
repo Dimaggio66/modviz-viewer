@@ -26,7 +26,7 @@ import {
 
 /** Purple latched accent shared by the authoring toggles (matches the
  *  classic toolbar's Edit pill so the mode reads identically). */
-const EDIT_ACTIVE_CLASS = 'bg-purple-600/20 text-foreground ring-1 ring-inset ring-purple-600/50';
+const EDIT_ACTIVE_CLASS = 'bg-purple-600/20 text-white ring-1 ring-inset ring-purple-600/50';
 
 export function AuthorTab() {
   const { ifcDataStore } = useIfc();

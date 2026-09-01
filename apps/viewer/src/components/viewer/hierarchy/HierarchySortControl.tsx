@@ -56,7 +56,7 @@ export function HierarchySortControl({ value, onChange }: HierarchySortControlPr
         <Button
           variant="outline"
           size="sm"
-          className="h-6 w-full justify-between gap-1 px-2 mt-1 text-[10px] rounded-none uppercase tracking-wider"
+          className="mt-2 h-8 w-full justify-between gap-1 rounded-lg border-border bg-background/60 px-2 text-[11px] font-medium shadow-none"
           title="Sort the spatial browser (storeys and their contents)"
         >
           <span className="flex items-center gap-1 min-w-0">

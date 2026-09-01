@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { PromoteToolDialog } from '@/components/extensions/PromoteToolDialog';
 import { Button } from '@/components/ui/button';
+import { ShortcutKbd } from '@/components/ui/kbd';
 import { toast } from '@/components/ui/toast';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
@@ -1786,9 +1787,9 @@ export function ChatPanel({ onClose }: ChatPanelProps) {
               </TooltipContent>
             </Tooltip>
           ) : (
-            <span className="text-[10px] text-muted-foreground/40">Shift+Enter new line</span>
+            <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground/40"><ShortcutKbd shortcut="Shift+Enter" /> new line</span>
           )}
-          <span className="text-[10px] text-muted-foreground/30">⌘L</span>
+          <ShortcutKbd shortcut="⌘L" className="text-muted-foreground/30" />
         </div>
       </div>
 

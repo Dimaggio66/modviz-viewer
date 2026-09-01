@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { TreeNode } from './types';
 import { isSpatialContainer } from './types';
@@ -49,6 +50,8 @@ export interface HierarchyNodeProps {
   onModelHeaderClick: (modelId: string, nodeId: string, hasChildren: boolean) => void;
   sourceBacked?: boolean;
   sourceSyncing?: boolean;
+  /** The parent already communicates the IFC class, so child rows can stay clean. */
+  compactMetadata?: boolean;
 }
 
 export function HierarchyNode({
@@ -68,6 +71,7 @@ export function HierarchyNode({
   onModelHeaderClick,
   sourceBacked = false,
   sourceSyncing = false,
+  compactMetadata = false,
 }: HierarchyNodeProps) {
   const resolvedType = node.ifcType || node.type;
   // Use Lucide icon for non-IFC structural nodes, Material Symbols for IFC classes
@@ -86,8 +90,8 @@ export function HierarchyNode({
     node.type === 'material-group' ||
     node.type === 'group'
       ? 'font-medium text-zinc-900 dark:text-zinc-100'
-      : 'text-zinc-700 dark:text-zinc-300';
-  const strikeWhenHidden = nodeHidden && 'line-through decoration-zinc-400 dark:decoration-zinc-600';
+      : 'text-muted-foreground';
+  const strikeWhenHidden = nodeHidden && 'line-through decoration-muted-foreground/60';
 
   // Model header nodes (for visibility control and expansion)
   if (node.type === 'model-header' && node.id.startsWith('model-')) {
@@ -106,9 +110,8 @@ export function HierarchyNode({
       >
         <div
           className={cn(
-            'flex items-center gap-1 px-2 py-1.5 border-l-4 transition-all group',
-            'hover:bg-zinc-50 dark:hover:bg-zinc-900',
-            'border-transparent',
+            'mx-1 mt-0.5 flex h-[calc(100%-0.25rem)] items-center gap-1 rounded-lg border border-transparent px-2 py-1.5 transition-colors group',
+            'hover:bg-accent/70',
             !modelVisible && 'opacity-50',
             node.hasChildren && 'cursor-pointer'
           )}
@@ -133,9 +136,9 @@ export function HierarchyNode({
           </span>
 
           {node.elementCount !== undefined && (
-            <span className="text-[10px] font-mono bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-zinc-500 dark:text-zinc-400 rounded-none">
+            <Badge variant="secondary" className="h-5 rounded-md px-1.5 font-mono text-[10px] text-muted-foreground">
               {node.elementCount.toLocaleString()}
-            </span>
+            </Badge>
           )}
 
           <Tooltip>
@@ -229,23 +232,18 @@ export function HierarchyNode({
     >
       <div
         className={cn(
-          'flex items-center gap-1 px-2 py-1.5 border-l-4 transition-all group hierarchy-item',
+          'mx-1 mt-0.5 flex h-[calc(100%-0.25rem)] items-center gap-1 rounded-lg border border-transparent px-2 py-1.5 transition-colors group hierarchy-item',
           // No selection styling for spatial containers in multi-model mode
           isMultiModel && isSpatialContainer(node.type)
-            ? 'border-transparent cursor-default'
+            ? 'cursor-default'
             : cn(
                 'cursor-pointer',
-                isSelected ? 'border-l-primary font-medium selected' : 'border-transparent'
+                isSelected ? 'border-primary/30 bg-primary/10 font-medium text-foreground shadow-sm selected' : 'hover:bg-accent/70'
               ),
           nodeHidden && 'opacity-50 grayscale'
         )}
         style={{
-          paddingLeft: `${node.depth * 16 + 8}px`,
-          // No selection highlighting for spatial containers in multi-model mode
-          backgroundColor: isSelected && !(isMultiModel && isSpatialContainer(node.type))
-            ? 'var(--hierarchy-selected-bg)' : undefined,
-          color: isSelected && !(isMultiModel && isSpatialContainer(node.type))
-            ? 'var(--hierarchy-selected-text)' : undefined,
+          paddingLeft: `${node.depth * 14 + 8}px`,
         }}
         onClick={(e) => {
           if ((e.target as HTMLElement).closest('button') === null) {
@@ -267,7 +265,7 @@ export function HierarchyNode({
             }}
             aria-label={node.isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
             aria-expanded={node.isExpanded}
-            className="p-0.5 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-none mr-1"
+            className="mr-1 rounded-md p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             <ChevronRight
               className={cn(
@@ -291,14 +289,14 @@ export function HierarchyNode({
                 }}
                 aria-label={node.isVisible ? `Hide ${node.name}` : `Show ${node.name}`}
                 className={cn(
-                  'p-0.5 opacity-0 group-hover:opacity-100 transition-opacity mr-1',
+                  'mr-1 rounded-md p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100',
                   nodeHidden && 'opacity-100'
                 )}
               >
                 {node.isVisible ? (
-                  <Eye className="h-3 w-3 text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100" />
+                  <Eye className="h-3 w-3" />
                 ) : (
-                  <EyeOff className="h-3 w-3 text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100" />
+                  <EyeOff className="h-3 w-3" />
                 )}
               </button>
             </TooltipTrigger>
@@ -314,10 +312,10 @@ export function HierarchyNode({
         <Tooltip>
           <TooltipTrigger asChild>
             {LucideIcon ? (
-              <LucideIcon className="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400" />
+              <LucideIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             ) : (
               <span
-                className="material-symbols-outlined shrink-0 leading-none text-zinc-500 dark:text-zinc-400"
+                className="material-symbols-outlined shrink-0 leading-none text-muted-foreground"
                 style={{ fontSize: '14px' }}
                 aria-hidden="true"
               >
@@ -340,7 +338,7 @@ export function HierarchyNode({
             <span className={cn('shrink-0 max-w-[55%] truncate', primaryNameClass, strikeWhenHidden)}>
               {node.name}
             </span>
-            <span className={cn('truncate min-w-0 ml-1.5 font-normal text-zinc-400 dark:text-zinc-500', strikeWhenHidden)}>
+            <span className={cn('truncate min-w-0 ml-1.5 font-normal text-muted-foreground', strikeWhenHidden)}>
               {node.secondaryName}
             </span>
           </span>
@@ -350,8 +348,8 @@ export function HierarchyNode({
           </span>
         )}
 
-        {node.ifcType && (node.type === 'element' || node.type === 'group-member') && (
-          <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500 truncate max-w-[90px]">
+        {!compactMetadata && node.ifcType && (node.type === 'element' || node.type === 'group-member') && (
+          <span className="max-w-[90px] truncate font-mono text-[10px] text-muted-foreground">
             {node.ifcType}
           </span>
         )}
@@ -360,9 +358,9 @@ export function HierarchyNode({
         {node.storeyElevation !== undefined && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="text-[10px] font-mono bg-emerald-100 dark:bg-emerald-950 px-1.5 py-0.5 border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 rounded-none">
+              <Badge className="h-5 rounded-md border-emerald-200 bg-emerald-50 px-1.5 font-mono text-[10px] text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
                 {node.storeyElevation >= 0 ? '+' : ''}{node.storeyElevation.toFixed(2)}m
-              </span>
+              </Badge>
             </TooltipTrigger>
             <TooltipContent>
               <p className="text-xs">Elevation: {node.storeyElevation >= 0 ? '+' : ''}{node.storeyElevation.toFixed(2)}m</p>
@@ -374,9 +372,9 @@ export function HierarchyNode({
         {node.elementCount !== undefined && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="text-[10px] font-mono bg-zinc-100 dark:bg-zinc-950 px-1.5 py-0.5 border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 rounded-none">
+              <Badge variant="secondary" className="h-5 rounded-md px-1.5 font-mono text-[10px] text-muted-foreground">
                 {node.elementCount.toLocaleString()}
-              </span>
+              </Badge>
             </TooltipTrigger>
             <TooltipContent>
               <p className="text-xs">{node.elementCount.toLocaleString()} {node.elementCount === 1 ? 'element' : 'elements'}</p>

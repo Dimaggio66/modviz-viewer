@@ -8,6 +8,8 @@
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Badge } from '@/components/ui/badge';
+import { ChevronRight } from 'lucide-react';
 import type { QuantitySet } from './encodingUtils';
 import type { ProjectUnits } from '@ifc-lite/parser';
 import { resolveQuantityDisplay, formatConverted } from '@/lib/units/display';
@@ -39,25 +41,26 @@ export function QuantitySetCard({ qset, projectUnits, unitDisplayOverrides }: Qu
   };
 
   return (
-    <Collapsible defaultOpen className="border-2 border-blue-200 dark:border-blue-800 bg-blue-50/20 dark:bg-blue-950/20 w-full max-w-full overflow-hidden">
-      <CollapsibleTrigger className="flex items-center gap-2 w-full p-2.5 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-left transition-colors overflow-hidden">
-        <span className="font-bold text-xs text-blue-700 dark:text-blue-400 truncate flex-1 min-w-0">{qset.name}</span>
-        <span className="text-[10px] font-mono bg-blue-100 dark:bg-blue-900/50 px-1.5 py-0.5 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 shrink-0">{qset.quantities.length}</span>
+    <Collapsible defaultOpen className="w-full max-w-full overflow-hidden rounded-xl border border-blue-200/70 bg-blue-50/25 shadow-sm dark:border-blue-800/55 dark:bg-blue-950/15">
+      <CollapsibleTrigger className="group flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-blue-500/5 overflow-hidden">
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{qset.name}</span>
+        <Badge variant="outline" className="border-blue-200/80 bg-blue-50/50 font-mono text-[10px] text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/50 dark:text-blue-300">{qset.quantities.length}</Badge>
+        <ChevronRight className="size-3.5 shrink-0 text-blue-600/70 transition-transform group-data-[state=open]:rotate-90 dark:text-blue-400/70" />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="border-t-2 border-blue-200 dark:border-blue-800 divide-y divide-blue-100 dark:divide-blue-900/30">
+        <div className="divide-y divide-blue-200/55 border-t border-blue-200/70 bg-blue-50/15 dark:divide-blue-900/35 dark:border-blue-800/55 dark:bg-blue-950/10">
           {qset.quantities.map((q: { name: string; value: number; type: number }, index: number) => {
             // Names render VERBATIM: the parse path already decoded them
             // (see the note on `parsePropertyValue`), and decoding a second
             // time collapses `\\` twice.
             const typeName = QUANTITY_TYPE_NAMES[q.type];
             return (
-              <div key={`${q.name}-${index}`} className="flex flex-col gap-0.5 px-3 py-2 text-xs hover:bg-blue-50/50 dark:hover:bg-blue-900/20">
+              <div key={`${q.name}-${index}`} className="flex flex-col gap-0.5 px-3 py-2 text-xs transition-colors hover:bg-blue-500/5">
                 {/* Quantity name with type tooltip */}
                 {typeName ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <span className="text-zinc-500 dark:text-zinc-400 font-medium cursor-help break-words">
+                      <span className="text-muted-foreground font-medium cursor-help break-words">
                         {q.name}
                       </span>
                     </TooltipTrigger>
@@ -68,7 +71,7 @@ export function QuantitySetCard({ qset, projectUnits, unitDisplayOverrides }: Qu
                     </TooltipContent>
                   </Tooltip>
                 ) : (
-                  <span className="text-zinc-500 dark:text-zinc-400 font-medium break-words">
+                  <span className="text-muted-foreground font-medium break-words">
                     {q.name}
                   </span>
                 )}

@@ -18,6 +18,7 @@ function GithubIcon({ className }: { className?: string }) {
   );
 }
 import { Button } from '@/components/ui/button';
+import { Kbd, ShortcutKbd } from '@/components/ui/kbd';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { KEYBOARD_SHORTCUTS } from '@/hooks/useKeyboardShortcuts';
 import { LearnTab } from '@/components/tours/LearnTab';
@@ -84,7 +85,7 @@ function PrivacyBanner() {
             {' '}&ndash; no server upload, near-native speed.
           </p>
           <p className="text-[11px] italic">
-            Verify: press <kbd className="px-1 py-0.5 bg-muted rounded border font-mono text-[10px]">F12</kbd> &rarr; Network tab &rarr; no IFC data transmitted.
+            Verify: press <Kbd>F12</Kbd> &rarr; Network tab &rarr; no IFC data transmitted.
           </p>
         </div>
       )}
@@ -420,9 +421,7 @@ function ShortcutsTab() {
                 className="flex items-center justify-between py-1"
               >
                 <span className="text-sm">{shortcut.description}</span>
-                <kbd className="px-2 py-0.5 text-xs bg-muted rounded border font-mono">
-                  {shortcut.key}
-                </kbd>
+                <ShortcutKbd shortcut={shortcut.key} keyClassName="text-xs" />
               </div>
             ))}
           </div>
@@ -517,9 +516,7 @@ export function KeyboardShortcutsDialog({ open, onClose, initialTab }: InfoDialo
         <div className="p-4 border-t text-center">
           <span className="text-xs text-muted-foreground">
             Press{' '}
-            <kbd className="px-1 py-0.5 bg-muted rounded border font-mono text-xs">
-              ?
-            </kbd>{' '}
+            <Kbd className="text-xs">?</Kbd>{' '}
             to toggle this panel
           </span>
         </div>

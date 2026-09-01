@@ -35,7 +35,7 @@ import { GanttPanel } from './schedule/GanttPanel';
 import { CommandPalette } from './CommandPalette';
 import { SearchModal } from './SearchModal';
 import { TourHost } from '@/components/tours/TourHost';
-import { SidebarDock, SIDEBAR_ACTIVITY_BAR_WIDTH } from './sidebar/SidebarDock';
+import { SidebarDock } from './sidebar/SidebarDock';
 import { FloatingPanelHost } from './dock/FloatingPanelHost';
 import { PanelWindowHost } from './dock/PanelWindowHost';
 import {
@@ -245,6 +245,7 @@ export function ViewerLayout() {
   // Location zones or the collab Room on a phone showed the Properties panel
   // titled "Properties" — the wrong panel, not merely a wrong label.
   const sidebarActivePanel = useViewerStore((s) => s.sidebarActivePanel);
+  const sidebarSecondaryPanel = useViewerStore((s) => s.sidebarSecondaryPanel);
   const { closePanel } = usePanelControls();
   const analysisExtensionState = useSyncExternalStore(
     subscribeAnalysisExtensions,
@@ -259,6 +260,21 @@ export function ViewerLayout() {
     ? activeAnalysisExtension
     : null;
 
+  // A detached Information panel previously left its full dock width behind as
+  // an empty placeholder. Resolve the same fallback as SidebarPanelHost and
+  // reserve the wide dock only when it can actually render content.
+  let dockedSidebarPanel: typeof sidebarActivePanel | null = sidebarActivePanel;
+  if (detachedIds.has(dockedSidebarPanel)) dockedSidebarPanel = 'properties';
+  if (dockedSidebarPanel === 'properties' && detachedIds.has('properties')) {
+    dockedSidebarPanel = null;
+  }
+  const sidebarPaneExpanded = sidebarMode === 'expanded' && (
+    activeRightAnalysisExtension !== null ||
+    activeTool === 'addElement' ||
+    dockedSidebarPanel !== null ||
+    (sidebarSecondaryPanel !== null && !detachedIds.has(sidebarSecondaryPanel))
+  );
+
   const mobileSheet = useMemo(() => resolveMobileSheet({
     hasAnalysisExtension: activeAnalysisExtension !== null && activeAnalysisExtension !== undefined,
     activeTool,
@@ -268,12 +284,10 @@ export function ViewerLayout() {
     sidebarActivePanel,
   }), [activeAnalysisExtension, activeTool, ganttPanelVisible, scriptPanelVisible, listPanelVisible, sidebarActivePanel]);
 
-  // Panel refs for programmatic collapse/expand (command palette, keyboard shortcuts).
-  // The right region is now the unified sidebar (#1208), which owns its own
-  // collapse/hide state in `sidebarSlice`; only the left hierarchy pane is a
-  // react-resizable Panel here.
+  // The hierarchy and the inspector are independent resizable panels. The
+  // activity rail sits outside this group, so it remains fixed to the far
+  // right while only the Inspector width changes.
   const leftPanelRef = useRef<PanelImperativeHandle>(null);
-  const sidebarPanelRef = useRef<PanelImperativeHandle>(null);
   const desktopPanelGroupRef = useRef<HTMLDivElement>(null);
   const [desktopPanelGroupWidth, setDesktopPanelGroupWidth] = useState(0);
 
@@ -287,35 +301,19 @@ export function ViewerLayout() {
     return () => observer.disconnect();
   }, []);
 
-  // `sidebarWidthPct` stores only the docked content width. The activity rail
-  // is always 48px, so translate the persisted content width into the total
-  // ResizablePanel width whenever the viewport or mode changes.
-  useEffect(() => {
-    const panel = sidebarPanelRef.current;
-    if (!panel || desktopPanelGroupWidth <= 0) return;
-    const contentWidth = (desktopPanelGroupWidth * sidebarWidthPct) / 100;
-    panel.resize(
-      sidebarMode === 'expanded'
-        ? contentWidth + SIDEBAR_ACTIVITY_BAR_WIDTH
-        : SIDEBAR_ACTIVITY_BAR_WIDTH,
-    );
-  }, [desktopPanelGroupWidth, sidebarMode, sidebarWidthPct]);
-
-  const sidebarMinSize = sidebarMode === 'expanded' && desktopPanelGroupWidth > 0
-    ? (desktopPanelGroupWidth * SIDEBAR_MIN_WIDTH_PCT) / 100 + SIDEBAR_ACTIVITY_BAR_WIDTH
-    : SIDEBAR_ACTIVITY_BAR_WIDTH;
-  const sidebarMaxSize = sidebarMode === 'expanded' && desktopPanelGroupWidth > 0
-    ? (desktopPanelGroupWidth * SIDEBAR_MAX_WIDTH_PCT) / 100 + SIDEBAR_ACTIVITY_BAR_WIDTH
-    : undefined;
-
+  // `sidebarWidthPct` stores the Inspector content width; the fixed activity
+  // rail is intentionally excluded from this value.
+  const sidebarMinContentWidth = desktopPanelGroupWidth > 0
+    ? (desktopPanelGroupWidth * SIDEBAR_MIN_WIDTH_PCT) / 100
+    : 260;
+  const sidebarMaxContentWidth = desktopPanelGroupWidth > 0
+    ? (desktopPanelGroupWidth * SIDEBAR_MAX_WIDTH_PCT) / 100
+    : 640;
   const handleDesktopLayoutChanged = useCallback((layout: Record<string, number>, meta: { isUserInteraction: boolean }) => {
-    if (!meta.isUserInteraction || sidebarMode !== 'expanded' || desktopPanelGroupWidth <= 0) return;
-    const sidebarSizePct = layout['workspace-sidebar'];
-    if (!Number.isFinite(sidebarSizePct)) return;
-    const contentWidthPct = sidebarSizePct
-      - (SIDEBAR_ACTIVITY_BAR_WIDTH / desktopPanelGroupWidth) * 100;
-    setSidebarWidthPct(contentWidthPct);
-  }, [desktopPanelGroupWidth, setSidebarWidthPct, sidebarMode]);
+    if (!meta.isUserInteraction || !sidebarPaneExpanded) return;
+    const inspectorWidthPct = layout['workspace-sidebar'];
+    if (Number.isFinite(inspectorWidthPct)) setSidebarWidthPct(inspectorWidthPct);
+  }, [setSidebarWidthPct, sidebarPaneExpanded]);
 
   // Sync store state → left Panel collapse/expand on desktop
   useEffect(() => {
@@ -449,15 +447,19 @@ export function ViewerLayout() {
           <div ref={containerRef} className="viewer-workspace flex-1 min-h-0 flex flex-col relative">
             {/* Top: hierarchy | viewport split, with the unified sidebar (#1208)
                 pinned to the right edge (its own activity bar + docked pane). */}
-            <div className="viewer-desktop-panels flex-1 min-h-0">
+            <div className="viewer-desktop-panels flex-1 min-h-0 flex">
               <ResizablePanelGroup
                 orientation="horizontal"
-                className="viewer-panel-group h-full"
+                className="viewer-panel-group viewer-workspace-split h-full min-w-0 flex-1"
                 elementRef={desktopPanelGroupRef}
                 onLayoutChanged={handleDesktopLayoutChanged}
               >
-              <ResizablePanel id="main-content" defaultSize="78%" minSize="30%">
-                <ResizablePanelGroup orientation="horizontal" className="viewer-panel-group h-full">
+                <ResizablePanel
+                  id="main-content"
+                  defaultSize={sidebarPaneExpanded ? `${100 - sidebarWidthPct}%` : '100%'}
+                  minSize="30%"
+                >
+                  <ResizablePanelGroup orientation="horizontal" className="viewer-panel-group viewer-hierarchy-split h-full">
                   {/* Left Panel - Hierarchy */}
                   <ResizablePanel
                     id="left-panel"
@@ -483,7 +485,7 @@ export function ViewerLayout() {
 
                     <ResizableHandle
                       aria-label="Resize hierarchy sidebar"
-                      className="viewer-resize-handle cursor-col-resize"
+                      className="viewer-resize-handle viewer-hierarchy-resize-handle cursor-col-resize"
                       withHandle
                     />
 
@@ -497,28 +499,34 @@ export function ViewerLayout() {
                       <ViewportContainer />
                     </div>
                   </ResizablePanel>
-                </ResizablePanelGroup>
-              </ResizablePanel>
+                  </ResizablePanelGroup>
+                </ResizablePanel>
 
-              {sidebarMode === 'expanded' && (
-                  <ResizableHandle
-                    aria-label="Resize workspace sidebar"
-                    className="viewer-resize-handle cursor-col-resize"
-                    withHandle
-                  />
-              )}
-
-              {/* Unified workspace sidebar: activity bar + docked panel host. */}
-              <ResizablePanel
-                id="workspace-sidebar"
-                defaultSize={`${sidebarWidthPct}%`}
-                minSize={sidebarMinSize}
-                maxSize={sidebarMaxSize}
-                panelRef={sidebarPanelRef}
-              >
-                <SidebarDock />
-              </ResizablePanel>
+                {sidebarPaneExpanded && (
+                  <>
+                    <ResizableHandle
+                      aria-label="Resize inspector"
+                      className="viewer-resize-handle viewer-inspector-resize-handle cursor-col-resize"
+                      withHandle
+                    />
+                    <ResizablePanel
+                      id="workspace-sidebar"
+                      defaultSize={`${sidebarWidthPct}%`}
+                      minSize={sidebarMinContentWidth}
+                      maxSize={sidebarMaxContentWidth}
+                    >
+                      <SidebarDock withActivityBar={false} />
+                    </ResizablePanel>
+                  </>
+                )}
               </ResizablePanelGroup>
+
+              {/* The activity rail always occupies the far-right edge. It is
+                  deliberately outside the resizable group, so it cannot be
+                  dragged into the viewport or leave unused space behind. */}
+              <div className="viewer-fixed-activity-rail h-full w-12 shrink-0">
+                <SidebarDock railOnly />
+              </div>
             </div>
 
             {/* Bottom Panel - Lists / Script / Gantt / analysis ext (custom resizable).

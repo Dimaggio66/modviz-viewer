@@ -6,6 +6,7 @@ import { useMemo, useRef, useState, useCallback, useEffect, useSyncExternalStore
 import { useLevelDisplayEffect } from '@/hooks/useLevelDisplayEffect';
 import { ingestDxfFiles, splitDxfFiles } from '@/hooks/ingest/dxfIngest';
 import { Viewport } from './Viewport';
+import { SearchInline } from './SearchInline';
 import {
   initialDragOverlayState,
   reduceDragOverlay,
@@ -88,6 +89,18 @@ function unionBounds(acc: Vec3Bounds | undefined, b: Vec3Bounds | undefined): Ve
     min: { x: Math.min(acc.min.x, b.min.x), y: Math.min(acc.min.y, b.min.y), z: Math.min(acc.min.z, b.min.z) },
     max: { x: Math.max(acc.max.x, b.max.x), y: Math.max(acc.max.y, b.max.y), z: Math.max(acc.max.z, b.max.z) },
   };
+}
+
+/** Shared by the empty state and the live canvas so entity search never
+ * returns to the ribbon while the viewer changes state. */
+function CanvasSearch() {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-3 z-40 flex justify-center px-4">
+      <div className="pointer-events-auto w-full max-w-[23rem]">
+        <SearchInline variant="command" />
+      </div>
+    </div>
+  );
 }
 
 export function ViewportContainer() {
@@ -1053,20 +1066,21 @@ export function ViewportContainer() {
   // Grid Pattern
   const GridPattern = () => (
     <>
-      {/* Light mode grid - subtle gray */}
+      {/* Light mode grid — intentionally quieter than a panel border, so it
+          establishes scale without competing with the model or empty state. */}
       <div 
-        className="absolute inset-0 z-0 pointer-events-none opacity-[0.06] dark:hidden"
+        className="absolute inset-0 z-0 pointer-events-none opacity-[0.035] dark:hidden"
         style={{
-          backgroundImage: `linear-gradient(#3b4261 1px, transparent 1px), linear-gradient(90deg, #3b4261 1px, transparent 1px)`,
+          backgroundImage: `linear-gradient(#94a3b8 1px, transparent 1px), linear-gradient(90deg, #94a3b8 1px, transparent 1px)`,
           backgroundSize: '32px 32px',
           backgroundPosition: '-1px -1px'
         }}
       />
-      {/* Dark mode grid - subtle blue/cyan tint */}
+      {/* Dark mode grid */}
       <div 
-        className="absolute inset-0 z-0 pointer-events-none opacity-[0.12] hidden dark:block"
+        className="absolute inset-0 z-0 pointer-events-none opacity-[0.06] hidden dark:block"
         style={{
-          backgroundImage: `linear-gradient(#3b4261 1px, transparent 1px), linear-gradient(90deg, #3b4261 1px, transparent 1px)`,
+          backgroundImage: `linear-gradient(#64748b 1px, transparent 1px), linear-gradient(90deg, #64748b 1px, transparent 1px)`,
           backgroundSize: '32px 32px',
           backgroundPosition: '-1px -1px'
         }}
@@ -1087,6 +1101,7 @@ export function ViewportContainer() {
         onDrop={handleDrop}
       >
         <GridPattern />
+        <CanvasSearch />
 
         <input
           ref={fileInputRef}
@@ -1232,7 +1247,7 @@ export function ViewportContainer() {
           <div className="min-h-full w-full flex flex-col items-center justify-center">
 
           {/* Main Card */}
-          <div {...tourAnchor(TOUR_ANCHORS.emptyStateCard)} className="max-w-md w-full rounded-2xl border border-zinc-300 bg-white p-8 shadow-xl transition-transform duration-200 hover:-translate-y-1 dark:border-[#3b4261] dark:bg-[#16161e] flex flex-col items-center">
+          <div {...tourAnchor(TOUR_ANCHORS.emptyStateCard)} className="max-w-md w-full rounded-2xl border border-zinc-300 bg-white p-8 shadow-sm transition-[border-color,box-shadow] duration-200 hover:border-primary/40 hover:shadow-md dark:border-[#3b4261] dark:bg-[#16161e] flex flex-col items-center">
             
             {/* The supplied ModViz wordmark includes both the 3D mark and name. */}
             <div
@@ -1417,6 +1432,10 @@ export function ViewportContainer() {
         releaseGeometryAfterStream={false}
         onGeometryReleased={releaseGeometryMemory}
       />
+      {/* Entity search floats inside the 3D workspace. Its outer wrapper
+          stays click-through, so only the actual controls interrupt canvas
+          navigation and picking. */}
+      <CanvasSearch />
       <AnnotationLayer />
       <CollabPresenceLayer />
       {bcfOverlayVisible && <BCFOverlay />}
