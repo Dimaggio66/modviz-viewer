@@ -403,4 +403,3 @@ export function useAnimationLoop(params: UseAnimationLoopParams): void {
   }, [isInitialized]);
 }
 
-export default useAnimationLoop;

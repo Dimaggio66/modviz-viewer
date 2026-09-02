@@ -131,4 +131,3 @@ export function ScanSectionPanel({
   );
 }
 
-export default ScanSectionPanel;

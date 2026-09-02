@@ -216,4 +216,3 @@ export function useSpaceMouseControls(params: UseSpaceMouseControlsParams): void
   }, [isInitialized]);
 }
 
-export default useSpaceMouseControls;

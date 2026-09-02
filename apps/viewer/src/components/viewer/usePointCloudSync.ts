@@ -121,4 +121,3 @@ export function usePointCloudSync(params: UsePointCloudSyncParams): void {
   }, [edlEnabled, edlStrength, isInitialized, rendererRef]);
 }
 
-export default usePointCloudSync;

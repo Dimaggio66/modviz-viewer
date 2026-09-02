@@ -678,4 +678,3 @@ export function useIfcFederation(
   };
 }
 
-export default useIfcFederation;

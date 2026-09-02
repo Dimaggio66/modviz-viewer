@@ -967,4 +967,3 @@ function userMovedCamera(
   );
 }
 
-export default useGeometryStreaming;

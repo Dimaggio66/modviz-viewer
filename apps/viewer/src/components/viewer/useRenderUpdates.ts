@@ -162,4 +162,3 @@ export function useRenderUpdates(params: UseRenderUpdatesParams): void {
   }, [hiddenEntities, isolatedEntities, ghostExceptEntities, selectedEntityId, selectedEntityIds, selectedModelIndex, isInitialized, sectionPlane, activeTool, sectionRange, coordinateInfo?.buildingRotation]);
 }
 
-export default useRenderUpdates;

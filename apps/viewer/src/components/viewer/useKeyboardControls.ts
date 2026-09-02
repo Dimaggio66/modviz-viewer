@@ -222,4 +222,3 @@ export function useKeyboardControls(params: UseKeyboardControlsParams): void {
   }, [isInitialized]);
 }
 
-export default useKeyboardControls;

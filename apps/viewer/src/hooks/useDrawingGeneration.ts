@@ -1033,4 +1033,3 @@ export function useDrawingGeneration({
   };
 }
 
-export default useDrawingGeneration;

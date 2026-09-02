@@ -347,4 +347,3 @@ export function useTouchControls(params: UseTouchControlsParams): void {
   }, [isInitialized]);
 }
 
-export default useTouchControls;

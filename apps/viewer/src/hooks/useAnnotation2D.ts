@@ -548,4 +548,3 @@ function nearestPointOnScreenSegment(
   return { dist: Math.sqrt((p.x - nx) ** 2 + (p.y - ny) ** 2) };
 }
 
-export default useAnnotation2D;

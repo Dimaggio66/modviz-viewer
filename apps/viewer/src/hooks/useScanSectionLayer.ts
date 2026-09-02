@@ -248,4 +248,3 @@ export function useScanSectionLayer(params: UseScanSectionLayerParams): UseScanS
   return useMemo(() => ({ ...selection, hasPointCloud }), [selection, hasPointCloud]);
 }
 
-export default useScanSectionLayer;

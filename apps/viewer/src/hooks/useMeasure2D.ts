@@ -361,4 +361,3 @@ export function useMeasure2D({
   };
 }
 
-export default useMeasure2D;

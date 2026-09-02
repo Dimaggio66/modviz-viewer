@@ -433,4 +433,3 @@ export function useIfcServer() {
   return { loadFromServer };
 }
 
-export default useIfcServer;

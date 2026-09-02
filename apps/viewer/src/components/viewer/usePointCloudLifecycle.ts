@@ -78,4 +78,3 @@ export function usePointCloudLifecycle(params: UsePointCloudLifecycleParams): vo
   }, [models, isInitialized, rendererRef, decCount, setClassCounts]);
 }
 
-export default usePointCloudLifecycle;

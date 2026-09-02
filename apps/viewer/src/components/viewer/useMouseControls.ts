@@ -943,4 +943,3 @@ export function useMouseControls(params: UseMouseControlsParams): void {
   }, [isInitialized]);
 }
 
-export default useMouseControls;

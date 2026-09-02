@@ -234,4 +234,3 @@ export function SectionCapControls(): React.JSX.Element {
   );
 }
 
-export default SectionCapControls;
