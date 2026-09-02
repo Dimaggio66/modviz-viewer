@@ -20,10 +20,12 @@
 import {
   extractPropertiesOnDemand,
   extractQuantitiesOnDemand,
+  extractTypePropertiesOnDemand,
   extractClassificationsOnDemand,
   extractMaterialsOnDemand,
   type IfcDataStore,
 } from '@ifc-lite/parser';
+import { RelationshipType } from '@ifc-lite/data';
 import { stringifyValue, materialNamesOf } from './filter-match.js';
 import { resolveEntityPredefinedType } from '../entity-predefined-type.js';
 
@@ -153,6 +155,37 @@ export function discoverPropertyAndQuantitySchema(
       for (const q of set.quantities) if (!bucket.has(q.name)) bucket.set(q.name, '');
     }
   };
+  // Type-inherited psets: the evaluator resolves a property against the
+  // element's IfcTypeObject-defined psets too (`getInheritedTypePsets` in
+  // filter-evaluate.ts), so a property that lives ONLY on the type must be
+  // suggestible — else the user can't discover a rule the engine would match.
+  // Resolve each entity's defining type once (cache by typeId): many instances
+  // share one type, so this stays O(distinct types) parses, per the AGENTS.md
+  // §2 large-loop rule. NAMES only; type QUANTITIES are not merged by the
+  // evaluator, so we don't discover them either (parity).
+  const seenTypeIds = new Set<number>();
+  const addTypePsets = (entityId: number) => {
+    const rels = store.relationships;
+    // Server/partial stores can carry a minimal relationships object without
+    // the graph API — nothing to inherit from there.
+    if (!rels || typeof rels.getRelated !== 'function') return;
+    const typeIds = rels.getRelated(entityId, RelationshipType.DefinesByType, 'inverse');
+    if (typeIds.length === 0) return;
+    const typeId = typeIds[0];
+    if (seenTypeIds.has(typeId)) return;
+    seenTypeIds.add(typeId);
+    // Source path resolves the type from the STEP buffer; the server/session
+    // path (no source) reads the type's own row from the PropertyTable — the
+    // same split filter-evaluate.ts's `getInheritedTypePsets` makes.
+    const sets = store.source && store.source.length > 0
+      ? extractTypePropertiesOnDemand(store, entityId)?.properties ?? []
+      : store.properties?.getForEntity?.(typeId) ?? [];
+    for (const set of sets) {
+      let bucket = psetMap.get(set.name);
+      if (!bucket) { bucket = new Set(); psetMap.set(set.name, bucket); }
+      for (const p of set.properties) bucket.add(p.name);
+    }
+  };
 
   // Type-scoped pass: read each selected type's entities directly. Bounded so a
   // huge type can't stall - psets are uniform across instances, so a sample
@@ -161,7 +194,7 @@ export function discoverPropertyAndQuantitySchema(
     ? collectTypeScopedIds(store, typeFilter, TYPE_SCOPED_CAP)
     : null;
   if (scopedIds) {
-    for (const id of scopedIds) { addPsets(id); addQtos(id); }
+    for (const id of scopedIds) { addPsets(id); addQtos(id); addTypePsets(id); }
     return finalizePsetQto(psetMap, qtoMap);
   }
 
@@ -205,8 +238,28 @@ export function discoverPropertyAndQuantitySchema(
     }
   }
 
+  // Type-pset discovery across the whole model — a bounded stride over the
+  // entity column, independent of the on-demand maps so it also covers
+  // type-ONLY instances (no own psets) on every load path. `addTypePsets`
+  // dedupes by typeId, so the actual parse cost is O(distinct types); the
+  // cap only bounds the cheap `getRelated` probe on pathological models.
+  if (store.relationships && typeof store.relationships.getRelated === 'function') {
+    const col = store.entities.expressId;
+    for (let i = 0, seen = 0; i < col.length && seen < TYPE_DISCOVERY_CAP; i++) {
+      const entityId = col[i];
+      if (!entityId) continue;
+      seen++;
+      addTypePsets(entityId);
+    }
+  }
+
   return finalizePsetQto(psetMap, qtoMap);
 }
+
+/** Entities probed per whole-model type-pset discovery pass. Distinct types are
+ *  few and shared across many instances, so a bounded stride still captures
+ *  every type's psets while keeping the pass O(cap) on huge models. */
+const TYPE_DISCOVERY_CAP = 100_000;
 
 /** Entities scanned per type-scoped discovery pass. Psets are uniform across a
  *  type's instances, so a bounded sample captures the full set cheaply. */

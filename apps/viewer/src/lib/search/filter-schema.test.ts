@@ -15,6 +15,7 @@ import {
 } from '@ifc-lite/data';
 import type { SpatialHierarchy } from '@ifc-lite/data';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import { IfcParser } from '@ifc-lite/parser';
 import { discoverFilterSchema, discoverPropertyAndQuantitySchema } from './filter-schema.js';
 
 interface EntityRow {
@@ -254,6 +255,52 @@ describe('discoverPropertyAndQuantitySchema — fallback pass via PropertyTable'
     assert.deepStrictEqual(
       scoped.psets.map(([n]) => n).sort(),
       ['Pset_CoveringCommon', 'Pset_Tiling'],
+    );
+  });
+});
+
+describe('discoverPropertyAndQuantitySchema — TYPE-inherited psets', () => {
+  // A wall whose IfcWallType carries a pset the instance itself does NOT.
+  // The evaluator already resolves this at Run time (getInheritedTypePsets in
+  // filter-evaluate.ts, filter-evaluate-type-psets.test.ts); discovery must
+  // surface it too, else the property is un-suggestible. Parsed through the
+  // WASM-less columnar parser so the source-backed extractor path runs.
+  const FIXTURE = `ISO-10303-21;
+HEADER;
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('Proj0000000000000000001',$,'P',$,$,$,$,$,$);
+#100=IFCWALL('Wall00000000000000001A',$,'Wall-A',$,$,$,$,$,.SOLIDWALL.);
+#200=IFCWALLTYPE('Type00000000000000001A',$,'WT-Std',$,$,(#210),$,$,$,.STANDARD.);
+#210=IFCPROPERTYSET('Pset00000000000000001A',$,'Pset_TypeOnly',$,(#211));
+#211=IFCPROPERTYSINGLEVALUE('TypeProp',$,IFCLABEL('X'),$);
+#230=IFCRELDEFINESBYTYPE('Rdbt00000000000000001A',$,$,$,(#100),#200);
+ENDSEC;
+END-ISO-10303-21;
+`;
+
+  async function buildParsedStore(): Promise<IfcDataStore> {
+    const bytes = new TextEncoder().encode(FIXTURE);
+    return new IfcParser().parseColumnar(bytes.buffer as ArrayBuffer, {
+      disableWorkerScan: true,
+    }) as unknown as Promise<IfcDataStore>;
+  }
+
+  it('surfaces a pset that exists ONLY on the element type', async () => {
+    const store = await buildParsedStore();
+    const { psets } = discoverPropertyAndQuantitySchema(store);
+    const typeOnly = psets.find(([set]) => set === 'Pset_TypeOnly');
+    assert.ok(typeOnly, 'expected the type-only pset to be discovered');
+    assert.deepStrictEqual(typeOnly[1], ['TypeProp']);
+  });
+
+  it('surfaces the same pset when discovery is scoped to the instance IFC type', async () => {
+    const store = await buildParsedStore();
+    const { psets } = discoverPropertyAndQuantitySchema(store, ['IfcWall']);
+    assert.ok(
+      psets.some(([set]) => set === 'Pset_TypeOnly'),
+      'type-only pset should also surface under a type-scoped pass',
     );
   });
 });
