@@ -6,31 +6,34 @@
  * ObjectFilterPanel — RIBiTWO-style "Objektfilter" docked in the left slot
  * (replaces the object tree there, ViewerLayout).
  *
- * A flat, searchable list of every filterable attribute of the active model:
- *  - the IFC-level parameters (ifc*), visible among the attributes like
- *    RIBiTWO, and
- *  - every property (occurrence + type-inherited) discovered from the model.
+ * A flat, searchable, virtualized list of every attribute of the active model
+ * — the IFC-level parameters (ifc*) and every property (occurrence +
+ * type-inherited). EVERY value cell is a typeable `ComboInput`: pick a value
+ * or type freely; a `*` anywhere means a substring match (RIBiTWO's `*AW*` →
+ * "contains"), no `*` matches exactly.
  *
- * Each value cell is a typeable dropdown (`ComboInput`): pick a real value or
- * type a pattern. A `*` anywhere makes it a substring match (RIBiTWO's `*AW*`
- * → "contains AW"); no `*` matches exactly. Selections AND-combine into filter
- * rules and isolate the matching objects in 3D through the same
- * `isolateEntities` channel the Filter tab / hierarchy use; the isolate is
- * debounced so typing doesn't thrash the evaluator.
+ * Two match paths, intersected (AND) and debounced:
+ *  - set dimensions (ifcType / ifcBuildingStoreyName / ifcPredefinedType) and
+ *    properties run through the filter engine (`evaluateFilterRulesFederated`);
+ *  - the other ifc parameters (ifcName / ifcGuid / ifcObjectType / ifcTag /
+ *    ifcID) match client-side via the store's cached column getters — no
+ *    per-entity source re-parse (AGENTS.md §Models).
+ * The matched objects isolate in 3D via the shared `isolateEntities` channel.
  *
- * ifcType / ifcBuildingStoreyName / ifcPredefinedType filter live; ifcType
- * values render without the "Ifc" prefix (canonical value kept for matching).
- * The remaining ifc parameters (Name / Guid / Tag / ObjectType …) are listed
- * but not yet filterable — they need a filter-engine attribute rule that does
- * not exist yet, a separate follow-up. Attribute names render verbatim (German
- * from the model); the UI chrome stays English.
+ * ifcType values render without the "Ifc" prefix (canonical value kept for
+ * matching). A few ifc parameters (elevations, overall size, ref lat/long,
+ * fillings, layer assignment, long/type-object name) have no cheap accessor
+ * yet — their fields are present and typeable but inert until wired (a small
+ * per-parameter follow-up). Attribute names render verbatim (German from the
+ * model); the UI chrome stays English.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import type { IfcDataStore } from '@ifc-lite/parser';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { ComboInput } from '@/components/ui/combo-input';
 import { cn } from '@/lib/utils';
 import { useViewerStore } from '@/store';
@@ -45,53 +48,59 @@ import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
-/** Debounce for the isolate run — long enough that typing a value doesn't fire
- *  a filter per keystroke, short enough to feel immediate on pick. */
 const ISOLATE_DEBOUNCE_MS = 250;
 
-/** Parse a value-cell entry. A `*` anywhere → substring match ("contains");
- *  otherwise an exact match. (ValueOp has no startsWith/endsWith, so every
- *  wildcard collapses to contains — enough for RIBiTWO's `*AW*`.) */
+/** A `*` anywhere → substring ("contains"); otherwise an exact match. */
 function parsePattern(input: string): { wildcard: boolean; term: string } {
   const raw = input.trim();
   const wildcard = raw.includes('*');
   return { wildcard, term: wildcard ? raw.replace(/\*/g, '') : raw };
 }
 
-interface Option {
-  /** Value the filter rule matches against (canonical). */
-  value: string;
-  /** What the dropdown shows (e.g. ifcType: "WALL" for value "IfcWall"). */
-  label: string;
+function matches(value: string, wildcard: boolean, term: string): boolean {
+  const v = value.toLowerCase();
+  const t = term.toLowerCase();
+  return wildcard ? v.includes(t) : v === t;
 }
+
+/** Cached-column accessor for a per-object ifc attribute (no source re-parse). */
+type Accessor = (store: IfcDataStore, id: number) => string;
+
+/** ifc parameters matched client-side via cheap cached getters. */
+const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
+  { label: 'ifcName', accessor: (s, id) => s.entities.getName(id) ?? '' },
+  { label: 'ifcGuid', accessor: (s, id) => s.entities.getGlobalId(id) ?? '' },
+  { label: 'ifcObjectType', accessor: (s, id) => s.entities.getObjectType?.(id) ?? '' },
+  { label: 'ifcTag', accessor: (s, id) => s.entities.getTag?.(id) ?? '' },
+  { label: 'ifcID', accessor: (_s, id) => String(id) },
+];
+
+/** ifc parameters listed for completeness but not yet filterable (need a
+ *  bespoke accessor). Typeable, but contribute no match — a small follow-up. */
+const INERT_IFC_PARAMS: readonly string[] = [
+  'ifcElevation', 'ifcHasFilling', 'ifcIsFilling', 'ifcIsGeometry', 'ifcLongName',
+  'ifcOverallHeight', 'ifcOverallWidth', 'ifcPresentationLayerAssignment',
+  'ifcRefLatitude', 'ifcRefLongitude', 'ifcStoreyElevation', 'ifcTypeObjectName',
+];
+
+interface Option { value: string; label: string }
 
 type Row =
   | { id: string; kind: 'ifcType' | 'storey' | 'predefinedType'; label: string; options: readonly Option[] }
   | { id: string; kind: 'property'; label: string; setName: string; propName: string; options: readonly Option[] }
-  | { id: string; kind: 'unsupported'; label: string };
+  | { id: string; kind: 'attribute'; label: string; accessor: Accessor; options: readonly Option[] }
+  | { id: string; kind: 'inert'; label: string };
 
 const asOptions = (values: readonly string[]): Option[] => values.map((v) => ({ value: v, label: v }));
 
-/** ifc parameters that don't yet map to a filter-engine rule — listed like
- *  RIBiTWO, but not filterable until an attribute rule exists (follow-up). */
-const UNSUPPORTED_IFC_PARAMS: readonly string[] = [
-  'ifcElevation', 'ifcGuid', 'ifcHasFilling', 'ifcID', 'ifcIsFilling', 'ifcIsGeometry',
-  'ifcLongName', 'ifcName', 'ifcObjectType', 'ifcOverallHeight', 'ifcOverallWidth',
-  'ifcPresentationLayerAssignment', 'ifcRefLatitude', 'ifcRefLongitude',
-  'ifcStoreyElevation', 'ifcTag', 'ifcTypeObjectName',
-];
-
-/** Set-dimension values (ifcType / storey / predefinedType) selected by an
- *  entry: exact matches one option label; a wildcard matches every option
- *  whose label contains the term, so `*WA*` on ifcType picks WALL + … at once. */
 function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'predefinedType' }>, input: string): string[] {
   const { wildcard, term } = parsePattern(input);
   if (!term) return [];
   const t = term.toLowerCase();
-  const match = wildcard
+  const pred = wildcard
     ? (o: Option) => o.label.toLowerCase().includes(t)
     : (o: Option) => o.label.toLowerCase() === t || o.value.toLowerCase() === t;
-  return row.options.filter(match).map((o) => o.value);
+  return row.options.filter(pred).map((o) => o.value);
 }
 
 export function ObjectFilterPanel() {
@@ -111,21 +120,41 @@ export function ObjectFilterPanel() {
   const [selections, setSelections] = useState<Map<string, string>>(new Map());
   const [matched, setMatched] = useState<number | null>(null);
 
-  // One pass over the active model's geometry: the object total ("N Objects")
-  // and the geometry-bearing IFC classes — the "Bauteile" the ifcType picker
-  // offers (deriving from meshes excludes schema infrastructure the way
-  // RIBiTWO's list does). Computed once per model.
+  // One pass over the model's geometry: the object ids (universe for
+  // client-side attribute filtering + the "N Objects" total) and the
+  // geometry-bearing IFC classes (the "Bauteile" the ifcType picker offers —
+  // excludes schema infrastructure like RIBiTWO does).
   const modelSummary = useMemo(() => {
     const meshes = activeModel?.geometryResult?.meshes;
-    if (!meshes) return { totalObjects: activeStore?.entityCount ?? 0, ifcTypes: [] as string[] };
+    if (!meshes) return { objectIds: [] as number[], ifcTypes: [] as string[] };
     const ids = new Set<number>();
     const types = new Set<string>();
     for (const m of meshes) {
       ids.add(m.expressId);
       if (m.ifcType) types.add(m.ifcType);
     }
-    return { totalObjects: ids.size, ifcTypes: [...types].sort() };
-  }, [activeModel?.geometryResult, activeStore]);
+    return { objectIds: [...ids], ifcTypes: [...types].sort() };
+  }, [activeModel?.geometryResult]);
+
+  const totalObjects = modelSummary.objectIds.length || (activeStore?.entityCount ?? 0);
+
+  // Distinct values per client-side attribute (sampled + capped) so those
+  // cells are dropdowns too, not just free-text — every value cell offers both.
+  const attributeValues = useMemo(() => {
+    const result = new Map<string, string[]>();
+    if (!activeStore) return result;
+    const sample = modelSummary.objectIds.slice(0, 5000);
+    for (const { label, accessor } of ATTRIBUTE_PARAMS) {
+      const seen = new Set<string>();
+      for (const id of sample) {
+        const v = accessor(activeStore, id);
+        if (v) seen.add(v);
+        if (seen.size >= 200) break;
+      }
+      result.set(label, [...seen].sort());
+    }
+    return result;
+  }, [activeStore, modelSummary.objectIds]);
 
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
@@ -135,12 +164,7 @@ export function ObjectFilterPanel() {
 
     const ifcTypeSource = modelSummary.ifcTypes.length > 0 ? modelSummary.ifcTypes : schema.ifcTypes;
     if (ifcTypeSource.length > 0) {
-      out.push({
-        id: 'ifc:type',
-        kind: 'ifcType',
-        label: 'ifcType',
-        options: ifcTypeSource.map((v) => ({ value: v, label: v.replace(/^ifc/i, '').toUpperCase() })),
-      });
+      out.push({ id: 'ifc:type', kind: 'ifcType', label: 'ifcType', options: ifcTypeSource.map((v) => ({ value: v, label: v.replace(/^ifc/i, '').toUpperCase() })) });
     }
     if (schema.storeys.length > 0) {
       out.push({ id: 'ifc:storey', kind: 'storey', label: 'ifcBuildingStoreyName', options: asOptions(schema.storeys.map(([name]) => name)) });
@@ -148,55 +172,56 @@ export function ObjectFilterPanel() {
     if (values.predefinedTypes.length > 0) {
       out.push({ id: 'ifc:predefinedType', kind: 'predefinedType', label: 'ifcPredefinedType', options: asOptions(values.predefinedTypes) });
     }
-    for (const label of UNSUPPORTED_IFC_PARAMS) {
-      out.push({ id: `ifc:${label}`, kind: 'unsupported', label });
+    for (const { label, accessor } of ATTRIBUTE_PARAMS) {
+      out.push({ id: `ifc:${label}`, kind: 'attribute', label, accessor, options: asOptions(attributeValues.get(label) ?? []) });
+    }
+    for (const label of INERT_IFC_PARAMS) {
+      out.push({ id: `ifc:${label}`, kind: 'inert', label });
     }
 
     const { psets } = discoverPropertyAndQuantitySchema(activeStore);
     for (const [setName, props] of psets) {
       for (const propName of props) {
         const key = propValueKey(setName, propName);
-        out.push({
-          id: `prop:${key}`,
-          kind: 'property',
-          label: propName,
-          setName,
-          propName,
-          options: asOptions(values.propertyValues.get(key) ?? []),
-        });
+        out.push({ id: `prop:${key}`, kind: 'property', label: propName, setName, propName, options: asOptions(values.propertyValues.get(key) ?? []) });
       }
     }
 
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
-  }, [activeStore, modelSummary.ifcTypes]);
+  }, [activeStore, modelSummary.ifcTypes, attributeValues]);
 
-  // Build rules from the current entries and isolate — debounced so typing a
-  // value doesn't fire a run per keystroke. Stale runs are discarded.
+  // Build match sources from the entries and isolate the intersection —
+  // debounced so typing doesn't thrash. Stale runs are discarded.
   useEffect(() => {
     if (!activeStore) return;
     const byId = new Map(rows.map((r) => [r.id, r]));
-    const rules: FilterRule[] = [];
+    const engineRules: FilterRule[] = [];
+    const attrFilters: Array<{ accessor: Accessor; wildcard: boolean; term: string }> = [];
+
     for (const [id, text] of selections) {
       const row = byId.get(id);
-      if (!row || row.kind === 'unsupported') continue;
+      if (!row) continue;
       const t = text.trim();
       if (!t) continue;
       if (row.kind === 'property') {
-        if (t === NONE_LABEL) { rules.push(Rule.property(row.setName, row.propName, 'isNotSet', '')); continue; }
+        if (t === NONE_LABEL) { engineRules.push(Rule.property(row.setName, row.propName, 'isNotSet', '')); continue; }
         const { wildcard, term } = parsePattern(t);
-        if (!term) continue;
-        rules.push(Rule.property(row.setName, row.propName, wildcard ? 'contains' : 'eq', term));
-      } else {
+        if (term) engineRules.push(Rule.property(row.setName, row.propName, wildcard ? 'contains' : 'eq', term));
+      } else if (row.kind === 'attribute') {
+        const { wildcard, term } = parsePattern(t);
+        if (term) attrFilters.push({ accessor: row.accessor, wildcard, term });
+      } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
         if (vals.length === 0) continue;
-        if (row.kind === 'ifcType') rules.push(Rule.ifcType(vals, 'in'));
-        else if (row.kind === 'storey') rules.push(Rule.storey(vals, 'in'));
-        else rules.push(Rule.predefinedType(vals, 'in'));
+        if (row.kind === 'ifcType') engineRules.push(Rule.ifcType(vals, 'in'));
+        else if (row.kind === 'storey') engineRules.push(Rule.storey(vals, 'in'));
+        else engineRules.push(Rule.predefinedType(vals, 'in'));
       }
+      // 'inert' rows contribute nothing yet.
     }
 
-    if (rules.length === 0) {
+    if (engineRules.length === 0 && attrFilters.length === 0) {
       clearIsolation();
       setMatched(null);
       return;
@@ -205,35 +230,52 @@ export function ObjectFilterPanel() {
     let cancelled = false;
     const timer = setTimeout(() => {
       void (async () => {
-        const result = await evaluateFilterRulesFederated(
-          [{ id: activeModelId ?? 'default', store: activeStore }],
-          rules,
-          'and',
-          { limit: 200_000 },
-        );
+        let ids: number[] | null = null;
+        if (engineRules.length > 0) {
+          const result = await evaluateFilterRulesFederated(
+            [{ id: activeModelId ?? 'default', store: activeStore }],
+            engineRules,
+            'and',
+            { limit: 200_000 },
+          );
+          if (cancelled) return;
+          ids = result.map((m) => m.expressId);
+        }
+        if (attrFilters.length > 0) {
+          const universe = ids ?? modelSummary.objectIds;
+          ids = universe.filter((id) => attrFilters.every((f) => matches(f.accessor(activeStore, id), f.wildcard, f.term)));
+        }
         if (cancelled) return;
-        isolateEntities(result.map((m) => m.expressId));
-        setMatched(result.length);
+        const finalIds = ids ?? [];
+        isolateEntities(finalIds);
+        setMatched(finalIds.length);
       })();
     }, ISOLATE_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeStore, activeModelId, selections, rows, isolateEntities, clearIsolation]);
+  }, [activeStore, activeModelId, selections, rows, modelSummary.objectIds, isolateEntities, clearIsolation]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter(
-      (r) => r.label.toLowerCase().includes(q) || (r.kind === 'property' && r.setName.toLowerCase().includes(q)),
-    );
+    return rows.filter((r) => r.label.toLowerCase().includes(q) || (r.kind === 'property' && r.setName.toLowerCase().includes(q)));
   }, [rows, query]);
 
-  const comboOptions = (r: Extract<Row, { kind: 'ifcType' | 'storey' | 'predefinedType' | 'property' }>): string[] =>
-    r.kind === 'property'
-      ? [NONE_LABEL, ...r.options.map((o) => o.label)]
-      : r.options.map((o) => o.label);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 44,
+    overscan: 12,
+  });
+
+  const comboOptions = (r: Row): string[] => {
+    if (r.kind === 'inert') return [];
+    if (r.kind === 'property') return [NONE_LABEL, ...r.options.map((o) => o.label)];
+    return r.options.map((o) => o.label);
+  };
 
   const setValue = (id: string, value: string) => setSelections((prev) => new Map(prev).set(id, value));
 
@@ -281,50 +323,51 @@ export function ObjectFilterPanel() {
         <span>Value</span>
       </div>
 
-      {/* Attribute rows */}
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="divide-y divide-border/50">
-          {filtered.map((r) => (
-            <div key={r.id} className="grid grid-cols-2 items-center gap-2 px-3 py-1">
-              <div className="min-w-0">
-                <div className="truncate text-sm text-foreground" title={r.label}>{r.label}</div>
-                {r.kind === 'property' && (
-                  <div className="truncate text-[10px] text-muted-foreground">{r.setName}</div>
-                )}
-              </div>
-              {r.kind === 'unsupported' ? (
-                <button
-                  type="button"
-                  disabled
-                  title="Free-text / wildcard filter — needs an attribute rule (follow-up)"
-                  className="flex h-7 w-full items-center rounded-lg border border-input bg-transparent px-3 text-xs text-muted-foreground opacity-50"
+      {/* Attribute rows (virtualized) */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        {filtered.length === 0 ? (
+          <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+            {activeStore ? 'No attributes found.' : 'No model loaded.'}
+          </div>
+        ) : (
+          <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }}>
+            {virtualizer.getVirtualItems().map((vi) => {
+              const r = filtered[vi.index];
+              return (
+                <div
+                  key={r.id}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full border-b border-border/50"
+                  style={{ transform: `translateY(${vi.start}px)` }}
                 >
-                  —
-                </button>
-              ) : (
-                <ComboInput
-                  value={selections.get(r.id) ?? ''}
-                  onChange={(v) => setValue(r.id, v)}
-                  options={comboOptions(r)}
-                  placeholder="—"
-                  className="h-7 text-xs"
-                  aria-label={`Value for ${r.label}`}
-                />
-              )}
-            </div>
-          ))}
-          {filtered.length === 0 && (
-            <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-              {activeStore ? 'No attributes found.' : 'No model loaded.'}
-            </div>
-          )}
-        </div>
-      </ScrollArea>
+                  <div className="grid grid-cols-2 items-center gap-2 px-3 py-1">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm text-foreground" title={r.label}>{r.label}</div>
+                      {r.kind === 'property' && (
+                        <div className="truncate text-[10px] text-muted-foreground">{r.setName}</div>
+                      )}
+                    </div>
+                    <ComboInput
+                      value={selections.get(r.id) ?? ''}
+                      onChange={(v) => setValue(r.id, v)}
+                      options={comboOptions(r)}
+                      placeholder={r.kind === 'inert' ? '— (soon)' : '—'}
+                      className="h-7 text-xs"
+                      aria-label={`Value for ${r.label}`}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* Object count */}
       <div className="border-t px-3 py-1.5 text-right text-xs text-muted-foreground">
-        {(matched ?? modelSummary.totalObjects).toLocaleString()}{' '}
-        {(matched ?? modelSummary.totalObjects) === 1 ? 'Object' : 'Objects'}
+        {(matched ?? totalObjects).toLocaleString()}{' '}
+        {(matched ?? totalObjects) === 1 ? 'Object' : 'Objects'}
       </div>
     </div>
   );
