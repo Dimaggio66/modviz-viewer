@@ -22,12 +22,12 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, SlidersHorizontal } from 'lucide-react';
+import { Search, SlidersHorizontal, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Kbd } from '@/components/ui/kbd';
+import { Button } from '@/components/ui/button';
 import { useViewerStore } from '@/store';
 import { runTier0Scan, type SearchResult, type ScanModel } from '@/lib/search/tier0-scan';
 import { queryTier1Indexes, type Tier1Index } from '@/lib/search/tier1-index';
@@ -215,10 +215,16 @@ export function SearchModal() {
                 Filter
               </TabsTrigger>
             </TabsList>
-            <div className="text-[11px] text-muted-foreground">
-              <Kbd>Esc</Kbd>
-              <span className="ml-1">close</span>
-            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={close}
+              aria-label="Close search (Esc)"
+              title="Close (Esc)"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X />
+            </Button>
           </div>
           <TabsContent value="search" className="flex-1 min-h-0 mt-0 flex flex-col">
             <div className="border-b px-4 py-3">
