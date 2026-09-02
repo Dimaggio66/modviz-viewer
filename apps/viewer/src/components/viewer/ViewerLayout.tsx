@@ -10,6 +10,7 @@ import { MainToolbar } from './MainToolbar';
 import { MobileToolbar } from './MobileToolbar';
 import { RibbonToolbar } from './ribbon/RibbonToolbar';
 import { HierarchyPanel } from './HierarchyPanel';
+import { ObjectFilterPanel } from './ObjectFilterPanel';
 import { AddElementPanel } from './AddElementPanel';
 import { StatusBar } from './StatusBar';
 import { ViewportContainer } from './ViewportContainer';
@@ -475,7 +476,7 @@ export function ViewerLayout() {
                   >
                     <div className="viewer-panel-surface h-full w-full overflow-hidden panel-container flex flex-col">
                       <div className="flex-1 min-h-0 overflow-hidden">
-                        <HierarchyPanel />
+                        <ObjectFilterPanel />
                       </div>
                       {/* Extension dock.left — collapses when no extension
                           contributes. Sits beneath the hierarchy panel. */}
