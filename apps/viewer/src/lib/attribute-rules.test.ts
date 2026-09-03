@@ -162,6 +162,34 @@ describe('ruleTableRows', () => {
   });
 });
 
+describe('planWrites — only the changes', () => {
+  it('plans nothing when the value is already what the rule would write', () => {
+    const r = rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Status' }, value: 'Draft', ...TEXT, mode: 'addOverwrite' }, [1]);
+    // Entity 1 already carries Status='Draft'.
+    assert.deepStrictEqual(planWrites([r], read, readByName), []);
+  });
+
+  it('still plans the objects that differ', () => {
+    const r = rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Status' }, value: 'Draft', ...TEXT, mode: 'addOverwrite' }, [1, 2]);
+    assert.deepStrictEqual(planWrites([r], read, readByName).map((w) => w.entityId), [2]);
+  });
+
+  it('does not plan a delete for an attribute that is not there', () => {
+    const r = rule({ kind: 'delete', targets: [{ psetName: 'Pset_A', propName: 'Nope' }] }, [1, 2]);
+    assert.deepStrictEqual(planWrites([r], read, readByName), []);
+  });
+
+  it('re-running a plan against its own result is a no-op', () => {
+    // Simulate the model after the first apply by folding the writes back in.
+    const r = rule({ kind: 'add', target: { psetName: 'P', propName: 'N' }, value: 'v', ...TEXT, mode: 'addOverwrite' }, [1, 2]);
+    const first = planWrites([r], read, readByName);
+    assert.strictEqual(first.length, 2);
+    const after = new Map(first.map((w) => [`${w.entityId}|${w.psetName}|${w.propName}`, String(w.value)]));
+    const read2: PropReader = (id, pset, prop) => after.get(`${id}|${pset}|${prop}`) ?? read(id, pset, prop);
+    assert.deepStrictEqual(planWrites([r], read2, readByName), [], 'a second apply must write nothing');
+  });
+});
+
 describe('staleTargets — what an apply must roll back', () => {
   const add = (id: string, prop: string, ids = [1, 2]) =>
     rule({ kind: 'add', target: { psetName: 'P', propName: prop }, value: 'v', ...TEXT, mode: 'addOverwrite' }, ids);

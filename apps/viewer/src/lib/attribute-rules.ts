@@ -238,6 +238,12 @@ export function planWrites(
   };
   let currentRuleId = '';
   const record = (w: Omit<RuleWrite, 'ruleId'>) => {
+    // Only plan what actually CHANGES. Re-applying a rule set whose result is
+    // already in the model must be a no-op, not 23k identical writes: each one
+    // would cost a store update and an undo entry for nothing.
+    const current = read(w.entityId, w.psetName, w.propName);
+    if (w.op === 'set' && current === String(w.value ?? '')) return;
+    if (w.op === 'delete' && current === null) return;
     const v = w.op === 'delete' ? null : String(w.value ?? '');
     live.set(addrKey(w.entityId, w.psetName, w.propName), v);
     liveByName.set(nameKey(w.entityId, w.propName), v);

@@ -219,40 +219,66 @@ export function AttributeRulesDialog({
    * re-reads the same entities for every rule.
    */
   const readers = useMemo(() => {
-    const cache = new Map<number, Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>>();
-    const setsOf = (entityId: number) => {
-      let sets = cache.get(entityId);
+    type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
+    const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v));
+
+    /** Build a (pset, prop) and a by-name reader over a source of sets. */
+    const readersOver = (setsOf: (id: number) => Sets) => {
+      const read = (entityId: number, pset: string, prop: string): string | null => {
+        for (const set of setsOf(entityId)) {
+          if (set.name !== pset) continue;
+          for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
+        }
+        return null;
+      };
+      const readByName = (entityId: number, prop: string): string | null => {
+        for (const set of setsOf(entityId)) {
+          for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
+        }
+        // Not a property: mapping files also name ifc-level parameters here.
+        return readIfcParam?.(entityId, prop) ?? null;
+      };
+      return { read, readByName };
+    };
+
+    // BASE — the parsed file, never the overlay. Rolling a rule back restores
+    // this. Reads through `getProperties`, since a STEP parse leaves the
+    // columnar table empty by design (issue #577).
+    const baseCache = new Map<number, Sets>();
+    const baseSets = (entityId: number) => {
+      let sets = baseCache.get(entityId);
       if (!sets) {
         const table = store?.properties;
         sets = (table && table.count !== 0 ? table.getForEntity?.(entityId) : undefined)
           ?? store?.getProperties?.(entityId)
           ?? [];
-        cache.set(entityId, sets);
+        baseCache.set(entityId, sets);
       }
       return sets;
     };
-    const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v));
-    const read = (entityId: number, pset: string, prop: string): string | null => {
-      for (const set of setsOf(entityId)) {
-        if (set.name !== pset) continue;
-        for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
-      }
-      return null;
+
+    // EFFECTIVE — what the model actually shows right now, base plus every
+    // write this session already made. Planning reads this so re-applying an
+    // unchanged rule set produces nothing, and so "add where empty" judges the
+    // live model rather than the file it was loaded from.
+    const view = modelId ? getMutationView(modelId) : null;
+    const effCache = new Map<number, Sets>();
+    const effSets = (entityId: number) => {
+      if (!view) return baseSets(entityId);
+      let sets = effCache.get(entityId);
+      if (!sets) { sets = (view.getForEntity(entityId) as Sets) ?? baseSets(entityId); effCache.set(entityId, sets); }
+      return sets;
     };
-    const readByName = (entityId: number, prop: string): string | null => {
-      for (const set of setsOf(entityId)) {
-        for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
-      }
-      // Not a property: mapping files also name ifc-level parameters here.
-      return readIfcParam?.(entityId, prop) ?? null;
-    };
-    return { read, readByName };
+
+    const base = readersOver(baseSets);
+    const effective = readersOver(effSets);
+    return { read: base.read, readByName: base.readByName, effective };
     // `open` is a dependency so each time the dialog opens it starts from
     // fresh values rather than a cache filled before the last apply.
-  }, [store, open, readIfcParam]);
+  }, [store, open, readIfcParam, modelId, getMutationView]);
 
   const writes = useMemo(
-    () => (store && pending.length > 0 ? planWrites(pending, readers.read, readers.readByName, universe) : []),
+    () => (store && pending.length > 0 ? planWrites(pending, readers.effective.read, readers.effective.readByName, universe) : []),
     [store, pending, readers, universe],
   );
 
@@ -315,12 +341,15 @@ export function AttributeRulesDialog({
         // `readers.read` goes through the parsed store, never the overlay, so
         // it answers with the pre-rule value even after the rule wrote.
         const base = readers.read(t.entityId, t.psetName, t.propName);
+        const now = readers.effective.read(t.entityId, t.psetName, t.propName);
+        done += 1;
+        if (done % PROGRESS_CHUNK === 0) await tick('Rolling back removed rules…');
+        // Already back at its base state — nothing to undo here.
+        if (now === base) continue;
         const result = base === null
           ? deleteProperty(modelId, t.entityId, t.psetName, t.propName)
           : setProperty(modelId, t.entityId, t.psetName, t.propName, base, PropertyValueType.Label);
         if (result) reverted += 1;
-        done += 1;
-        if (done % PROGRESS_CHUNK === 0) await tick('Rolling back removed rules…');
       }
       // ONE plan for all rules: a rule must see what the earlier ones wrote
       // (`5D_Typ` is produced by one rule and matched by dozens after it), so
