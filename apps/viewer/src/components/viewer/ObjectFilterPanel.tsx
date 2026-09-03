@@ -188,7 +188,23 @@ type Row =
   | { id: string; kind: 'attribute'; label: string; accessor: Accessor; options: readonly Option[] }
   | { id: string; kind: 'inert'; label: string };
 
-const asOptions = (values: readonly string[]): Option[] => values.map((v) => ({ value: v, label: v }));
+/** Round a numeric value string for DISPLAY (max 6 decimals, trailing zeros
+ *  dropped) while the raw string stays the match value; non-numeric strings
+ *  pass through unchanged. Drops float noise like 0.211563391… → 0.211563. */
+function roundLabel(raw: string): string {
+  const n = Number(raw);
+  return raw.trim() !== '' && Number.isFinite(n) ? String(Number(n.toFixed(6))) : raw;
+}
+
+const asOptions = (values: readonly string[]): Option[] => values.map((v) => ({ value: v, label: roundLabel(v) }));
+
+/** The raw (unrounded) value behind a selected/typed label — for numeric cells
+ *  the dropdown shows a rounded label but the filter rule must match the raw
+ *  stored value. Falls back to the text itself (free-typed input / wildcards). */
+function rawValueOf(row: Row, text: string): string {
+  const opts = 'options' in row ? row.options : undefined;
+  return opts?.find((o) => o.label === text)?.value ?? text;
+}
 
 function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'predefinedType' }>, input: string): string[] {
   const { wildcard, term } = parsePattern(input);
@@ -338,19 +354,19 @@ export function ObjectFilterPanel() {
           for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
           continue;
         }
-        const { wildcard, term } = parsePattern(t);
+        const { wildcard, term } = parsePattern(rawValueOf(row, t));
         if (!term) continue;
         const op = wildcard ? 'contains' : 'eq';
         addGroup(row.setNames.map((s) => Rule.property(s, row.propName, op, term)));
       } else if (row.kind === 'quantity') {
-        const parsed = parseNumeric(t);
+        const parsed = parseNumeric(rawValueOf(row, t));
         if (!parsed) continue;
         addGroup(row.setNames.map((s) => Rule.quantity(s, row.quantityName, parsed.op, parsed.value)));
       } else if (row.kind === 'attribute') {
         if (t === NONE_LABEL) {
           attrFilters.push({ accessor: row.accessor, wildcard: false, term: '', absent: true });
         } else {
-          const { wildcard, term } = parsePattern(t);
+          const { wildcard, term } = parsePattern(rawValueOf(row, t));
           if (term) attrFilters.push({ accessor: row.accessor, wildcard, term, absent: false });
         }
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
