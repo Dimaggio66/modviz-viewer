@@ -23,7 +23,9 @@
  *  - the other ifc parameters (ifcName / ifcGuid / ifcObjectType / ifcTag /
  *    ifcID) match client-side via the store's cached column getters — no
  *    per-entity source re-parse (AGENTS.md §Models).
- * The matched objects isolate in 3D via the shared `isolateEntities` channel.
+ * The matched objects isolate in 3D via the shared `isolateEntities` channel
+ * AND are highlighted (`setSelectedEntityIds`, the renderer's highlight/selection
+ * channel) so the hits light up, report a count, and stay actionable.
  *
  * ifcType values render without the "Ifc" prefix (canonical value kept for
  * matching). A few ifc parameters (elevations, overall size, ref lat/long,
@@ -51,6 +53,7 @@ import {
 } from '@/lib/search/filter-schema';
 import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
+import { toGlobalIdFromModels } from '@/store/globalId';
 
 /** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
  *  (IfcWallType, IfcDoorType, …), a group/system, or the project — the broad
@@ -316,12 +319,14 @@ const FilterRow = memo(function FilterRow({
 });
 
 export function ObjectFilterPanel() {
-  const { models, activeModelId, isolateEntities, clearIsolation } = useViewerStore(
+  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection } = useViewerStore(
     useShallow((s) => ({
       models: s.models,
       activeModelId: s.activeModelId,
       isolateEntities: s.isolateEntities,
       clearIsolation: s.clearIsolation,
+      setSelectedEntityIds: s.setSelectedEntityIds,
+      clearSelection: s.clearSelection,
     })),
   );
 
@@ -499,6 +504,7 @@ export function ObjectFilterPanel() {
 
     if (andRules.length === 0 && orGroups.length === 0 && attrFilters.length === 0) {
       clearIsolation();
+      clearSelection();
       setMatched(null);
       return;
     }
@@ -530,6 +536,12 @@ export function ObjectFilterPanel() {
         if (cancelled) return;
         const finalIds = ids ?? [];
         isolateEntities(finalIds);
+        // Highlight the matches too, not just isolate them: `selectedEntityIds`
+        // is the renderer's highlight channel (Viewport.tsx) and drives the
+        // selection count chip, so the hits light up and stay actionable
+        // (hide / properties / export) instead of only surviving the isolate.
+        // It holds GLOBAL ids, so map through the active model's offset.
+        setSelectedEntityIds(finalIds.map((id) => toGlobalIdFromModels(models, activeModelId ?? 'default', id)));
         setMatched(finalIds.length);
       })();
     }, ISOLATE_DEBOUNCE_MS);
@@ -537,7 +549,7 @@ export function ObjectFilterPanel() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeStore, activeModelId, selections, rows, modelSummary.objectIds, isolateEntities, clearIsolation]);
+  }, [activeStore, activeModelId, models, selections, rows, modelSummary.objectIds, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection]);
 
   const isActive = (id: string) => (selections.get(id) ?? '').trim() !== '';
 
@@ -598,6 +610,7 @@ export function ObjectFilterPanel() {
     setQuery('');
     setOnlyActive(false);
     clearIsolation();
+    clearSelection();
   };
 
   const activeCount = chips.length;
