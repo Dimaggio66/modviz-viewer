@@ -55,6 +55,8 @@ export interface FilterValueSchema {
   predefinedTypes: string[];
   /** `propValueKey(set, prop)` → distinct stringified values. */
   propertyValues: Map<string, string[]>;
+  /** `propValueKey(qset, quantity)` → distinct stringified quantity values. */
+  quantityValues: Map<string, string[]>;
 }
 
 /** Stable key for a (pset, property) pair in `FilterValueSchema.propertyValues`. */
@@ -314,8 +316,12 @@ function finalizePsetQto(
 /** Entities scanned per dimension. Bounded so the pass stays cheap on huge
  *  models — value suggestions don't need to be exhaustive to be useful. */
 const VALUE_SAMPLE_CAP = 5000;
+/** Property / quantity value collection scans ALL property-bearing entities
+ *  (not just the material/classification sample) so every value in the model
+ *  surfaces in the dropdowns; still bounded for pathological models. */
+const PROPERTY_SAMPLE_CAP = 100_000;
 /** Distinct values kept per property key / dimension. */
-const MAX_VALUES_PER_KEY = 200;
+const MAX_VALUES_PER_KEY = 5000;
 
 /**
  * Expensive pass — samples entities that actually carry materials /
@@ -329,6 +335,7 @@ export function discoverFilterValues(store: IfcDataStore): FilterValueSchema {
   const classifications = new Set<string>();
   const predefinedTypes = new Set<string>();
   const propertyValues = new Map<string, Set<string>>();
+  const quantityValues = new Map<string, Set<string>>();
 
   for (const id of cappedKeys(store.onDemandMaterialMap, store, VALUE_SAMPLE_CAP)) {
     for (const name of materialNamesOf(extractMaterialsOnDemand(store, id))) {
@@ -352,14 +359,50 @@ export function discoverFilterValues(store: IfcDataStore): FilterValueSchema {
     }
   }
 
-  for (const id of cappedKeys(store.onDemandPropertyMap, store, VALUE_SAMPLE_CAP)) {
+  const addPropertyValue = (setName: string, propName: string, rawValue: unknown) => {
+    const v = stringifyValue(rawValue).trim();
+    if (!v) return;
+    const key = propValueKey(setName, propName);
+    let bucket = propertyValues.get(key);
+    if (!bucket) { bucket = new Set(); propertyValues.set(key, bucket); }
+    if (bucket.size < MAX_VALUES_PER_KEY) bucket.add(v);
+  };
+
+  for (const id of cappedKeys(store.onDemandPropertyMap, store, PROPERTY_SAMPLE_CAP)) {
     for (const set of extractPropertiesOnDemand(store, id)) {
-      for (const p of set.properties) {
-        const v = stringifyValue(p.value).trim();
+      for (const p of set.properties) addPropertyValue(set.name, p.name, p.value);
+    }
+  }
+
+  // Type-inherited property values, folded under the type pset's own key
+  // (e.g. "Daten(Typ)") so those rows aren't empty. Resolved once per type.
+  const rels = store.relationships;
+  if (rels && typeof rels.getRelated === 'function') {
+    const seenTypes = new Set<number>();
+    const hasSource = (store.source?.length ?? 0) > 0;
+    for (const id of cappedKeys(store.onDemandPropertyMap, store, PROPERTY_SAMPLE_CAP)) {
+      const typeIds = rels.getRelated(id, RelationshipType.DefinesByType, 'inverse');
+      if (typeIds.length === 0) continue;
+      const typeId = typeIds[0];
+      if (seenTypes.has(typeId)) continue;
+      seenTypes.add(typeId);
+      const typeSets = hasSource
+        ? extractTypePropertiesOnDemand(store, id)?.properties ?? []
+        : store.properties?.getForEntity?.(typeId) ?? [];
+      for (const set of typeSets) {
+        for (const p of set.properties) addPropertyValue(set.name, p.name, p.value);
+      }
+    }
+  }
+
+  for (const id of cappedKeys(store.onDemandQuantityMap, store, PROPERTY_SAMPLE_CAP)) {
+    for (const set of extractQuantitiesOnDemand(store, id)) {
+      for (const q of set.quantities) {
+        const v = stringifyValue(q.value).trim();
         if (!v) continue;
-        const key = propValueKey(set.name, p.name);
-        let bucket = propertyValues.get(key);
-        if (!bucket) { bucket = new Set(); propertyValues.set(key, bucket); }
+        const key = propValueKey(set.name, q.name);
+        let bucket = quantityValues.get(key);
+        if (!bucket) { bucket = new Set(); quantityValues.set(key, bucket); }
         if (bucket.size < MAX_VALUES_PER_KEY) bucket.add(v);
       }
     }
@@ -372,6 +415,7 @@ export function discoverFilterValues(store: IfcDataStore): FilterValueSchema {
     classifications: sortStrings(classifications),
     predefinedTypes: sortStrings(predefinedTypes),
     propertyValues: new Map(Array.from(propertyValues, ([k, s]) => [k, sortStrings(s)])),
+    quantityValues: new Map(Array.from(quantityValues, ([k, s]) => [k, sortStrings(s)])),
   };
 }
 

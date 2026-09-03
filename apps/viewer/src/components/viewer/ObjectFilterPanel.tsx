@@ -45,7 +45,7 @@ import {
   discoverPropertyAndQuantitySchema,
   propValueKey,
 } from '@/lib/search/filter-schema';
-import { Rule, type FilterRule } from '@/lib/search/filter-rules';
+import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 
 /** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
@@ -77,6 +77,19 @@ function matches(value: string, wildcard: boolean, term: string): boolean {
   const v = value.toLowerCase();
   const t = term.toLowerCase();
   return wildcard ? v.includes(t) : v === t;
+}
+
+/** Parse a numeric-quantity entry: an optional comparator (>=, >, <=, <) then
+ *  a number (German comma tolerated). Plain input is an exact (eq) match. */
+function parseNumeric(input: string): { op: NumericOp; value: number } | null {
+  let t = input.trim();
+  let op: NumericOp = 'eq';
+  if (t.startsWith('>=')) { op = 'gte'; t = t.slice(2); }
+  else if (t.startsWith('<=')) { op = 'lte'; t = t.slice(2); }
+  else if (t.startsWith('>')) { op = 'gt'; t = t.slice(1); }
+  else if (t.startsWith('<')) { op = 'lt'; t = t.slice(1); }
+  const value = Number(t.trim().replace(',', '.'));
+  return Number.isFinite(value) ? { op, value } : null;
 }
 
 /** Accessor for a per-object ifc attribute. Cached-column reads are free; the
@@ -171,6 +184,7 @@ interface Option { value: string; label: string }
 type Row =
   | { id: string; kind: 'ifcType' | 'storey' | 'predefinedType'; label: string; options: readonly Option[] }
   | { id: string; kind: 'property'; label: string; setName: string; propName: string; options: readonly Option[] }
+  | { id: string; kind: 'quantity'; label: string; setName: string; quantityName: string; options: readonly Option[] }
   | { id: string; kind: 'attribute'; label: string; accessor: Accessor; options: readonly Option[] }
   | { id: string; kind: 'inert'; label: string };
 
@@ -267,11 +281,17 @@ export function ObjectFilterPanel() {
       out.push({ id: `ifc:${label}`, kind: 'inert', label });
     }
 
-    const { psets } = discoverPropertyAndQuantitySchema(activeStore);
+    const { psets, qtos } = discoverPropertyAndQuantitySchema(activeStore);
     for (const [setName, props] of psets) {
       for (const propName of props) {
         const key = propValueKey(setName, propName);
         out.push({ id: `prop:${key}`, kind: 'property', label: propName, setName, propName, options: asOptions(values.propertyValues.get(key) ?? []) });
+      }
+    }
+    for (const [setName, quantities] of qtos) {
+      for (const [quantityName] of quantities) {
+        const key = propValueKey(setName, quantityName);
+        out.push({ id: `qty:${key}`, kind: 'quantity', label: quantityName, setName, quantityName, options: asOptions(values.quantityValues.get(key) ?? []) });
       }
     }
 
@@ -303,6 +323,9 @@ export function ObjectFilterPanel() {
           const { wildcard, term } = parsePattern(t);
           if (term) attrFilters.push({ accessor: row.accessor, wildcard, term, absent: false });
         }
+      } else if (row.kind === 'quantity') {
+        const parsed = parseNumeric(t);
+        if (parsed) engineRules.push(Rule.quantity(row.setName, row.quantityName, parsed.op, parsed.value));
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
         if (vals.length === 0) continue;
@@ -357,7 +380,7 @@ export function ObjectFilterPanel() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter((r) => r.label.toLowerCase().includes(q) || (r.kind === 'property' && r.setName.toLowerCase().includes(q)));
+    return rows.filter((r) => r.label.toLowerCase().includes(q) || ((r.kind === 'property' || r.kind === 'quantity') && r.setName.toLowerCase().includes(q)));
   }, [rows, query]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -442,7 +465,7 @@ export function ObjectFilterPanel() {
                   <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm text-foreground">{r.label}</div>
-                      {r.kind === 'property' && (
+                      {(r.kind === 'property' || r.kind === 'quantity') && (
                         <div className="truncate text-[10px] text-muted-foreground">{r.setName}</div>
                       )}
                     </div>
