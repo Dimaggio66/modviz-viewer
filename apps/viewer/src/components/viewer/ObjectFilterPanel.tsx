@@ -33,6 +33,7 @@ import { Search, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import { EntityExtractor, getAttributeNames } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import { Input } from '@/components/ui/input';
 import { ComboInput } from '@/components/ui/combo-input';
@@ -64,8 +65,28 @@ function matches(value: string, wildcard: boolean, term: string): boolean {
   return wildcard ? v.includes(t) : v === t;
 }
 
-/** Cached-column accessor for a per-object ifc attribute (no source re-parse). */
+/** Accessor for a per-object ifc attribute. Cached-column reads are free; the
+ *  source-buffer readers below are gated to the few types that declare the
+ *  attribute so the per-entity re-parse stays bounded (AGENTS.md §Models). */
 type Accessor = (store: IfcDataStore, id: number) => string;
+
+/** Read a positional entity attribute by its schema name from the STEP source
+ *  (e.g. IfcDoor.OverallHeight) — the same getAttributeNames/attributes pattern
+ *  the georef extractor uses. Re-parses the entity, so callers must gate by
+ *  type. Returns '' when unavailable or the type doesn't declare it. */
+function readSourceAttribute(store: IfcDataStore, id: number, attributeName: string): string {
+  const src = store.source;
+  if (!src || src.length === 0) return '';
+  const ref = store.entityIndex?.byId?.get(id);
+  if (!ref) return '';
+  const entity = new EntityExtractor(src).extractEntity(ref);
+  if (!entity) return '';
+  const i = getAttributeNames(entity.type).indexOf(attributeName);
+  if (i < 0) return '';
+  const raw = entity.attributes?.[i];
+  if (raw === undefined || raw === null || raw === '') return '';
+  return typeof raw === 'number' ? String(Number(raw.toFixed(4))) : String(raw);
+}
 
 /** ifc parameters matched client-side via cheap cached getters. */
 const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
@@ -106,14 +127,29 @@ const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
     accessor: (s, id) =>
       (s.relationships?.getRelated(id, RelationshipType.FillsElement, 'inverse')?.length ?? 0) > 0 ? 'true' : 'false',
   },
+  {
+    // Positional attribute — only IfcDoor/IfcWindow declare it, so gate the
+    // source re-parse to those types.
+    label: 'ifcOverallHeight',
+    accessor: (s, id) => {
+      const t = s.entities.getTypeName(id);
+      return t === 'IfcDoor' || t === 'IfcWindow' ? readSourceAttribute(s, id, 'OverallHeight') : '';
+    },
+  },
+  {
+    label: 'ifcOverallWidth',
+    accessor: (s, id) => {
+      const t = s.entities.getTypeName(id);
+      return t === 'IfcDoor' || t === 'IfcWindow' ? readSourceAttribute(s, id, 'OverallWidth') : '';
+    },
+  },
 ];
 
 /** ifc parameters listed for completeness but not yet filterable (need a
  *  bespoke accessor). Typeable, but contribute no match — a small follow-up. */
 const INERT_IFC_PARAMS: readonly string[] = [
   'ifcElevation', 'ifcIsGeometry', 'ifcLongName',
-  'ifcOverallHeight', 'ifcOverallWidth', 'ifcPresentationLayerAssignment',
-  'ifcRefLatitude', 'ifcRefLongitude',
+  'ifcPresentationLayerAssignment', 'ifcRefLatitude', 'ifcRefLongitude',
 ];
 
 interface Option { value: string; label: string }
