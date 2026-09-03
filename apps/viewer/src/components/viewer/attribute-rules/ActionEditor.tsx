@@ -20,6 +20,7 @@ import { ComboInput } from '@/components/ui/combo-input';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -50,8 +51,16 @@ export interface ActionForm {
   deleteFilter: string;
 }
 
+/**
+ * IFC has no free-standing attributes — every property lives inside a property
+ * set. RIBiTWO's dialog has no such field (its CPI attributes are flat), so the
+ * set is pre-filled and kept out of the way: the primary fields are the
+ * attribute name and its value, matching what the manual asks for.
+ */
+export const DEFAULT_PSET = 'Pset_ModViz';
+
 export const EMPTY_ACTION_FORM: ActionForm = {
-  psetName: '', propName: '', value: '', template: '',
+  psetName: DEFAULT_PSET, propName: '', value: '', template: '',
   dataType: 'text', unit: '', mode: 'addOverwrite',
   sourceKey: '', newName: '', deleteKeys: [], deleteFilter: '',
 };
@@ -85,32 +94,36 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
     </div>
   );
 
-  const targetFields = (
-    <div className="grid grid-cols-2 gap-3">
-      {field('Property set', (
-        <ComboInput
-          value={form.psetName}
-          onChange={(v) => patch({ psetName: v })}
-          options={psetNames as string[]}
-          placeholder="Pset_Custom"
-          className="h-8 text-xs"
-          maxRendered={500}
-          aria-label="Property set"
-        />
-      ))}
-      {field('Attribute name', (
-        <ComboInput
-          value={form.propName}
-          onChange={(v) => patch({ propName: v })}
-          options={attributeNames as string[]}
-          placeholder="Status"
-          className="h-8 text-xs"
-          maxRendered={500}
-          aria-label="Attribute name"
-        />
-      ))}
-    </div>
-  );
+  /** The attribute the rule writes — the first thing you fill in. */
+  const nameField = field('Attribute name', (
+    <ComboInput
+      value={form.propName}
+      onChange={(v) => patch({ propName: v })}
+      options={attributeNames as string[]}
+      placeholder="5D_Bauteilname"
+      className="h-8 text-xs"
+      maxRendered={500}
+      aria-label="Attribute name"
+    />
+  ));
+
+  /** Secondary: which IFC property set the attribute is filed under. Pre-filled,
+   *  and last in the form, so it is not mistaken for the attribute itself. */
+  const psetField = field('Property set', (
+    <ComboInput
+      value={form.psetName}
+      onChange={(v) => patch({ psetName: v })}
+      options={psetNames as string[]}
+      placeholder={DEFAULT_PSET}
+      className="h-8 text-xs"
+      maxRendered={500}
+      aria-label="Property set"
+    />
+  ), (
+    <p className="text-[11px] text-muted-foreground">
+      IFC files a property inside a set — the attribute above appears in the filter under this name. Leave it as it is if you are unsure.
+    </p>
+  ));
 
   const typeAndUnit = (
     <div className="grid grid-cols-2 gap-3">
@@ -159,12 +172,14 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
     case 'add':
       return (
         <div className="flex flex-col gap-3">
-          {targetFields}
-          {typeAndUnit}
+          {nameField}
           {field('Value', (
-            <Input value={form.value} onChange={(e) => patch({ value: e.target.value })} placeholder="Final" className="h-8 text-xs" />
+            <Input value={form.value} onChange={(e) => patch({ value: e.target.value })} placeholder="Innenstützen" className="h-8 text-xs" />
           ))}
+          {typeAndUnit}
           {modeField}
+          <Separator />
+          {psetField}
         </div>
       );
 
@@ -172,8 +187,7 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
       const tokens = templateTokens(form.template);
       return (
         <div className="flex flex-col gap-3">
-          {targetFields}
-          {typeAndUnit}
+          {nameField}
           {field('Value from existing attributes', (
             <Input
               value={form.template}
@@ -196,7 +210,10 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
               )}
             </>
           ))}
+          {typeAndUnit}
           {modeField}
+          <Separator />
+          {psetField}
         </div>
       );
     }
@@ -205,8 +222,10 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
       return (
         <div className="flex flex-col gap-3">
           {sourceField('Attribute to copy')}
-          {targetFields}
+          {nameField}
           {modeField}
+          <Separator />
+          {psetField}
         </div>
       );
 
