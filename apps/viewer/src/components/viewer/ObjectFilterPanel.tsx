@@ -6,11 +6,16 @@
  * ObjectFilterPanel — RIBiTWO-style "Objektfilter" docked in the left slot
  * (replaces the object tree there, ViewerLayout).
  *
- * A flat, searchable, virtualized list of every attribute of the active model
- * — the IFC-level parameters (ifc*) and every property (occurrence +
- * type-inherited). EVERY value cell is a typeable `ComboInput`: pick a value
- * or type freely; a `*` anywhere means a substring match (RIBiTWO's `*AW*` →
- * "contains"), no `*` matches exactly.
+ * A searchable list of every attribute of the active model — the IFC-level
+ * parameters (ifc*), every property (occurrence + type-inherited) and every
+ * quantity — grouped into sticky sections (IFC-Parameter / Properties /
+ * Quantities). EVERY value cell is a typeable `ComboInput`: pick a value or
+ * type a query. The value query language (RIBiTWO-style):
+ *   `*`  wildcard — `A*` starts-with, `*A` ends-with, `*A*` contains, bare = exact
+ *   `&`  AND (the SAME value must satisfy every term)  — "*Wasser* & *150*"
+ *   `||` OR  (any term may match; binds looser than &) — "*Beton* || *Mauerwerk*"
+ * Active fields surface as removable chips; an "only active" toggle and a
+ * per-row clear (✕) keep a long list manageable.
  *
  * Two match paths, intersected (AND) and debounced:
  *  - set dimensions (ifcType / ifcBuildingStoreyName / ifcPredefinedType) and
@@ -28,10 +33,9 @@
  * model); the UI chrome stays English.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, X } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ListFilter, Search, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { EntityExtractor, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
@@ -66,17 +70,35 @@ function isObjectDefinitionClass(typeName: string): boolean {
 const NONE_LABEL = '<Not set>';
 const ISOLATE_DEBOUNCE_MS = 250;
 
-/** A `*` anywhere → substring ("contains"); otherwise an exact match. */
-function parsePattern(input: string): { wildcard: boolean; term: string } {
-  const raw = input.trim();
-  const wildcard = raw.includes('*');
-  return { wildcard, term: wildcard ? raw.replace(/\*/g, '') : raw };
+/** Does the value text use the query language (`*` wildcard, `&` AND, `||` OR)
+ *  rather than being a single literal value picked/typed verbatim? */
+function isQueryExpr(s: string): boolean {
+  return s.includes('*') || s.includes('&') || s.includes('|');
 }
 
-function matches(value: string, wildcard: boolean, term: string): boolean {
-  const v = value.toLowerCase();
-  const t = term.toLowerCase();
-  return wildcard ? v.includes(t) : v === t;
+/** One term → an anchored, case-insensitive regex with `*` standing for any run
+ *  of characters (so a bare term is an exact match, `A*` starts-with, etc). */
+function termToRegExp(term: string): RegExp {
+  const escaped = term.trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+/** Compile `A & B || C` into a predicate — OR of AND-groups (`&` binds tighter
+ *  than `||`). Every term in an AND-group must match the SAME value. */
+function compileQuery(input: string): (value: string) => boolean {
+  const groups = input
+    .split('||')
+    .map((g) => g.split('&').map((t) => t.trim()).filter(Boolean).map(termToRegExp))
+    .filter((g) => g.length > 0);
+  if (groups.length === 0) return () => false;
+  return (value: string) => groups.some((and) => and.every((re) => re.test(value)));
+}
+
+/** Concrete option values a field selects via a query — matched against each
+ *  option's raw value OR its display label (rounded numbers, prefix-stripped
+ *  ifcType), so both what's stored and what's shown are searchable. */
+function resolveOptionValues(options: readonly Option[], test: (v: string) => boolean): string[] {
+  return options.filter((o) => test(o.value) || test(o.label)).map((o) => o.value);
 }
 
 /** Parse a numeric-quantity entry: an optional comparator (>=, >, <=, <) then
@@ -188,6 +210,12 @@ type Row =
   | { id: string; kind: 'attribute'; label: string; accessor: Accessor; options: readonly Option[] }
   | { id: string; kind: 'inert'; label: string };
 
+/** Which sticky section a row belongs to (RIBiTWO groups the list this way). */
+type SectionKey = 'ifc' | 'property' | 'quantity';
+function sectionOf(kind: Row['kind']): SectionKey {
+  return kind === 'property' ? 'property' : kind === 'quantity' ? 'quantity' : 'ifc';
+}
+
 /** Round a numeric value string for DISPLAY (max 6 decimals, trailing zeros
  *  dropped) while the raw string stays the match value; non-numeric strings
  *  pass through unchanged. Drops float noise like 0.211563391… → 0.211563. */
@@ -222,14 +250,70 @@ function rawValueOf(row: Row, text: string): string {
 }
 
 function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'predefinedType' }>, input: string): string[] {
-  const { wildcard, term } = parsePattern(input);
-  if (!term) return [];
-  const t = term.toLowerCase();
-  const pred = wildcard
-    ? (o: Option) => o.label.toLowerCase().includes(t)
-    : (o: Option) => o.label.toLowerCase() === t || o.value.toLowerCase() === t;
-  return row.options.filter(pred).map((o) => o.value);
+  const t = input.trim();
+  if (!t) return [];
+  if (isQueryExpr(t)) return resolveOptionValues(row.options, compileQuery(t));
+  const term = t.toLowerCase();
+  return row.options.filter((o) => o.label.toLowerCase() === term || o.value.toLowerCase() === term).map((o) => o.value);
 }
+
+/** One attribute row. Memoized and fed stable callbacks so that typing in a
+ *  single value field re-renders only that row — the property list can run to
+ *  hundreds of rows, and this keeps per-keystroke work O(1) instead of O(rows). */
+const FilterRow = memo(function FilterRow({
+  row,
+  value,
+  active,
+  onChange,
+  onClear,
+}: {
+  row: Row;
+  value: string;
+  active: boolean;
+  onChange: (id: string, value: string) => void;
+  onClear: (id: string) => void;
+}) {
+  const options = useMemo<string[]>(() => {
+    if (row.kind === 'inert') return [];
+    if (row.kind === 'property' || row.kind === 'attribute') return [NONE_LABEL, ...row.options.map((o) => o.label)];
+    return row.options.map((o) => o.label);
+  }, [row]);
+
+  return (
+    <div className="flex w-full items-center border-b border-border/50" style={{ minHeight: 46 }}>
+      <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm text-foreground">{row.label}</div>
+          {(row.kind === 'property' || row.kind === 'quantity') && row.setNames.length > 0 && (
+            <div className="truncate text-[10px] text-muted-foreground">{row.setNames.join(', ')}</div>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <ComboInput
+            value={value}
+            onChange={(v) => onChange(row.id, v)}
+            options={options}
+            placeholder={row.kind === 'inert' ? 'soon' : ''}
+            className="h-7 min-w-0 flex-1 text-xs"
+            maxRendered={2000}
+            aria-label={`Value for ${row.label}`}
+          />
+          {active && (
+            <button
+              type="button"
+              onClick={() => onClear(row.id)}
+              aria-label={`Clear ${row.label}`}
+              title="Clear"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-500"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 export function ObjectFilterPanel() {
   const { models, activeModelId, isolateEntities, clearIsolation } = useViewerStore(
@@ -247,6 +331,7 @@ export function ObjectFilterPanel() {
   const [query, setQuery] = useState('');
   const [selections, setSelections] = useState<Map<string, string>>(new Map());
   const [matched, setMatched] = useState<number | null>(null);
+  const [onlyActive, setOnlyActive] = useState(false);
 
   // Object universe: every IfcObjectDefinition instance (products + type
   // objects + groups + spatial objects like rooms/spaces) from the type index
@@ -352,7 +437,7 @@ export function ObjectFilterPanel() {
     // on its own, then intersected — giving "(value in ANY of its sets) AND …".
     const andRules: FilterRule[] = [];
     const orGroups: FilterRule[][] = [];
-    const attrFilters: Array<{ accessor: Accessor; wildcard: boolean; term: string; absent: boolean }> = [];
+    const attrFilters: Array<{ accessor: Accessor; test: (v: string) => boolean }> = [];
     const addGroup = (group: FilterRule[]) => {
       if (group.length === 1) andRules.push(group[0]);
       else if (group.length > 1) orGroups.push(group);
@@ -363,26 +448,44 @@ export function ObjectFilterPanel() {
       if (!row) continue;
       const t = text.trim();
       if (!t) continue;
+      // A query (`*`/`&`/`||`) resolves to the concrete option values it
+      // matches, then the object is matched exactly against those — so `&`/`||`
+      // and every `*` position work uniformly through the engine's eq/in ops
+      // (which have no startsWith/endsWith), and client-side for attributes.
+      const test = isQueryExpr(t) ? compileQuery(t) : null;
       if (row.kind === 'property') {
         if (t === NONE_LABEL) {
           // Absent = not set in ANY of its psets → AND of isNotSet.
           for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
           continue;
         }
-        const { wildcard, term } = parsePattern(rawValueOf(row, t));
-        if (!term) continue;
-        const op = wildcard ? 'contains' : 'eq';
-        addGroup(row.setNames.map((s) => Rule.property(s, row.propName, op, term)));
+        const vals = test ? resolveOptionValues(row.options, test) : [rawValueOf(row, t)];
+        if (vals.length === 0) continue;
+        const group: FilterRule[] = [];
+        for (const s of row.setNames) for (const v of vals) group.push(Rule.property(s, row.propName, 'eq', v));
+        addGroup(group);
       } else if (row.kind === 'quantity') {
-        const parsed = parseNumeric(rawValueOf(row, t));
-        if (!parsed) continue;
-        addGroup(row.setNames.map((s) => Rule.quantity(s, row.quantityName, parsed.op, parsed.value)));
+        if (test) {
+          const group: FilterRule[] = [];
+          for (const s of row.setNames) for (const v of resolveOptionValues(row.options, test)) {
+            const n = Number(v);
+            if (Number.isFinite(n)) group.push(Rule.quantity(s, row.quantityName, 'eq', n));
+          }
+          if (group.length === 0) continue;
+          addGroup(group);
+        } else {
+          const parsed = parseNumeric(rawValueOf(row, t));
+          if (!parsed) continue;
+          addGroup(row.setNames.map((s) => Rule.quantity(s, row.quantityName, parsed.op, parsed.value)));
+        }
       } else if (row.kind === 'attribute') {
         if (t === NONE_LABEL) {
-          attrFilters.push({ accessor: row.accessor, wildcard: false, term: '', absent: true });
+          attrFilters.push({ accessor: row.accessor, test: (v) => v === '' });
+        } else if (test) {
+          attrFilters.push({ accessor: row.accessor, test });
         } else {
-          const { wildcard, term } = parsePattern(rawValueOf(row, t));
-          if (term) attrFilters.push({ accessor: row.accessor, wildcard, term, absent: false });
+          const raw = rawValueOf(row, t).toLowerCase();
+          attrFilters.push({ accessor: row.accessor, test: (v) => v.toLowerCase() === raw });
         }
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
@@ -422,12 +525,7 @@ export function ObjectFilterPanel() {
         }
         if (attrFilters.length > 0) {
           const universe = ids ?? modelSummary.objectIds;
-          ids = universe.filter((id) =>
-            attrFilters.every((f) => {
-              const v = f.accessor(activeStore, id);
-              return f.absent ? v === '' : matches(v, f.wildcard, f.term);
-            }),
-          );
+          ids = universe.filter((id) => attrFilters.every((f) => f.test(f.accessor(activeStore, id))));
         }
         if (cancelled) return;
         const finalIds = ids ?? [];
@@ -441,43 +539,72 @@ export function ObjectFilterPanel() {
     };
   }, [activeStore, activeModelId, selections, rows, modelSummary.objectIds, isolateEntities, clearIsolation]);
 
+  const isActive = (id: string) => (selections.get(id) ?? '').trim() !== '';
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((r) => r.label.toLowerCase().includes(q) || ((r.kind === 'property' || r.kind === 'quantity') && r.setNames.some((s) => s.toLowerCase().includes(q))));
-  }, [rows, query]);
+    let base = rows;
+    if (q) base = base.filter((r) => r.label.toLowerCase().includes(q) || ((r.kind === 'property' || r.kind === 'quantity') && r.setNames.some((s) => s.toLowerCase().includes(q))));
+    if (onlyActive) base = base.filter((r) => (selections.get(r.id) ?? '').trim() !== '');
+    return base;
+  }, [rows, query, onlyActive, selections]);
+
+  // Group the visible rows into the three RIBiTWO sections, each preceded by a
+  // sticky header — a flat render list of headers + rows in section order.
+  const sectioned = useMemo(() => {
+    const order: Array<[SectionKey, string]> = [
+      ['ifc', 'IFC-Parameter'],
+      ['property', 'Properties'],
+      ['quantity', 'Quantities'],
+    ];
+    const out: Array<{ kind: 'header'; key: string; label: string; count: number } | { kind: 'row'; row: Row }> = [];
+    for (const [key, label] of order) {
+      const secRows = filtered.filter((r) => sectionOf(r.kind) === key);
+      if (secRows.length === 0) continue;
+      out.push({ kind: 'header', key, label, count: secRows.length });
+      for (const r of secRows) out.push({ kind: 'row', row: r });
+    }
+    return out;
+  }, [filtered]);
+
+  // Active fields as removable chips (label + entered value).
+  const chips = useMemo(() => {
+    const byId = new Map(rows.map((r) => [r.id, r] as const));
+    const out: Array<{ id: string; label: string; value: string }> = [];
+    for (const [id, v] of selections) {
+      const value = v.trim();
+      if (value) out.push({ id, label: byId.get(id)?.label ?? id, value });
+    }
+    return out;
+  }, [selections, rows]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: filtered.length,
-    getScrollElement: () => scrollRef.current,
-    // Fixed row height (no dynamic measurement) — every row is a single value
-    // cell with an optional set-name subline, both truncated to one line, so a
-    // constant height keeps the total size exact and the list fully scrollable.
-    estimateSize: () => 46,
-    overscan: 12,
-  });
 
-  const comboOptions = (r: Row): string[] => {
-    if (r.kind === 'inert') return [];
-    if (r.kind === 'property' || r.kind === 'attribute') return [NONE_LABEL, ...r.options.map((o) => o.label)];
-    return r.options.map((o) => o.label);
-  };
+  const setValue = useCallback((id: string, value: string) => {
+    setSelections((prev) => new Map(prev).set(id, value));
+  }, []);
 
-  const setValue = (id: string, value: string) => setSelections((prev) => new Map(prev).set(id, value));
+  const clearRow = useCallback((id: string) => {
+    setSelections((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
   const cancelFilter = () => {
     setSelections(new Map());
     setMatched(null);
     setQuery('');
+    setOnlyActive(false);
     clearIsolation();
   };
 
-  const activeCount = [...selections.values()].filter((v) => v.trim() !== '').length;
+  const activeCount = chips.length;
 
   return (
     <div className="flex h-full w-full flex-col">
-      {/* Header: search (renamed from "Search model") + red cancel-X. */}
+      {/* Header: search + only-active toggle + red clear-all. */}
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <div className="relative min-w-0 flex-1">
           <Input
@@ -491,8 +618,23 @@ export function ObjectFilterPanel() {
         </div>
         <button
           type="button"
+          onClick={() => setOnlyActive((v) => !v)}
+          disabled={activeCount === 0 && !onlyActive}
+          aria-pressed={onlyActive}
+          aria-label="Show only active filters"
+          title="Only active filters"
+          className={cn(
+            'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors',
+            onlyActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+            'disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground',
+          )}
+        >
+          <ListFilter className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
           onClick={cancelFilter}
-          disabled={activeCount === 0 && query === ''}
+          disabled={activeCount === 0 && query === '' && !onlyActive}
           aria-label="Clear filter"
           title="Clear filter"
           className={cn(
@@ -504,49 +646,62 @@ export function ObjectFilterPanel() {
         </button>
       </div>
 
+      {/* Active-filter chips */}
+      {chips.length > 0 && (
+        <div className="scrollbar-thin flex max-h-24 flex-wrap gap-1 overflow-y-auto border-b px-3 py-2">
+          {chips.map((c) => (
+            <span
+              key={c.id}
+              className="inline-flex max-w-full items-center gap-1 rounded-md bg-accent py-0.5 pl-2 pr-1 text-[11px] text-accent-foreground"
+            >
+              <span className="font-medium">{c.label}</span>
+              <span className="max-w-[8rem] truncate opacity-70">{c.value}</span>
+              <button
+                type="button"
+                onClick={() => clearRow(c.id)}
+                aria-label={`Clear ${c.label}`}
+                className="rounded-sm p-0.5 hover:bg-black/10 hover:text-red-500 dark:hover:bg-white/10"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Column headers */}
       <div className="grid grid-cols-2 gap-2 border-b px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
         <span>Attribute</span>
         <span>Value</span>
       </div>
 
-      {/* Attribute rows (virtualized) */}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        {filtered.length === 0 ? (
+      {/* Attribute rows, grouped into sticky sections */}
+      <div ref={scrollRef} className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+        {sectioned.length === 0 ? (
           <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-            {activeStore ? 'No attributes found.' : 'No model loaded.'}
+            {!activeStore ? 'No model loaded.' : onlyActive ? 'No active filters.' : 'No attributes found.'}
           </div>
         ) : (
-          <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              const r = filtered[vi.index];
-              return (
-                <div
-                  key={r.id}
-                  className="absolute left-0 top-0 flex w-full items-center border-b border-border/50"
-                  style={{ height: `${vi.size}px`, transform: `translateY(${vi.start}px)` }}
-                >
-                  <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm text-foreground">{r.label}</div>
-                      {(r.kind === 'property' || r.kind === 'quantity') && r.setNames.length > 0 && (
-                        <div className="truncate text-[10px] text-muted-foreground">{r.setNames.join(', ')}</div>
-                      )}
-                    </div>
-                    <ComboInput
-                      value={selections.get(r.id) ?? ''}
-                      onChange={(v) => setValue(r.id, v)}
-                      options={comboOptions(r)}
-                      placeholder={r.kind === 'inert' ? 'soon' : ''}
-                      className="h-7 text-xs"
-                      maxRendered={2000}
-                      aria-label={`Value for ${r.label}`}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          sectioned.map((item) =>
+            item.kind === 'header' ? (
+              <div
+                key={`h:${item.key}`}
+                className="sticky top-0 z-10 flex items-center justify-between border-b bg-background px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+              >
+                <span>{item.label}</span>
+                <span className="opacity-60">{item.count}</span>
+              </div>
+            ) : (
+              <FilterRow
+                key={item.row.id}
+                row={item.row}
+                value={selections.get(item.row.id) ?? ''}
+                active={isActive(item.row.id)}
+                onChange={setValue}
+                onClear={clearRow}
+              />
+            ),
+          )
         )}
       </div>
 

@@ -55,7 +55,14 @@ export function ComboInput({
   const listRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
-    const q = typing ? value.trim().toLowerCase() : '';
+    // While typing, narrow suggestions by the text — treat `*` as a wildcard
+    // (stripped) so a query like `*AW*` still surfaces matches; for a compound
+    // `&`/`||` query show the full list so options stay browsable.
+    let q = '';
+    if (typing) {
+      const cleaned = value.replace(/\*/g, '').trim().toLowerCase();
+      q = /[&|]/.test(cleaned) ? '' : cleaned;
+    }
     const matches = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
     return matches.slice(0, maxRendered);
   }, [options, value, maxRendered, typing]);
