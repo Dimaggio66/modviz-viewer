@@ -396,12 +396,12 @@ export function ObjectFilterPanel() {
           ids = ids.filter((x) => set.has(x));
         };
         if (andRules.length > 0) {
-          const res = await evaluateFilterRulesFederated(modelArg, andRules, 'and', { limit: 200_000 });
+          const res = await evaluateFilterRulesFederated(modelArg, andRules, 'AND', { limit: 200_000 });
           if (cancelled) return;
           intersect(res.map((m) => m.expressId));
         }
         for (const grp of orGroups) {
-          const res = await evaluateFilterRulesFederated(modelArg, grp, 'or', { limit: 200_000 });
+          const res = await evaluateFilterRulesFederated(modelArg, grp, 'OR', { limit: 200_000 });
           if (cancelled) return;
           intersect(res.map((m) => m.expressId));
         }
