@@ -537,7 +537,7 @@ export function ObjectFilterPanel() {
                       value={selections.get(r.id) ?? ''}
                       onChange={(v) => setValue(r.id, v)}
                       options={comboOptions(r)}
-                      placeholder={r.kind === 'inert' ? '— (soon)' : '—'}
+                      placeholder={r.kind === 'inert' ? 'soon' : ''}
                       className="h-7 text-xs"
                       maxRendered={2000}
                       aria-label={`Value for ${r.label}`}

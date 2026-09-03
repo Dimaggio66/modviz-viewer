@@ -47,14 +47,18 @@ export function ComboInput({
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
+  // Narrow the list by `value` only while actively typing. Reopening a field
+  // that already holds a value (e.g. a picked number) shows the FULL list
+  // again, so you can browse to another value without clearing the current one.
+  const [typing, setTyping] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
-    const q = value.trim().toLowerCase();
+    const q = typing ? value.trim().toLowerCase() : '';
     const matches = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
     return matches.slice(0, maxRendered);
-  }, [options, value, maxRendered]);
+  }, [options, value, maxRendered, typing]);
 
   useEffect(() => { setHighlight(0); }, [filtered]);
 
@@ -103,6 +107,7 @@ export function ComboInput({
   const commit = (v: string) => {
     onChange(v);
     setOpen(false);
+    setTyping(false);
   };
 
   return (
@@ -111,9 +116,9 @@ export function ComboInput({
         ref={inputRef}
         value={value}
         placeholder={placeholder}
-        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
-        onClick={() => setOpen(true)}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); setTyping(true); }}
+        onFocus={() => { setOpen(true); setTyping(false); }}
+        onClick={() => { setOpen(true); setTyping(false); }}
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') {
             e.preventDefault();
@@ -155,7 +160,11 @@ export function ComboInput({
             pointerEvents: 'auto',
           }}
           onPointerDown={(e) => e.stopPropagation()}
-          className="popover-surface z-[120] w-max max-w-[20rem] overflow-y-auto rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
+          // `popover-surface` is load-bearing (matches SearchableSelect): the
+          // "colorful" theme reclaims an opaque background through it. Keep the
+          // zinc pairing it expects; `scrollbar-thin` is the project's thin,
+          // theme-aware scrollbar utility (shadcn look, not the chunky native one).
+          className="popover-surface scrollbar-thin z-[120] w-max max-w-[20rem] overflow-y-auto rounded-md border border-zinc-300 bg-white p-1 shadow-md dark:border-zinc-600 dark:bg-zinc-800"
         >
           {filtered.map((o, i) => (
             <button
@@ -167,10 +176,10 @@ export function ComboInput({
               onMouseDown={(e) => { e.preventDefault(); commit(o); }}
               onMouseEnter={() => setHighlight(i)}
               className={cn(
-                'block w-full truncate px-2 py-1 text-left text-xs font-mono',
+                'block w-full cursor-default select-none truncate rounded-sm px-2 py-1 text-left text-xs font-mono transition-colors',
                 i === highlight
-                  ? 'bg-zinc-100 dark:bg-zinc-800'
-                  : 'hover:bg-zinc-50 dark:hover:bg-zinc-900',
+                  ? 'bg-accent text-accent-foreground'
+                  : 'hover:bg-accent hover:text-accent-foreground',
               )}
             >
               {o}
