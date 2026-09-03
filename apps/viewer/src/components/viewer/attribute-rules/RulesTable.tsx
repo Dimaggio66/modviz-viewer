@@ -10,7 +10,7 @@
  * rows carry the per-rule controls: enable/disable, reorder, delete.
  */
 
-import { ArrowDown, ArrowUp, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, X } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -78,6 +78,12 @@ export function RulesTable({ rules, onToggle, onMove, onRemove }: Props) {
                       {entry?.rule.entityIds.length.toLocaleString()} objects
                     </span>
                     {disabled && <span className="text-xs text-muted-foreground">· off</span>}
+                    {entry?.rule.appliedAt !== undefined && (
+                      <span className="flex items-center gap-1 text-xs text-primary" title={new Date(entry.rule.appliedAt).toLocaleString()}>
+                        <Check className="h-3 w-3" />
+                        applied · {(entry.rule.appliedWrites ?? 0).toLocaleString()} writes
+                      </span>
+                    )}
                   </div>
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">{row.source}</TableCell>

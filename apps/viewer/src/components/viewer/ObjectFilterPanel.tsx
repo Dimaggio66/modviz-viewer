@@ -55,6 +55,7 @@ import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { AttributeRulesDialog } from './AttributeRulesDialog';
+import { projectKeyFor } from '@/lib/attribute-rules-store';
 import type { PropRef } from '@/lib/attribute-rules';
 
 /** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
@@ -767,6 +768,7 @@ export function ObjectFilterPanel() {
         modelId={activeModelId ?? null}
         store={activeStore}
         propertyRefs={propertyRefs}
+        projectKey={projectKeyFor(activeModel?.name, totalObjects)}
       />
     </div>
   );

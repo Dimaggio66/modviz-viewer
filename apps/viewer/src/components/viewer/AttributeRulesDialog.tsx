@@ -21,8 +21,8 @@
  * records them on the undo stack and includes them in the IFC export.
  */
 
-import { useCallback, useMemo, useState } from 'react';
-import { ListPlus, Sparkles, Table2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ListPlus, Sparkles, Table2, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { PropertyValueType } from '@ifc-lite/data';
 import { MutablePropertyView } from '@ifc-lite/mutations';
@@ -39,6 +39,7 @@ import {
   ACTION_LABELS, planWrites,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
 } from '@/lib/attribute-rules';
+import { loadRules, saveRules } from '@/lib/attribute-rules-store';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
   type ActionForm, type ActionKind,
@@ -56,12 +57,14 @@ export interface AttributeRulesDialogProps {
   store: IfcDataStore | null;
   /** Every (pset, property) the model carries — the source/target pickers. */
   propertyRefs: readonly PropRef[];
+  /** Identifies the loaded file, so saved rules are restored per project. */
+  projectKey: string;
 }
 
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
 
 export function AttributeRulesDialog({
-  open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs,
+  open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
 }: AttributeRulesDialogProps) {
   const { setProperty, deleteProperty, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
@@ -77,8 +80,29 @@ export function AttributeRulesDialog({
   const [form, setForm] = useState<ActionForm>(EMPTY_ACTION_FORM);
   const [rules, setRules] = useState<AttributeRule[]>([]);
   const [applying, setApplying] = useState(false);
+  const [persisted, setPersisted] = useState(true);
 
   const patch = useCallback((p: Partial<ActionForm>) => setForm((f) => ({ ...f, ...p })), []);
+
+  /**
+   * Rules are saved per project (§6.8.1.1), so they survive closing the dialog
+   * and reloading the page and keep the object ids they were built for.
+   * `loadedKey` guards the load-then-save cycle: without it the empty initial
+   * state would be written back over the saved catalog before the load lands.
+   */
+  const loadedKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open || !projectKey) return;
+    if (loadedKey.current === projectKey) return;
+    loadedKey.current = projectKey;
+    setRules(loadRules(projectKey));
+  }, [open, projectKey]);
+
+  /** Persist on every change to the rule list, once this project is loaded. */
+  const commit = useCallback((next: AttributeRule[]) => {
+    setRules(next);
+    if (loadedKey.current === projectKey && projectKey) setPersisted(saveRules(projectKey, next));
+  }, [projectKey]);
 
   const refByKey = useMemo(() => new Map(propertyRefs.map((r) => [refKey(r), r])), [propertyRefs]);
   const psetNames = useMemo(
@@ -110,9 +134,9 @@ export function AttributeRulesDialog({
 
   const collect = () => {
     if (!draft) return;
-    setRules((prev) => [
-      ...prev,
-      { id: `${Date.now()}-${prev.length}`, conditions, entityIds, action: draft, enabled: true },
+    commit([
+      ...rules,
+      { id: `${Date.now()}-${rules.length}`, conditions, entityIds, action: draft, enabled: true },
     ]);
     // Empty the fields that identify THIS rule, so the draft stops being a
     // valid action — otherwise the rule just collected would also still be
@@ -122,16 +146,16 @@ export function AttributeRulesDialog({
     setTab('table');
   };
 
-  const toggleRule = (id: string) => setRules((p) => p.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
-  const removeRule = (id: string) => setRules((p) => p.filter((r) => r.id !== id));
-  const moveRule = (id: string, delta: number) => setRules((prev) => {
-    const i = prev.findIndex((r) => r.id === id);
+  const toggleRule = (id: string) => commit(rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
+  const removeRule = (id: string) => commit(rules.filter((r) => r.id !== id));
+  const moveRule = (id: string, delta: number) => {
+    const i = rules.findIndex((r) => r.id === id);
     const to = i + delta;
-    if (i < 0 || to < 0 || to >= prev.length) return prev;
-    const next = [...prev];
+    if (i < 0 || to < 0 || to >= rules.length) return;
+    const next = [...rules];
     [next[i], next[to]] = [next[to], next[i]];
-    return next;
-  });
+    commit(next);
+  };
 
   /** Rules to run: whatever is in the table, plus the unsaved draft — so a
    *  single rule can be applied without the extra "add to table" click. */
@@ -189,6 +213,15 @@ export function AttributeRulesDialog({
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
 
+  /**
+   * Write every enabled rule and KEEP the rules: they stay in the table,
+   * marked with what they just wrote, and are saved for the project. The
+   * writes take effect immediately — `setProperty` goes through the model's
+   * mutation view, so the Properties panel and the IFC export see them at
+   * once, and each one lands on the undo stack.
+   *
+   * Rules are planned one at a time so each can report its own write count.
+   */
   const apply = useCallback(() => {
     if (!modelId || !store || writes.length === 0) return;
     setApplying(true);
@@ -200,25 +233,40 @@ export function AttributeRulesDialog({
         configureMutationView(view, store);
         registerMutationView(modelId, view);
       }
+      const now = Date.now();
+      const counts = new Map<string, number>();
       let ok = 0;
-      for (const w of writes) {
-        const result = w.op === 'set'
-          ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
-          : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
-        if (result) ok += 1;
+      for (const rule of pending) {
+        if (!rule.enabled) continue;
+        let ruleOk = 0;
+        for (const w of planWrites([rule], readers.read, readers.readByName)) {
+          const result = w.op === 'set'
+            ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
+            : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
+          if (result) ruleOk += 1;
+        }
+        counts.set(rule.id, ruleOk);
+        ok += ruleOk;
       }
       if (ok === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
         return;
       }
+      // Stamp each rule with what it just wrote. The unsaved draft, if it ran,
+      // joins the table under a real id so nothing applied is left unrecorded.
+      const stamp = (r: AttributeRule, countKey: string, id = r.id): AttributeRule =>
+        counts.has(countKey) ? { ...r, id, appliedAt: now, appliedWrites: counts.get(countKey)! } : r;
+      const draftRule = pending.find((r) => r.id === 'draft');
+      commit([
+        ...rules.map((r) => stamp(r, r.id)),
+        ...(draftRule ? [stamp(draftRule, 'draft', `${now}-applied`)] : []),
+      ]);
+      if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', newName: '', deleteKeys: [] });
       toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s).`);
-      setRules([]);
-      setForm(EMPTY_ACTION_FORM);
-      onOpenChange(false);
     } finally {
       setApplying(false);
     }
-  }, [modelId, store, writes, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, onOpenChange]);
+  }, [modelId, store, writes, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -345,15 +393,26 @@ export function AttributeRulesDialog({
 
         {/* Footer — shared by both tabs */}
         <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
-          <span className="text-xs text-muted-foreground">
-            {writes.length > 0
-              ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)`
-              : 'Nothing to apply yet'}
-          </span>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-xs text-muted-foreground">
+              {writes.length > 0
+                ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)`
+                : 'Nothing to apply yet'}
+            </span>
+            {rules.length > 0 && (
+              <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                {persisted ? (
+                  <><Check className="h-3 w-3 text-primary" /> Saved with the project</>
+                ) : (
+                  <span className="text-red-500">Rules could not be saved (browser storage unavailable)</span>
+                )}
+              </span>
+            )}
+          </div>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
             <Button type="button" onClick={apply} disabled={writes.length === 0 || applying}>
-              {applying ? 'Applying…' : 'Apply'}
+              {applying ? 'Applying…' : 'Apply now'}
             </Button>
           </div>
         </div>

@@ -126,6 +126,10 @@ export interface AttributeRule {
   action: RuleAction;
   /** Rules can be switched off in the table without being deleted. */
   enabled: boolean;
+  /** Wall-clock ms of the last apply, and how many writes it made. Set once a
+   *  rule has actually run, so a saved rule shows what it already did. */
+  appliedAt?: number;
+  appliedWrites?: number;
 }
 
 /** One resolved property write. `value` is set for `op: 'set'`. */
