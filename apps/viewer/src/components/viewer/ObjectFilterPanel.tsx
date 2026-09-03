@@ -322,7 +322,7 @@ const FilterRow = memo(function FilterRow({
 });
 
 export function ObjectFilterPanel() {
-  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection } = useViewerStore(
+  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection, getMutationView, mutationCount } = useViewerStore(
     useShallow((s) => ({
       models: s.models,
       activeModelId: s.activeModelId,
@@ -330,6 +330,10 @@ export function ObjectFilterPanel() {
       clearIsolation: s.clearIsolation,
       setSelectedEntityIds: s.setSelectedEntityIds,
       clearSelection: s.clearSelection,
+      getMutationView: s.getMutationView,
+      // Cheap version signal: every property write pushes onto the undo stack,
+      // so its depth changing means the overlay below must be rebuilt.
+      mutationCount: s.activeModelId ? (s.undoStacks.get(s.activeModelId)?.length ?? 0) : 0,
     })),
   );
 
@@ -385,6 +389,47 @@ export function ObjectFilterPanel() {
     return result;
   }, [activeStore, modelSummary.objectIds]);
 
+  /**
+   * Live overlay of every property the session has written — what the
+   * attribute-rules assistant just applied, plus any manual property edit.
+   *
+   * Those writes live in the model's `MutablePropertyView`, an overlay on top
+   * of the parsed store; the filter schema and the filter engine both read the
+   * store, so without this an attribute a rule just created would be invisible
+   * here. Keyed like `propertyValues` so the two fold together:
+   *   propValueKey(pset, prop) -> entityId -> value  (null = deleted)
+   * The mutation history is append-only, so a later entry for the same
+   * (entity, pset, prop) simply overwrites the earlier one. Each entry keeps
+   * its `ref` so the (set, property) pair never has to be parsed back out of
+   * the composite key.
+   */
+  interface OverlayEntry {
+    ref: { setName: string; propName: string };
+    /** entityId -> new value, or null when the rule deleted the property. */
+    values: Map<number, string | null>;
+  }
+  const mutationOverlay = useMemo(() => {
+    const idx = new Map<string, OverlayEntry>();
+    const view = activeModelId ? getMutationView(activeModelId) : null;
+    if (!view) return idx;
+    for (const m of view.getMutations()) {
+      if (!m.psetName || !m.propName) continue;
+      const isSet = m.type === 'CREATE_PROPERTY' || m.type === 'UPDATE_PROPERTY';
+      const isDelete = m.type === 'DELETE_PROPERTY';
+      if (!isSet && !isDelete) continue;
+      const key = propValueKey(m.psetName, m.propName);
+      let entry = idx.get(key);
+      if (!entry) {
+        entry = { ref: { setName: m.psetName, propName: m.propName }, values: new Map() };
+        idx.set(key, entry);
+      }
+      entry.values.set(m.entityId, isDelete ? null : String(m.newValue ?? ''));
+    }
+    return idx;
+    // `mutationCount` is the version signal — the view itself is mutated in
+    // place, so its identity never changes when a rule writes.
+  }, [activeModelId, getMutationView, mutationCount]);
+
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
@@ -427,7 +472,33 @@ export function ObjectFilterPanel() {
       }
       return groups;
     };
-    for (const [propName, g] of group(psets, values.propertyValues)) {
+    // Fold the live overlay in BEFORE building the rows, so an attribute a rule
+    // just created appears in this list like any other (RIBiTWO shows the new
+    // 5D_* attributes in the Objektfilter as soon as the rules are applied),
+    // and an existing attribute gains the values the rules wrote.
+    const overlaySets = new Map<string, Set<string>>(); // propName -> set names
+    for (const [key, entry] of mutationOverlay) {
+      const { setName, propName: name } = entry.ref;
+      let sets = overlaySets.get(name);
+      if (!sets) { sets = new Set(); overlaySets.set(name, sets); }
+      sets.add(setName);
+      const merged = new Set(values.propertyValues.get(key) ?? []);
+      for (const v of entry.values.values()) if (v !== null && v !== '') merged.add(v);
+      values.propertyValues.set(key, [...merged]);
+    }
+
+    const grouped = group(psets, values.propertyValues);
+    // Attributes that exist ONLY as a mutation have no schema entry yet.
+    for (const [name, sets] of overlaySets) {
+      let g = grouped.get(name);
+      if (!g) { g = { sets: [], values: new Set() }; grouped.set(name, g); }
+      for (const setName of sets) {
+        if (!g.sets.includes(setName)) g.sets.push(setName);
+        for (const v of values.propertyValues.get(propValueKey(setName, name)) ?? []) g.values.add(v);
+      }
+    }
+
+    for (const [propName, g] of grouped) {
       out.push({ id: `prop:${propName}`, kind: 'property', label: propName, setNames: g.sets, propName, options: asOptions([...g.values].sort(compareValues)) });
     }
     for (const [quantityName, g] of group(qtos.map(([s, q]) => [s, q.map(([n]) => n)]), values.quantityValues)) {
@@ -436,7 +507,7 @@ export function ObjectFilterPanel() {
 
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
-  }, [activeStore, modelSummary.ifcTypes, attributeValues]);
+  }, [activeStore, modelSummary.ifcTypes, attributeValues, mutationOverlay]);
 
   // Build match sources from the entries and isolate the intersection —
   // debounced so typing doesn't thrash. Stale runs are discarded.
@@ -465,6 +536,39 @@ export function ObjectFilterPanel() {
       // (which have no startsWith/endsWith), and client-side for attributes.
       const test = isQueryExpr(t) ? compileQuery(t) : null;
       if (row.kind === 'property') {
+        // A property the session has written to can't be matched by the filter
+        // engine — the engine reads the parsed store, and the write lives in
+        // the mutation overlay. Match those client-side against the EFFECTIVE
+        // value (overlay first, base second) so an attribute a rule just
+        // created filters like any other, and an overwritten one matches its
+        // new value rather than the stale parsed one.
+        const overlaid = row.setNames.some((s) => mutationOverlay.has(propValueKey(s, row.propName)));
+        if (overlaid) {
+          const propRow = row;
+          const accessor: Accessor = (s, id) => {
+            for (const setName of propRow.setNames) {
+              const entry = mutationOverlay.get(propValueKey(setName, propRow.propName));
+              const v = entry?.values.get(id);
+              // `undefined` = untouched here, `null` = deleted by a rule (a
+              // sibling set may still carry it), otherwise the written value.
+              if (v !== undefined && v !== null && v !== '') return v;
+            }
+            for (const set of s.getProperties?.(id) ?? []) {
+              if (!propRow.setNames.includes(set.name)) continue;
+              for (const p of set.properties ?? []) {
+                if (p.name === propRow.propName) return p.value === undefined || p.value === null ? '' : String(p.value);
+              }
+            }
+            return '';
+          };
+          if (t === NONE_LABEL) attrFilters.push({ accessor, test: (v) => v === '' });
+          else if (test) attrFilters.push({ accessor, test });
+          else {
+            const raw = rawValueOf(row, t).toLowerCase();
+            attrFilters.push({ accessor, test: (v) => v.toLowerCase() === raw });
+          }
+          continue;
+        }
         if (t === NONE_LABEL) {
           // Absent = not set in ANY of its psets → AND of isNotSet.
           for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
@@ -557,7 +661,7 @@ export function ObjectFilterPanel() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeStore, activeModelId, models, selections, rows, modelSummary.objectIds, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection]);
+  }, [activeStore, activeModelId, models, selections, rows, modelSummary.objectIds, mutationOverlay, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection]);
 
   const isActive = (id: string) => (selections.get(id) ?? '').trim() !== '';
 
