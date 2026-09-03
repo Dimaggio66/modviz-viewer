@@ -89,15 +89,29 @@ const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
       const storeyId = sh?.elementToStorey.get(id);
       if (storeyId === undefined) return '';
       const elev = sh?.storeyElevations.get(storeyId);
-      return elev === undefined ? '' : String(elev);
+      // Round away float noise (a level at 0 stores as -1.8e-15).
+      return elev === undefined ? '' : String(Number(elev.toFixed(4)));
     },
+  },
+  {
+    // IfcRelFillsElement is (opening -> filler); an opening that HAS a filling
+    // reaches its filler forward (EntityNode.filledBy()).
+    label: 'ifcHasFilling',
+    accessor: (s, id) =>
+      (s.relationships?.getRelated(id, RelationshipType.FillsElement, 'forward')?.length ?? 0) > 0 ? 'true' : 'false',
+  },
+  {
+    // …and a door/window that IS a filling reaches its opening inversely.
+    label: 'ifcIsFilling',
+    accessor: (s, id) =>
+      (s.relationships?.getRelated(id, RelationshipType.FillsElement, 'inverse')?.length ?? 0) > 0 ? 'true' : 'false',
   },
 ];
 
 /** ifc parameters listed for completeness but not yet filterable (need a
  *  bespoke accessor). Typeable, but contribute no match — a small follow-up. */
 const INERT_IFC_PARAMS: readonly string[] = [
-  'ifcElevation', 'ifcHasFilling', 'ifcIsFilling', 'ifcIsGeometry', 'ifcLongName',
+  'ifcElevation', 'ifcIsGeometry', 'ifcLongName',
   'ifcOverallHeight', 'ifcOverallWidth', 'ifcPresentationLayerAssignment',
   'ifcRefLatitude', 'ifcRefLongitude',
 ];
