@@ -441,7 +441,7 @@ export function ObjectFilterPanel() {
                 >
                   <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
                     <div className="min-w-0">
-                      <div className="truncate text-sm text-foreground" title={r.label}>{r.label}</div>
+                      <div className="truncate text-sm text-foreground">{r.label}</div>
                       {r.kind === 'property' && (
                         <div className="truncate text-[10px] text-muted-foreground">{r.setName}</div>
                       )}
@@ -452,6 +452,7 @@ export function ObjectFilterPanel() {
                       options={comboOptions(r)}
                       placeholder={r.kind === 'inert' ? '— (soon)' : '—'}
                       className="h-7 text-xs"
+                      maxRendered={2000}
                       aria-label={`Value for ${r.label}`}
                     />
                   </div>
