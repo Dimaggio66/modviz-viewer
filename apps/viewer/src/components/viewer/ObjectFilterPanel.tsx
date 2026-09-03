@@ -36,7 +36,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ListFilter, Search, X } from 'lucide-react';
+import { ListFilter, Search, Table2, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { EntityExtractor, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
@@ -54,6 +54,8 @@ import {
 import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 import { toGlobalIdFromModels } from '@/store/globalId';
+import { AttributeRulesDialog } from './AttributeRulesDialog';
+import type { PropRef } from '@/lib/attribute-rules';
 
 /** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
  *  (IfcWallType, IfcDoorType, …), a group/system, or the project — the broad
@@ -337,6 +339,9 @@ export function ObjectFilterPanel() {
   const [selections, setSelections] = useState<Map<string, string>>(new Map());
   const [matched, setMatched] = useState<number | null>(null);
   const [onlyActive, setOnlyActive] = useState(false);
+  /** Ids behind `matched` — handed to the attribute-rules assistant. */
+  const [matchedIds, setMatchedIds] = useState<number[]>([]);
+  const [rulesOpen, setRulesOpen] = useState(false);
 
   // Object universe: every IfcObjectDefinition instance (products + type
   // objects + groups + spatial objects like rooms/spaces) from the type index
@@ -506,6 +511,7 @@ export function ObjectFilterPanel() {
       clearIsolation();
       clearSelection();
       setMatched(null);
+      setMatchedIds([]);
       return;
     }
 
@@ -543,6 +549,7 @@ export function ObjectFilterPanel() {
         // It holds GLOBAL ids, so map through the active model's offset.
         setSelectedEntityIds(finalIds.map((id) => toGlobalIdFromModels(models, activeModelId ?? 'default', id)));
         setMatched(finalIds.length);
+        setMatchedIds(finalIds);
       })();
     }, ISOLATE_DEBOUNCE_MS);
     return () => {
@@ -590,6 +597,17 @@ export function ObjectFilterPanel() {
     return out;
   }, [selections, rows]);
 
+  /** Every (property set, property) the model carries — the source and target
+   *  pickers of the attribute-rules assistant. */
+  const propertyRefs = useMemo<PropRef[]>(() => {
+    const out: PropRef[] = [];
+    for (const r of rows) {
+      if (r.kind !== 'property') continue;
+      for (const psetName of r.setNames) out.push({ psetName, propName: r.propName });
+    }
+    return out.sort((a, b) => a.psetName.localeCompare(b.psetName) || a.propName.localeCompare(b.propName));
+  }, [rows]);
+
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const setValue = useCallback((id: string, value: string) => {
@@ -607,6 +625,7 @@ export function ObjectFilterPanel() {
   const cancelFilter = () => {
     setSelections(new Map());
     setMatched(null);
+    setMatchedIds([]);
     setQuery('');
     setOnlyActive(false);
     clearIsolation();
@@ -643,6 +662,20 @@ export function ObjectFilterPanel() {
           )}
         >
           <ListFilter className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setRulesOpen(true)}
+          disabled={!activeStore}
+          aria-label="Attribute rules"
+          title="Attribute rules — write attributes onto the filtered objects"
+          className={cn(
+            'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors',
+            'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+            'disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground',
+          )}
+        >
+          <Table2 className="h-4 w-4" />
         </button>
         <button
           type="button"
@@ -723,6 +756,18 @@ export function ObjectFilterPanel() {
         {(matched ?? totalObjects).toLocaleString()}{' '}
         {(matched ?? totalObjects) === 1 ? 'Object' : 'Objects'}
       </div>
+
+      <AttributeRulesDialog
+        open={rulesOpen}
+        onOpenChange={setRulesOpen}
+        conditions={chips.map((c) => ({ label: c.label, value: c.value }))}
+        // With no filter set, the rules would target the whole model — pass the
+        // full object universe so the dialog can say so honestly.
+        entityIds={matched === null ? modelSummary.objectIds : matchedIds}
+        modelId={activeModelId ?? null}
+        store={activeStore}
+        propertyRefs={propertyRefs}
+      />
     </div>
   );
 }
