@@ -183,8 +183,8 @@ interface Option { value: string; label: string }
 
 type Row =
   | { id: string; kind: 'ifcType' | 'storey' | 'predefinedType'; label: string; options: readonly Option[] }
-  | { id: string; kind: 'property'; label: string; setName: string; propName: string; options: readonly Option[] }
-  | { id: string; kind: 'quantity'; label: string; setName: string; quantityName: string; options: readonly Option[] }
+  | { id: string; kind: 'property'; label: string; setNames: readonly string[]; propName: string; options: readonly Option[] }
+  | { id: string; kind: 'quantity'; label: string; setNames: readonly string[]; quantityName: string; options: readonly Option[] }
   | { id: string; kind: 'attribute'; label: string; accessor: Accessor; options: readonly Option[] }
   | { id: string; kind: 'inert'; label: string };
 
@@ -281,18 +281,30 @@ export function ObjectFilterPanel() {
       out.push({ id: `ifc:${label}`, kind: 'inert', label });
     }
 
+    // Group properties/quantities by NAME across their psets — ONE row per
+    // attribute with the UNION of every value the model carries (RIBiTWO-style),
+    // instead of a separate row per (set, name).
     const { psets, qtos } = discoverPropertyAndQuantitySchema(activeStore);
-    for (const [setName, props] of psets) {
-      for (const propName of props) {
-        const key = propValueKey(setName, propName);
-        out.push({ id: `prop:${key}`, kind: 'property', label: propName, setName, propName, options: asOptions(values.propertyValues.get(key) ?? []) });
+    const group = (
+      entries: Iterable<[string, Iterable<string>]>,
+      valueMap: Map<string, string[]>,
+    ): Map<string, { sets: string[]; values: Set<string> }> => {
+      const groups = new Map<string, { sets: string[]; values: Set<string> }>();
+      for (const [setName, names] of entries) {
+        for (const name of names) {
+          let g = groups.get(name);
+          if (!g) { g = { sets: [], values: new Set() }; groups.set(name, g); }
+          if (!g.sets.includes(setName)) g.sets.push(setName);
+          for (const v of valueMap?.get(propValueKey(setName, name)) ?? []) g.values.add(v);
+        }
       }
+      return groups;
+    };
+    for (const [propName, g] of group(psets, values.propertyValues)) {
+      out.push({ id: `prop:${propName}`, kind: 'property', label: propName, setNames: g.sets, propName, options: asOptions([...g.values].sort()) });
     }
-    for (const [setName, quantities] of qtos) {
-      for (const [quantityName] of quantities) {
-        const key = propValueKey(setName, quantityName);
-        out.push({ id: `qty:${key}`, kind: 'quantity', label: quantityName, setName, quantityName, options: asOptions(values.quantityValues.get(key) ?? []) });
-      }
+    for (const [quantityName, g] of group(qtos.map(([s, q]) => [s, q.map(([n]) => n)]), values.quantityValues)) {
+      out.push({ id: `qty:${quantityName}`, kind: 'quantity', label: quantityName, setNames: g.sets, quantityName, options: asOptions([...g.values].sort()) });
     }
 
     out.sort((a, b) => a.label.localeCompare(b.label));
@@ -304,8 +316,16 @@ export function ObjectFilterPanel() {
   useEffect(() => {
     if (!activeStore) return;
     const byId = new Map(rows.map((r) => [r.id, r]));
-    const engineRules: FilterRule[] = [];
+    // Single-rule conditions are AND-combined in one pass; a name-grouped
+    // property/quantity spanning several psets becomes an OR group evaluated
+    // on its own, then intersected — giving "(value in ANY of its sets) AND …".
+    const andRules: FilterRule[] = [];
+    const orGroups: FilterRule[][] = [];
     const attrFilters: Array<{ accessor: Accessor; wildcard: boolean; term: string; absent: boolean }> = [];
+    const addGroup = (group: FilterRule[]) => {
+      if (group.length === 1) andRules.push(group[0]);
+      else if (group.length > 1) orGroups.push(group);
+    };
 
     for (const [id, text] of selections) {
       const row = byId.get(id);
@@ -313,9 +333,19 @@ export function ObjectFilterPanel() {
       const t = text.trim();
       if (!t) continue;
       if (row.kind === 'property') {
-        if (t === NONE_LABEL) { engineRules.push(Rule.property(row.setName, row.propName, 'isNotSet', '')); continue; }
+        if (t === NONE_LABEL) {
+          // Absent = not set in ANY of its psets → AND of isNotSet.
+          for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
+          continue;
+        }
         const { wildcard, term } = parsePattern(t);
-        if (term) engineRules.push(Rule.property(row.setName, row.propName, wildcard ? 'contains' : 'eq', term));
+        if (!term) continue;
+        const op = wildcard ? 'contains' : 'eq';
+        addGroup(row.setNames.map((s) => Rule.property(s, row.propName, op, term)));
+      } else if (row.kind === 'quantity') {
+        const parsed = parseNumeric(t);
+        if (!parsed) continue;
+        addGroup(row.setNames.map((s) => Rule.quantity(s, row.quantityName, parsed.op, parsed.value)));
       } else if (row.kind === 'attribute') {
         if (t === NONE_LABEL) {
           attrFilters.push({ accessor: row.accessor, wildcard: false, term: '', absent: true });
@@ -323,20 +353,17 @@ export function ObjectFilterPanel() {
           const { wildcard, term } = parsePattern(t);
           if (term) attrFilters.push({ accessor: row.accessor, wildcard, term, absent: false });
         }
-      } else if (row.kind === 'quantity') {
-        const parsed = parseNumeric(t);
-        if (parsed) engineRules.push(Rule.quantity(row.setName, row.quantityName, parsed.op, parsed.value));
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
         if (vals.length === 0) continue;
-        if (row.kind === 'ifcType') engineRules.push(Rule.ifcType(vals, 'in'));
-        else if (row.kind === 'storey') engineRules.push(Rule.storey(vals, 'in'));
-        else engineRules.push(Rule.predefinedType(vals, 'in'));
+        if (row.kind === 'ifcType') andRules.push(Rule.ifcType(vals, 'in'));
+        else if (row.kind === 'storey') andRules.push(Rule.storey(vals, 'in'));
+        else andRules.push(Rule.predefinedType(vals, 'in'));
       }
       // 'inert' rows contribute nothing yet.
     }
 
-    if (engineRules.length === 0 && attrFilters.length === 0) {
+    if (andRules.length === 0 && orGroups.length === 0 && attrFilters.length === 0) {
       clearIsolation();
       setMatched(null);
       return;
@@ -345,16 +372,22 @@ export function ObjectFilterPanel() {
     let cancelled = false;
     const timer = setTimeout(() => {
       void (async () => {
+        const modelArg = [{ id: activeModelId ?? 'default', store: activeStore }];
         let ids: number[] | null = null;
-        if (engineRules.length > 0) {
-          const result = await evaluateFilterRulesFederated(
-            [{ id: activeModelId ?? 'default', store: activeStore }],
-            engineRules,
-            'and',
-            { limit: 200_000 },
-          );
+        const intersect = (next: number[]) => {
+          if (ids === null) { ids = next; return; }
+          const set = new Set(next);
+          ids = ids.filter((x) => set.has(x));
+        };
+        if (andRules.length > 0) {
+          const res = await evaluateFilterRulesFederated(modelArg, andRules, 'and', { limit: 200_000 });
           if (cancelled) return;
-          ids = result.map((m) => m.expressId);
+          intersect(res.map((m) => m.expressId));
+        }
+        for (const grp of orGroups) {
+          const res = await evaluateFilterRulesFederated(modelArg, grp, 'or', { limit: 200_000 });
+          if (cancelled) return;
+          intersect(res.map((m) => m.expressId));
         }
         if (attrFilters.length > 0) {
           const universe = ids ?? modelSummary.objectIds;
@@ -380,7 +413,7 @@ export function ObjectFilterPanel() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter((r) => r.label.toLowerCase().includes(q) || ((r.kind === 'property' || r.kind === 'quantity') && r.setName.toLowerCase().includes(q)));
+    return rows.filter((r) => r.label.toLowerCase().includes(q) || ((r.kind === 'property' || r.kind === 'quantity') && r.setNames.some((s) => s.toLowerCase().includes(q))));
   }, [rows, query]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -465,8 +498,8 @@ export function ObjectFilterPanel() {
                   <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm text-foreground">{r.label}</div>
-                      {(r.kind === 'property' || r.kind === 'quantity') && (
-                        <div className="truncate text-[10px] text-muted-foreground">{r.setName}</div>
+                      {(r.kind === 'property' || r.kind === 'quantity') && r.setNames.length > 0 && (
+                        <div className="truncate text-[10px] text-muted-foreground">{r.setNames.join(', ')}</div>
                       )}
                     </div>
                     <ComboInput
