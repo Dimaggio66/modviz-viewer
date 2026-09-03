@@ -47,6 +47,7 @@ import {
 } from '@/lib/search/filter-schema';
 import { Rule, type FilterRule } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
+import { isProductClass } from '@/lib/compare/compareScope';
 
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
@@ -205,7 +206,18 @@ export function ObjectFilterPanel() {
     return { objectIds: [...ids], ifcTypes: [...types].sort() };
   }, [activeModel?.geometryResult]);
 
-  const totalObjects = modelSummary.objectIds.length || (activeStore?.entityCount ?? 0);
+  // Total "objects" the RIBiTWO way: every IfcProduct instance (physical
+  // elements + spatial structure + openings/spaces/annotations), not just the
+  // geometry-bearing ones. Summed over the disjoint byType buckets.
+  const totalObjects = useMemo(() => {
+    const byType = activeStore?.entityIndex?.byType;
+    if (!byType) return 0;
+    let n = 0;
+    for (const [typeName, ids] of byType) {
+      if (isProductClass(typeName)) n += ids.length;
+    }
+    return n;
+  }, [activeStore]);
 
   // Distinct values per client-side attribute (sampled + capped) so those
   // cells are dropdowns too, not just free-text — every value cell offers both.
