@@ -43,6 +43,7 @@ import { EntityExtractor, getAttributeNames, getInheritanceChainAcrossSchemas } 
 import { RelationshipType } from '@ifc-lite/data';
 import { Input } from '@/components/ui/input';
 import { ComboInput } from '@/components/ui/combo-input';
+import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import {
@@ -324,6 +325,9 @@ export function ObjectFilterPanel() {
   /** Ids behind `matched` — handed to the attribute-rules assistant. */
   const [matchedIds, setMatchedIds] = useState<number[]>([]);
   const [rulesOpen, setRulesOpen] = useState(false);
+  /** Progress of a running rule apply. The assistant closes when it starts, so
+   *  the bar lives here, where it stays visible over the model. */
+  const [ruleProgress, setRuleProgress] = useState<{ done: number; total: number; label: string } | null>(null);
 
   // Object universe: every IfcObjectDefinition instance (products + type
   // objects + groups + spatial objects like rooms/spaces) from the type index
@@ -857,9 +861,26 @@ export function ObjectFilterPanel() {
         {(matched ?? totalObjects) === 1 ? 'Object' : 'Objects'}
       </div>
 
+      {/* Apply progress — label left, percentage right, bar beneath. */}
+      {ruleProgress && (
+        <div className="border-t px-3 py-2">
+          <div className="mb-1.5 flex items-baseline justify-between gap-2">
+            <span className="truncate text-xs text-foreground">{ruleProgress.label}</span>
+            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+              {ruleProgress.total > 0 ? Math.round((ruleProgress.done / ruleProgress.total) * 100) : 0} %
+            </span>
+          </div>
+          <Progress value={ruleProgress.total > 0 ? (ruleProgress.done / ruleProgress.total) * 100 : 0} />
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            {ruleProgress.done.toLocaleString()} / {ruleProgress.total.toLocaleString()} attributes
+          </p>
+        </div>
+      )}
+
       <AttributeRulesDialog
         open={rulesOpen}
         onOpenChange={setRulesOpen}
+        onProgress={setRuleProgress}
         conditions={chips.map((c) => ({ label: c.label, value: c.value }))}
         // With no filter set, the rules would target the whole model — pass the
         // full object universe so the dialog can say so honestly.

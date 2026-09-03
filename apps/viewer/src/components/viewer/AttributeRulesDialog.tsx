@@ -36,8 +36,9 @@ import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, planWrites, staleTargets,
+  ACTION_LABELS, applyRuleEdit, planWrites, staleTargets,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
+  type RuleEditField, type RuleTableRow,
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
@@ -67,13 +68,20 @@ export interface AttributeRulesDialogProps {
    *  files use these as copy sources and conditions, and they are not
    *  properties, so the property readers alone cannot answer them. */
   readIfcParam?: (entityId: number, name: string) => string | null;
+  /** Reports how far an apply has got, so the progress can be shown outside
+   *  this dialog — it closes as soon as the run starts. `null` = finished. */
+  onProgress?: (state: { done: number; total: number; label: string } | null) => void;
 }
+
+/** Writes per yield to the event loop while applying. Large enough that the
+ *  run stays fast, small enough that the bar moves smoothly. */
+const PROGRESS_CHUNK = 400;
 
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
 
 export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
-  universe, readIfcParam,
+  universe, readIfcParam, onProgress,
 }: AttributeRulesDialogProps) {
   const { setProperty, deleteProperty, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
@@ -178,6 +186,10 @@ export function AttributeRulesDialog({
     }
   };
 
+  /** Commit an in-place edit from the rules table back onto its rule. */
+  const editRule = (row: RuleTableRow, field: RuleEditField, text: string) =>
+    commit(rules.map((r) => (r.id === row.ruleId ? applyRuleEdit(r, row, field, text) : r)));
+
   const toggleRule = (id: string) => commit(rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
   const removeRule = (id: string) => commit(rules.filter((r) => r.id !== id));
   const moveRule = (id: string, delta: number) => {
@@ -263,9 +275,12 @@ export function AttributeRulesDialog({
    *
    * Rules are planned one at a time so each can report its own write count.
    */
-  const apply = useCallback(() => {
+  const apply = useCallback(async () => {
     if (!modelId || !store || (writes.length === 0 && rollbackCount === 0)) return;
     setApplying(true);
+    // Close the assistant right away: the run reports its own progress, and
+    // watching a frozen dialog says nothing about how far it has got.
+    onOpenChange(false);
     try {
       // `setProperty` needs a mutation view registered for the model; create
       // one lazily the same way the zone write-back does.
@@ -285,7 +300,18 @@ export function AttributeRulesDialog({
       // would survive its own rule and stay in the property panel and the
       // object filter forever.
       let reverted = 0;
-      for (const t of staleTargets(loadApplied(projectKey), pending)) {
+      const stale = staleTargets(loadApplied(projectKey), pending);
+      const total = stale.length + writes.length;
+      let done = 0;
+      // Yield to the browser every so often, otherwise a 20k-write run blocks
+      // the main thread and the progress bar never paints a single frame.
+      const tick = async (label: string) => {
+        onProgress?.({ done, total, label });
+        await new Promise((r) => setTimeout(r, 0));
+      };
+      await tick('Rolling back removed rules…');
+
+      for (const t of stale) {
         // `readers.read` goes through the parsed store, never the overlay, so
         // it answers with the pre-rule value even after the rule wrote.
         const base = readers.read(t.entityId, t.psetName, t.propName);
@@ -293,20 +319,26 @@ export function AttributeRulesDialog({
           ? deleteProperty(modelId, t.entityId, t.psetName, t.propName)
           : setProperty(modelId, t.entityId, t.psetName, t.propName, base, PropertyValueType.Label);
         if (result) reverted += 1;
+        done += 1;
+        if (done % PROGRESS_CHUNK === 0) await tick('Rolling back removed rules…');
       }
       // ONE plan for all rules: a rule must see what the earlier ones wrote
       // (`5D_Typ` is produced by one rule and matched by dozens after it), so
       // planning per rule to count them would silently break every chain.
       // Each write carries its rule id instead.
       for (const r of pending) if (r.enabled) counts.set(r.id, 0);
+      await tick('Applying rules…');
       for (const w of writes) {
         const result = w.op === 'set'
           ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
           : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
+        done += 1;
+        if (done % PROGRESS_CHUNK === 0) await tick('Applying rules…');
         if (!result) continue;
         counts.set(w.ruleId, (counts.get(w.ruleId) ?? 0) + 1);
         ok += 1;
       }
+      onProgress?.({ done: total, total, label: 'Applying rules…' });
       if (ok === 0 && reverted === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
         return;
@@ -329,8 +361,9 @@ export function AttributeRulesDialog({
       toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s)${undone}.`);
     } finally {
       setApplying(false);
+      onProgress?.(null);
     }
-  }, [modelId, store, writes, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch, onOpenChange, onProgress]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -472,7 +505,7 @@ export function AttributeRulesDialog({
           {/* ── Tab 2: the collected rules ── */}
           <TabsContent value="table" className="mt-0 flex min-h-0 flex-1 flex-col">
             <div className="scrollbar-thin min-h-0 flex-1 overflow-auto">
-              <RulesTable rules={rules} onToggle={toggleRule} onMove={moveRule} onRemove={removeRule} />
+              <RulesTable rules={rules} onToggle={toggleRule} onMove={moveRule} onRemove={removeRule} onEdit={editRule} />
             </div>
           </TabsContent>
         </Tabs>
@@ -500,7 +533,7 @@ export function AttributeRulesDialog({
           </div>
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-            <Button type="button" onClick={apply} disabled={(writes.length === 0 && rollbackCount === 0) || applying}>
+            <Button type="button" onClick={() => { void apply(); }} disabled={(writes.length === 0 && rollbackCount === 0) || applying}>
               {applying ? 'Applying…' : 'Apply now'}
             </Button>
           </div>

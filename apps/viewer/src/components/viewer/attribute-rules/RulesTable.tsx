@@ -10,6 +10,7 @@
  * rows carry the per-rule controls: enable/disable, reorder, delete.
  */
 
+import { useEffect, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, X } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
@@ -18,16 +19,73 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
-import { ACTION_LABELS, ruleTableRows, type AttributeRule } from '@/lib/attribute-rules';
+import {
+  ACTION_LABELS, DATA_TYPE_LABELS, MODE_SHORT, ruleTableRows,
+  type AttributeRule, type RuleEditField, type RuleTableRow,
+} from '@/lib/attribute-rules';
+
+/** The words the Type and Mode cells accept, in the table's own wording. */
+const DATA_TYPE_CHOICES = Object.values(DATA_TYPE_LABELS);
+const MODE_CHOICES = Object.values(MODE_SHORT);
 
 interface Props {
   rules: AttributeRule[];
   onToggle: (id: string) => void;
   onMove: (id: string, delta: number) => void;
   onRemove: (id: string) => void;
+  /** Commit an in-place cell edit. */
+  onEdit: (row: RuleTableRow, field: RuleEditField, text: string) => void;
 }
 
-export function RulesTable({ rules, onToggle, onMove, onRemove }: Props) {
+/**
+ * A cell you can type in. Kept uncontrolled between focus and blur so typing
+ * never re-plans the whole rule set on every keystroke — the value is committed
+ * on blur or Enter, and Escape restores what was there.
+ */
+function EditableCell({
+  value, onCommit, mono = true, placeholder,
+}: { value: string; onCommit: (text: string) => void; mono?: boolean; placeholder?: string }) {
+  const [draft, setDraft] = useState(value);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setDraft(value); }, [value, editing]);
+
+  return (
+    <input
+      value={draft}
+      placeholder={placeholder}
+      onChange={(e) => setDraft(e.target.value)}
+      onFocus={() => setEditing(true)}
+      onBlur={() => { setEditing(false); if (draft !== value) onCommit(draft); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.currentTarget.blur(); }
+        else if (e.key === 'Escape') { e.stopPropagation(); setDraft(value); setEditing(false); e.currentTarget.blur(); }
+      }}
+      className={cn(
+        'w-full min-w-0 rounded-sm border border-transparent bg-transparent px-1 py-0.5 text-xs',
+        'hover:border-border focus:border-ring focus:bg-background focus:outline-none',
+        mono && 'font-mono',
+      )}
+    />
+  );
+}
+
+/** Same, but for the fields that only accept a fixed set of words. */
+function EditableChoice({
+  value, options, onCommit,
+}: { value: string; options: readonly string[]; onCommit: (text: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onCommit(e.target.value)}
+      className="w-full min-w-0 cursor-pointer rounded-sm border border-transparent bg-transparent px-1 py-0.5 text-xs hover:border-border focus:border-ring focus:outline-none"
+    >
+      {!options.includes(value) && <option value={value}>{value}</option>}
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+}
+
+export function RulesTable({ rules, onToggle, onMove, onRemove, onEdit }: Props) {
   if (rules.length === 0) {
     return (
       <div className="px-5 py-10 text-center">
@@ -108,6 +166,21 @@ export function RulesTable({ rules, onToggle, onMove, onRemove }: Props) {
             );
           }
           const off = entry?.rule.enabled === false;
+          const can = (f: RuleEditField) => row.editable?.includes(f) ?? false;
+          /** An editable cell, or plain text when the field does not apply. */
+          const cell = (f: RuleEditField, text: string, opts?: { mono?: boolean; muted?: boolean; placeholder?: string }) => (
+            <TableCell className={cn('text-xs', opts?.mono !== false && 'font-mono', opts?.muted && 'text-muted-foreground')}>
+              {can(f)
+                ? <EditableCell value={text} mono={opts?.mono !== false} placeholder={opts?.placeholder} onCommit={(v) => onEdit(row, f, v)} />
+                : text}
+            </TableCell>
+          );
+          const choice = (f: RuleEditField, text: string, options: readonly string[]) => (
+            <TableCell className="text-xs text-muted-foreground">
+              {can(f) ? <EditableChoice value={text} options={options} onCommit={(v) => onEdit(row, f, v)} /> : text}
+            </TableCell>
+          );
+
           return (
             <TableRow key={`${row.kind}-${row.ruleId}-${i}`} className={cn(off && 'opacity-45')}>
               <TableCell />
@@ -119,12 +192,12 @@ export function RulesTable({ rules, onToggle, onMove, onRemove }: Props) {
                   {row.direction === 'Ein' ? 'In' : 'Out'}
                 </span>
               </TableCell>
-              <TableCell className="font-mono text-xs">{row.attribute ?? ''}</TableCell>
-              <TableCell className="font-mono text-xs">{row.name ?? ''}</TableCell>
-              <TableCell className="text-xs text-muted-foreground">{row.type ?? ''}</TableCell>
-              <TableCell className="font-mono text-xs">{row.value ?? ''}</TableCell>
-              <TableCell className="text-xs text-muted-foreground">{row.unit || ''}</TableCell>
-              <TableCell className="text-xs text-muted-foreground">{row.mode ?? ''}</TableCell>
+              {cell('attribute', row.attribute ?? '', { placeholder: 'Pset\\Property' })}
+              {cell('name', row.name ?? '')}
+              {choice('type', row.type ?? '', DATA_TYPE_CHOICES)}
+              {cell('value', row.value ?? '')}
+              {cell('unit', row.unit ?? '', { mono: false, muted: true, placeholder: '—' })}
+              {choice('mode', row.mode ?? '', MODE_CHOICES)}
               <TableCell />
             </TableRow>
           );

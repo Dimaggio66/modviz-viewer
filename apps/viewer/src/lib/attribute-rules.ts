@@ -433,39 +433,136 @@ export interface RuleTableRow {
   unit?: string;
   mode?: string;
   enabled?: boolean;
+  /** Index of the condition this row shows, for `in` rows. */
+  matchIndex?: number;
+  /** Index of the delete target this row shows, for a delete action's rows. */
+  targetIndex?: number;
+  /** Which of this row's cells can be edited in place. */
+  editable?: RuleEditField[];
 }
 
-const MODE_SHORT: Record<WriteMode, string> = {
+/** A cell of the rules table that maps back onto a rule field. */
+export type RuleEditField = 'attribute' | 'name' | 'type' | 'value' | 'unit' | 'mode';
+
+/** `Pset\Prop`, or the bare name when no set is fixed — the same notation the
+ *  mapping files use, so an edited cell parses straight back. */
+export function formatRef(r: PropRef): string {
+  return r.psetName ? `${r.psetName}\\${r.propName}` : r.propName;
+}
+
+/** Inverse of {@link formatRef}. */
+export function parseRef(text: string): PropRef {
+  const i = text.indexOf('\\');
+  return i >= 0
+    ? { psetName: text.slice(0, i).trim(), propName: text.slice(i + 1).trim() }
+    : { psetName: '', propName: text.trim() };
+}
+
+const DATA_TYPE_BY_LABEL = new Map(
+  (Object.keys(DATA_TYPE_LABELS) as DataType[]).map((d) => [DATA_TYPE_LABELS[d].toLowerCase(), d]),
+);
+const MODE_BY_SHORT = new Map<string, WriteMode>();
+
+/**
+ * Apply one in-place table edit and return the updated rule. Pure, so the
+ * mapping from "which cell" to "which field" is testable without a DOM.
+ * An edit that does not apply to the row's action is returned unchanged.
+ */
+export function applyRuleEdit(rule: AttributeRule, row: RuleTableRow, field: RuleEditField, text: string): AttributeRule {
+  const t = text.trim();
+
+  if (row.kind === 'in') {
+    const i = row.matchIndex ?? -1;
+    if (!rule.match || i < 0 || i >= rule.match.length) return rule;
+    const match = rule.match.map((c, k) => (k === i ? { ...c, [field === 'attribute' ? 'attribute' : 'value']: t } : c));
+    return { ...rule, match, conditions: match.map((c) => ({ label: c.attribute, value: c.value })) };
+  }
+
+  const a = rule.action;
+  switch (a.kind) {
+    case 'add':
+    case 'compose': {
+      switch (field) {
+        case 'attribute': return { ...rule, action: { ...a, target: { ...a.target, psetName: t } } };
+        case 'name':      return { ...rule, action: { ...a, target: { ...a.target, propName: t } } };
+        case 'unit':      return { ...rule, action: { ...a, unit: t } };
+        case 'type': {
+          const dt = DATA_TYPE_BY_LABEL.get(t.toLowerCase());
+          return dt ? { ...rule, action: { ...a, dataType: dt } } : rule;
+        }
+        case 'mode': {
+          const m = MODE_BY_SHORT.get(t);
+          return m ? { ...rule, action: { ...a, mode: m } } : rule;
+        }
+        case 'value':
+          return a.kind === 'add'
+            ? { ...rule, action: { ...a, value: text } }
+            : { ...rule, action: { ...a, template: text } };
+      }
+      return rule;
+    }
+    case 'copy': {
+      switch (field) {
+        case 'attribute': return { ...rule, action: { ...a, source: parseRef(t) } };
+        case 'name':      return { ...rule, action: { ...a, target: parseRef(t) } };
+        case 'mode': {
+          const m = MODE_BY_SHORT.get(t);
+          return m ? { ...rule, action: { ...a, mode: m } } : rule;
+        }
+      }
+      return rule;
+    }
+    case 'rename': {
+      if (field === 'attribute') return { ...rule, action: { ...a, source: parseRef(t) } };
+      if (field === 'name') return { ...rule, action: { ...a, propName: t } };
+      return rule;
+    }
+    case 'delete': {
+      const i = row.targetIndex ?? -1;
+      if (field !== 'attribute' || i < 0 || i >= a.targets.length) return rule;
+      return { ...rule, action: { ...a, targets: a.targets.map((x, k) => (k === i ? parseRef(t) : x)) } };
+    }
+  }
+}
+
+export const MODE_SHORT: Record<WriteMode, string> = {
   add: 'Add',
   addOverwrite: 'Add + overwrite',
   overwrite: 'Overwrite',
 };
+for (const [m, label] of Object.entries(MODE_SHORT)) MODE_BY_SHORT.set(label, m as WriteMode);
 
 /** Flatten rules into the grid rows described above. */
 export function ruleTableRows(rules: readonly AttributeRule[]): RuleTableRow[] {
   const rows: RuleTableRow[] = [];
   rules.forEach((rule, i) => {
     rows.push({ ruleId: rule.id, kind: 'group', number: i + 1, source: 'Model', enabled: rule.enabled });
-    for (const c of rule.conditions) {
-      rows.push({ ruleId: rule.id, kind: 'in', direction: 'Ein', attribute: c.label, value: c.value });
-    }
+    // Only a rule that owns evaluable conditions can have them edited; a
+    // filter-built rule's condition is a read-only snapshot of the filter.
+    const editableIn: RuleEditField[] = rule.match ? ['attribute', 'value'] : [];
+    rule.conditions.forEach((c, mi) => {
+      rows.push({ ruleId: rule.id, kind: 'in', direction: 'Ein', attribute: c.label, value: c.value, matchIndex: mi, editable: editableIn });
+    });
     const a = rule.action;
     const out = (r: Partial<RuleTableRow>) => rows.push({ ruleId: rule.id, kind: 'out', direction: 'Aus', ...r });
     switch (a.kind) {
       case 'add':
-        out({ attribute: a.target.psetName, name: a.target.propName, type: DATA_TYPE_LABELS[a.dataType], value: a.value, unit: a.unit, mode: MODE_SHORT[a.mode] });
+        out({ attribute: a.target.psetName, name: a.target.propName, type: DATA_TYPE_LABELS[a.dataType], value: a.value, unit: a.unit, mode: MODE_SHORT[a.mode],
+          editable: ['attribute', 'name', 'type', 'value', 'unit', 'mode'] });
         break;
       case 'compose':
-        out({ attribute: a.target.psetName, name: a.target.propName, type: DATA_TYPE_LABELS[a.dataType], value: a.template, unit: a.unit, mode: MODE_SHORT[a.mode] });
+        out({ attribute: a.target.psetName, name: a.target.propName, type: DATA_TYPE_LABELS[a.dataType], value: a.template, unit: a.unit, mode: MODE_SHORT[a.mode],
+          editable: ['attribute', 'name', 'type', 'value', 'unit', 'mode'] });
         break;
       case 'copy':
-        out({ attribute: `${a.source.psetName}.${a.source.propName}`, name: `${a.target.psetName}.${a.target.propName}`, mode: MODE_SHORT[a.mode] });
+        out({ attribute: formatRef(a.source), name: formatRef(a.target), mode: MODE_SHORT[a.mode],
+          editable: ['attribute', 'name', 'mode'] });
         break;
       case 'rename':
-        out({ attribute: `${a.source.psetName}.${a.source.propName}`, name: a.propName, mode: 'Rename' });
+        out({ attribute: formatRef(a.source), name: a.propName, mode: 'Rename', editable: ['attribute', 'name'] });
         break;
       case 'delete':
-        for (const t of a.targets) out({ attribute: `${t.psetName}.${t.propName}`, mode: 'Delete' });
+        a.targets.forEach((t, ti) => out({ attribute: formatRef(t), mode: 'Delete', targetIndex: ti, editable: ['attribute'] }));
         break;
     }
   });
