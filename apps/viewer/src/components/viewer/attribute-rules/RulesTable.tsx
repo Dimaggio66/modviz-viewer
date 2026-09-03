@@ -75,7 +75,11 @@ export function RulesTable({ rules, onToggle, onMove, onRemove }: Props) {
                     />
                     <Badge variant="secondary">{entry ? ACTION_LABELS[entry.rule.action.kind] : ''}</Badge>
                     <span className="text-xs text-muted-foreground">
-                      {entry?.rule.entityIds.length.toLocaleString()} objects
+                      {/* An imported mapping has no id snapshot: it selects its
+                          objects from its own conditions when it runs. */}
+                      {entry && entry.rule.entityIds.length === 0 && entry.rule.match
+                        ? (entry.rule.match.length > 0 ? 'by condition' : 'all objects')
+                        : `${entry?.rule.entityIds.length.toLocaleString()} objects`}
                     </span>
                     {disabled && <span className="text-xs text-muted-foreground">· off</span>}
                     {entry?.rule.appliedAt !== undefined && (

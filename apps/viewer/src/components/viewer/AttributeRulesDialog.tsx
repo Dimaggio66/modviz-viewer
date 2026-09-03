@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ListPlus, Sparkles, Table2, X } from 'lucide-react';
+import { Check, ListPlus, Sparkles, Table2, Upload, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { PropertyValueType } from '@ifc-lite/data';
 import { MutablePropertyView } from '@ifc-lite/mutations';
@@ -40,6 +40,7 @@ import {
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
+import { importMappingXml } from '@/lib/attribute-rules-xml';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
   type ActionForm, type ActionKind,
@@ -59,12 +60,20 @@ export interface AttributeRulesDialogProps {
   propertyRefs: readonly PropRef[];
   /** Identifies the loaded file, so saved rules are restored per project. */
   projectKey: string;
+  /** Every object in the model — the candidate set for imported mappings,
+   *  whose conditions select objects themselves rather than via the filter. */
+  universe: readonly number[];
+  /** Resolves an ifc-level parameter (ifcType, ifcTypeObjectName, …). Mapping
+   *  files use these as copy sources and conditions, and they are not
+   *  properties, so the property readers alone cannot answer them. */
+  readIfcParam?: (entityId: number, name: string) => string | null;
 }
 
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
 
 export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
+  universe, readIfcParam,
 }: AttributeRulesDialogProps) {
   const { setProperty, deleteProperty, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
@@ -146,6 +155,29 @@ export function AttributeRulesDialog({
     setTab('table');
   };
 
+  /** Load a RIBiTWO `<transform>` mapping file and append its maps as rules.
+   *  Appending (not replacing) keeps anything already built by hand, and the
+   *  imported maps stay in file order — they read each other's output. */
+  const fileRef = useRef<HTMLInputElement>(null);
+  const importXml = async (file: File) => {
+    try {
+      const { rules: imported, skipped, name } = importMappingXml(await file.text());
+      if (imported.length === 0) {
+        toast.error(`No mappings found in ${file.name}.`);
+        return;
+      }
+      const stamp = Date.now();
+      commit([...rules, ...imported.map((r, i) => ({ ...r, id: `${stamp}-${r.id}-${i}` }))]);
+      setTab('table');
+      const note = skipped.length > 0 ? ` ${skipped.length} entr(y/ies) skipped.` : '';
+      toast.success(`Imported ${imported.length} rule(s)${name ? ` from "${name}"` : ''}.${note}`);
+      if (skipped.length > 0) console.warn('[ifc-lite] attribute-rule import skipped:', skipped);
+    } catch (err) {
+      toast.error(`Could not read ${file.name}.`);
+      console.warn('[ifc-lite] attribute-rule import failed', err);
+    }
+  };
+
   const toggleRule = (id: string) => commit(rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
   const removeRule = (id: string) => commit(rules.filter((r) => r.id !== id));
   const moveRule = (id: string, delta: number) => {
@@ -199,16 +231,17 @@ export function AttributeRulesDialog({
       for (const set of setsOf(entityId)) {
         for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
       }
-      return null;
+      // Not a property: mapping files also name ifc-level parameters here.
+      return readIfcParam?.(entityId, prop) ?? null;
     };
     return { read, readByName };
     // `open` is a dependency so each time the dialog opens it starts from
     // fresh values rather than a cache filled before the last apply.
-  }, [store, open]);
+  }, [store, open, readIfcParam]);
 
   const writes = useMemo(
-    () => (store && pending.length > 0 ? planWrites(pending, readers.read, readers.readByName) : []),
-    [store, pending, readers],
+    () => (store && pending.length > 0 ? planWrites(pending, readers.read, readers.readByName, universe) : []),
+    [store, pending, readers, universe],
   );
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
@@ -261,17 +294,18 @@ export function AttributeRulesDialog({
           : setProperty(modelId, t.entityId, t.psetName, t.propName, base, PropertyValueType.Label);
         if (result) reverted += 1;
       }
-      for (const rule of pending) {
-        if (!rule.enabled) continue;
-        let ruleOk = 0;
-        for (const w of planWrites([rule], readers.read, readers.readByName)) {
-          const result = w.op === 'set'
-            ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
-            : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
-          if (result) ruleOk += 1;
-        }
-        counts.set(rule.id, ruleOk);
-        ok += ruleOk;
+      // ONE plan for all rules: a rule must see what the earlier ones wrote
+      // (`5D_Typ` is produced by one rule and matched by dozens after it), so
+      // planning per rule to count them would silently break every chain.
+      // Each write carries its rule id instead.
+      for (const r of pending) if (r.enabled) counts.set(r.id, 0);
+      for (const w of writes) {
+        const result = w.op === 'set'
+          ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
+          : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
+        if (!result) continue;
+        counts.set(w.ruleId, (counts.get(w.ruleId) ?? 0) + 1);
+        ok += 1;
       }
       if (ok === 0 && reverted === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
@@ -320,15 +354,37 @@ export function AttributeRulesDialog({
                 {rules.length > 0 && <Badge variant="secondary" className="ml-1.5">{rules.length}</Badge>}
               </TabsTrigger>
             </TabsList>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => onOpenChange(false)}
-              aria-label="Close attribute rules"
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X />
-            </Button>
+            <div className="flex items-center gap-1">
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".xml,text/xml,application/xml"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) void importXml(f);
+                }}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fileRef.current?.click()}
+                title="Import a RIBiTWO mapping file (<transform>/<map>)"
+              >
+                <Upload className="mr-1.5 h-3.5 w-3.5" />
+                Import XML
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => onOpenChange(false)}
+                aria-label="Close attribute rules"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X />
+              </Button>
+            </div>
           </div>
 
           {/* ── Tab 1: build a rule ── */}

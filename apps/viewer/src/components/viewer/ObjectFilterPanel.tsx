@@ -53,6 +53,7 @@ import {
 } from '@/lib/search/filter-schema';
 import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
+import { compileQuery, isQueryExpr } from '@/lib/value-query';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { AttributeRulesDialog } from './AttributeRulesDialog';
 import { projectKeyFor } from '@/lib/attribute-rules-store';
@@ -75,30 +76,6 @@ function isObjectDefinitionClass(typeName: string): boolean {
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
 const ISOLATE_DEBOUNCE_MS = 250;
-
-/** Does the value text use the query language (`*` wildcard, `&` AND, `||` OR)
- *  rather than being a single literal value picked/typed verbatim? */
-function isQueryExpr(s: string): boolean {
-  return s.includes('*') || s.includes('&') || s.includes('|');
-}
-
-/** One term → an anchored, case-insensitive regex with `*` standing for any run
- *  of characters (so a bare term is an exact match, `A*` starts-with, etc). */
-function termToRegExp(term: string): RegExp {
-  const escaped = term.trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`, 'i');
-}
-
-/** Compile `A & B || C` into a predicate — OR of AND-groups (`&` binds tighter
- *  than `||`). Every term in an AND-group must match the SAME value. */
-function compileQuery(input: string): (value: string) => boolean {
-  const groups = input
-    .split('||')
-    .map((g) => g.split('&').map((t) => t.trim()).filter(Boolean).map(termToRegExp))
-    .filter((g) => g.length > 0);
-  if (groups.length === 0) return () => false;
-  return (value: string) => groups.some((and) => and.every((re) => re.test(value)));
-}
 
 /** Concrete option values a field selects via a query — matched against each
  *  option's raw value OR its display label (rounded numbers, prefix-stripped
@@ -720,6 +697,17 @@ export function ObjectFilterPanel() {
     return out.sort((a, b) => a.psetName.localeCompare(b.psetName) || a.propName.localeCompare(b.propName));
   }, [rows]);
 
+  /** Resolve an ifc-level parameter by name for the attribute-rules assistant.
+   *  Mapping files use these both as copy sources and as conditions
+   *  (`ifcTypeObjectName` feeds 5D_Typ, which 56 later maps key off), and they
+   *  are not properties, so the property readers cannot answer them. */
+  const readIfcParam = useCallback((entityId: number, name: string): string | null => {
+    if (!activeStore) return null;
+    const param = ATTRIBUTE_PARAMS.find((p) => p.label.toLowerCase() === name.toLowerCase());
+    if (!param) return null;
+    return param.accessor(activeStore, entityId) || null;
+  }, [activeStore]);
+
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const setValue = useCallback((id: string, value: string) => {
@@ -880,6 +868,8 @@ export function ObjectFilterPanel() {
         store={activeStore}
         propertyRefs={propertyRefs}
         projectKey={projectKeyFor(activeModel?.name, totalObjects)}
+        universe={modelSummary.objectIds}
+        readIfcParam={readIfcParam}
       />
     </div>
   );

@@ -21,6 +21,7 @@
  */
 
 import { PropertyValueType } from '@ifc-lite/data';
+import { compileValueMatch } from './value-query.js';
 
 /**
  * How an action treats an attribute that already has a value — RIBiTWO's
@@ -117,10 +118,33 @@ export type RuleAction =
   | { kind: 'rename'; source: PropRef; propName: string }
   | { kind: 'delete'; targets: PropRef[] };
 
+/**
+ * A condition the rule evaluates ITSELF, at apply time — how an imported
+ * RIBiTWO `<map><in …></map>` works. Unlike the filter snapshot, this can name
+ * an attribute that an earlier rule creates, which is what the mapping files
+ * are built on: `5D_Typ` is written by one rule and matched by 56 later ones.
+ */
+export interface RuleMatch {
+  /** `Pset\Property`, a bare property name resolved across sets, or an ifc*
+   *  parameter the caller's reader understands. */
+  attribute: string;
+  /** A value query (`*`, `&`, `||`) or `<Not Existing>` for "must be absent". */
+  value: string;
+}
+
+/** RIBiTWO's marker for "this attribute must not be present". */
+export const NOT_EXISTING = '<Not Existing>';
+
 export interface AttributeRule {
   id: string;
   /** What the filter said when this rule was collected (display only). */
   conditions: RuleConditionSnapshot[];
+  /**
+   * Conditions the rule resolves on its own. When present, the rule matches
+   * objects by evaluating these instead of relying on `entityIds`, so it keeps
+   * working after a reload and can react to what earlier rules wrote.
+   */
+  match?: RuleMatch[];
   /** The objects the filter matched at that moment. */
   entityIds: number[];
   action: RuleAction;
@@ -134,6 +158,10 @@ export interface AttributeRule {
 
 /** One resolved property write. `value` is set for `op: 'set'`. */
 export interface RuleWrite {
+  /** The rule that produced it — so a single chained plan can still report
+   *  per-rule counts. Planning rules one at a time to count them would break
+   *  the chain, since a rule must see what the earlier ones wrote. */
+  ruleId: string;
   entityId: number;
   op: 'set' | 'delete';
   psetName: string;
@@ -184,21 +212,78 @@ function allowedByMode(mode: WriteMode, current: string | null): boolean {
  */
 export function planWrites(
   rules: readonly AttributeRule[],
-  read: PropReader,
-  readByName: (entityId: number, propName: string) => string | null,
+  baseRead: PropReader,
+  baseReadByName: (entityId: number, propName: string) => string | null,
+  /** Candidate objects for rules that resolve their own `match` conditions. */
+  universe: readonly number[] = [],
 ): RuleWrite[] {
   const writes: RuleWrite[] = [];
 
+  // Values written so far in THIS plan, so a rule sees what earlier rules
+  // produced — the mapping files depend on it (`5D_Typ` is created by one rule
+  // and matched by dozens after it). Keyed by address and, separately, by bare
+  // name, since conditions address attributes both ways.
+  const live = new Map<string, string | null>();
+  const liveByName = new Map<string, string | null>();
+  const addrKey = (id: number, pset: string, prop: string) => `${id}|${pset}|${prop}`;
+  const nameKey = (id: number, prop: string) => `${id}|${prop}`;
+
+  const read: PropReader = (id, pset, prop) => {
+    const k = addrKey(id, pset, prop);
+    return live.has(k) ? live.get(k)! : baseRead(id, pset, prop);
+  };
+  const readByName = (id: number, prop: string) => {
+    const k = nameKey(id, prop);
+    return liveByName.has(k) ? liveByName.get(k)! : baseReadByName(id, prop);
+  };
+  let currentRuleId = '';
+  const record = (w: Omit<RuleWrite, 'ruleId'>) => {
+    const v = w.op === 'delete' ? null : String(w.value ?? '');
+    live.set(addrKey(w.entityId, w.psetName, w.propName), v);
+    liveByName.set(nameKey(w.entityId, w.propName), v);
+    writes.push({ ...w, ruleId: currentRuleId });
+  };
+
+  /** `Pset\Property` addresses one set; a bare name is looked up across sets. */
+  const readAttribute = (id: number, attribute: string): string | null => {
+    const sep = attribute.indexOf('\\');
+    return sep >= 0
+      ? read(id, attribute.slice(0, sep), attribute.slice(sep + 1))
+      : readByName(id, attribute);
+  };
+
+  const matches = (rule: AttributeRule, id: number): boolean => {
+    if (!rule.match || rule.match.length === 0) return true;
+    return rule.match.every((c) => {
+      const value = readAttribute(id, c.attribute);
+      if (c.value.trim().toLowerCase() === NOT_EXISTING.toLowerCase()) {
+        return value === null || value === '';
+      }
+      if (value === null) return false;
+      return compileValueMatch(c.value)(value);
+    });
+  };
+
   for (const rule of rules) {
     if (!rule.enabled) continue;
+    currentRuleId = rule.id;
     const a = rule.action;
-    for (const entityId of rule.entityIds) {
+    // A rule that carries its own conditions resolves them against the whole
+    // model (or a narrower snapshot when it also has one). The discriminator is
+    // whether `match` EXISTS, not whether it has entries: an imported mapping
+    // whose only <in> was `cpiID="*"` has no conditions left and still means
+    // "every object".
+    const candidates = rule.match !== undefined
+      ? (rule.entityIds.length > 0 ? rule.entityIds : universe)
+      : rule.entityIds;
+    for (const entityId of candidates) {
+      if (!matches(rule, entityId)) continue;
       switch (a.kind) {
         case 'add': {
           if (!allowedByMode(a.mode, read(entityId, a.target.psetName, a.target.propName))) break;
           const value = coerceValue(a.value, a.dataType);
           if (value === null) break;
-          writes.push({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
+          record({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
           break;
         }
         case 'compose': {
@@ -208,28 +293,32 @@ export function planWrites(
           // on this object — writing "" would just add noise.
           const value = coerceValue(resolved, a.dataType);
           if (value === null) break;
-          writes.push({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
+          record({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
           break;
         }
         case 'copy': {
-          const value = read(entityId, a.source.psetName, a.source.propName);
+          // An imported mapping addresses its source by bare name ("take
+          // ifcTypeObjectName"), so an empty set means "whichever set has it".
+          const value = a.source.psetName === ''
+            ? readByName(entityId, a.source.propName)
+            : read(entityId, a.source.psetName, a.source.propName);
           if (value === null || value === '') break;
           if (!allowedByMode(a.mode, read(entityId, a.target.psetName, a.target.propName))) break;
-          writes.push({ entityId, op: 'set', ...a.target, value, valueType: PropertyValueType.Label });
+          record({ entityId, op: 'set', ...a.target, value, valueType: PropertyValueType.Label });
           break;
         }
         case 'rename': {
           const value = read(entityId, a.source.psetName, a.source.propName);
           if (value === null) break;
           // Rename inside the same set: write the new name, drop the old one.
-          writes.push({ entityId, op: 'set', psetName: a.source.psetName, propName: a.propName, value, valueType: PropertyValueType.Label });
-          writes.push({ entityId, op: 'delete', psetName: a.source.psetName, propName: a.source.propName });
+          record({ entityId, op: 'set', psetName: a.source.psetName, propName: a.propName, value, valueType: PropertyValueType.Label });
+          record({ entityId, op: 'delete', psetName: a.source.psetName, propName: a.source.propName });
           break;
         }
         case 'delete': {
           for (const t of a.targets) {
             if (read(entityId, t.psetName, t.propName) === null) continue;
-            writes.push({ entityId, op: 'delete', ...t });
+            record({ entityId, op: 'delete', ...t });
           }
           break;
         }
