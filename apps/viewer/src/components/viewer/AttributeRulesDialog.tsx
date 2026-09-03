@@ -6,49 +6,44 @@
  * AttributeRulesDialog — the RIBiTWO-style "Attributregeln" assistant
  * (RIB BIM Qualifier §6.8.1), opened from the object filter.
  *
- * Layout follows the manual's assistant: a *Bereichsauswahl* (tabs, one per
- * action), a *Bedingung* pane on the left, an *Aktion* pane on the right, and
- * the *Ausgangstabelle* of collected rules below with reorder / delete.
- * "Regeln sammeln" appends the current action as a rule; "Anwenden" writes them
- * and closes; "Schließen" discards.
+ * Two tabs, laid out like the viewer's Search/Filter modal:
+ *   • **Rules** — build one rule: pick the action, see the *Bedingung* the
+ *     object filter supplies, fill in the *Aktion*.
+ *   • **Rules table** — RIBiTWO's *Attributregeln* grid of everything
+ *     collected, with enable/disable, reorder and delete per rule.
  *
  * The Bedingung is always the object filter's current state — RIBiTWO's
- * `Alle Objekte | Aus Filter` path — so it is shown read-only together with the
- * object count it matched. Each collected rule keeps its own snapshot of that,
- * so you can re-filter between rules and apply them all at once.
+ * `Alle Objekte | Aus Filter` path — so it is shown read-only together with
+ * the object count it matched. Each collected rule keeps its own snapshot, so
+ * you can re-filter between rules and apply them all at once.
  *
  * Writes go through `mutationSlice` (`setProperty` / `deleteProperty`), which
  * records them on the undo stack and includes them in the IFC export.
  */
 
 import { useCallback, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, ListPlus, X } from 'lucide-react';
+import { ListPlus, Sparkles, Table2, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { PropertyValueType } from '@ifc-lite/data';
 import { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/table';
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/toast';
+import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, describeAction, planWrites, templateTokens,
-  type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot, type WriteMode,
+  ACTION_LABELS, planWrites,
+  type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
 } from '@/lib/attribute-rules';
+import {
+  ActionEditor, EMPTY_ACTION_FORM, refKey,
+  type ActionForm, type ActionKind,
+} from './attribute-rules/ActionEditor';
+import { RulesTable } from './attribute-rules/RulesTable';
 
 export interface AttributeRulesDialogProps {
   open: boolean;
@@ -63,14 +58,7 @@ export interface AttributeRulesDialogProps {
   propertyRefs: readonly PropRef[];
 }
 
-type ActionKind = RuleAction['kind'];
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
-
-/** PropRef -> one Select value. JSON-encoded rather than joined on a separator
- *  because a property set or property name may contain any character, and the
- *  value also ends up in the DOM as a Radix item value. */
-const refKey = (r: PropRef) => JSON.stringify([r.psetName, r.propName]);
-const refLabel = (r: PropRef) => `${r.psetName} · ${r.propName}`;
 
 export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs,
@@ -84,24 +72,19 @@ export function AttributeRulesDialog({
     })),
   );
 
+  const [tab, setTab] = useState<'rules' | 'table'>('rules');
   const [kind, setKind] = useState<ActionKind>('add');
+  const [form, setForm] = useState<ActionForm>(EMPTY_ACTION_FORM);
   const [rules, setRules] = useState<AttributeRule[]>([]);
   const [applying, setApplying] = useState(false);
 
-  // Action fields. One flat set of fields shared by the tabs — each tab reads
-  // only what it needs, so switching tabs keeps what you already typed (the
-  // manual's "Die aktuelle Festlegung der Aktion bleibt erhalten").
-  const [psetName, setPsetName] = useState('');
-  const [propName, setPropName] = useState('');
-  const [value, setValue] = useState('');
-  const [template, setTemplate] = useState('');
-  const [mode, setMode] = useState<WriteMode>('overwrite');
-  const [sourceKey, setSourceKey] = useState('');
+  const patch = useCallback((p: Partial<ActionForm>) => setForm((f) => ({ ...f, ...p })), []);
 
   const refByKey = useMemo(() => new Map(propertyRefs.map((r) => [refKey(r), r])), [propertyRefs]);
-  const source = sourceKey ? refByKey.get(sourceKey) : undefined;
-
-  /** Distinct attribute names, for the @Attr{…} hint on the compose tab. */
+  const psetNames = useMemo(
+    () => [...new Set(propertyRefs.map((r) => r.psetName))].sort((a, b) => a.localeCompare(b)),
+    [propertyRefs],
+  );
   const attributeNames = useMemo(
     () => [...new Set(propertyRefs.map((r) => r.propName))].sort((a, b) => a.localeCompare(b)),
     [propertyRefs],
@@ -109,63 +92,64 @@ export function AttributeRulesDialog({
 
   /** The action the form currently describes, or null when incomplete. */
   const draft = useMemo<RuleAction | null>(() => {
-    const target = { psetName: psetName.trim(), propName: propName.trim() };
+    const target = { psetName: form.psetName.trim(), propName: form.propName.trim() };
     const hasTarget = target.psetName !== '' && target.propName !== '';
+    const source = form.sourceKey ? refByKey.get(form.sourceKey) : undefined;
+    const { dataType, unit, mode } = form;
     switch (kind) {
-      case 'add':     return hasTarget && value.trim() !== '' ? { kind, target, value: value.trim(), mode } : null;
-      case 'compose': return hasTarget && template.trim() !== '' ? { kind, target, template: template.trim(), mode } : null;
+      case 'add':     return hasTarget && form.value.trim() !== '' ? { kind, target, value: form.value.trim(), dataType, unit, mode } : null;
+      case 'compose': return hasTarget && form.template.trim() !== '' ? { kind, target, template: form.template.trim(), dataType, unit, mode } : null;
       case 'copy':    return hasTarget && source ? { kind, source, target, mode } : null;
-      case 'rename':  return source && target.propName !== '' ? { kind, source, propName: target.propName } : null;
-      case 'delete':  return source ? { kind, targets: [source] } : null;
+      case 'rename':  return source && form.newName.trim() !== '' ? { kind, source, propName: form.newName.trim() } : null;
+      case 'delete': {
+        const targets = form.deleteKeys.map((k) => refByKey.get(k)).filter((r): r is PropRef => !!r);
+        return targets.length > 0 ? { kind, targets } : null;
+      }
     }
-  }, [kind, psetName, propName, value, template, mode, source]);
+  }, [kind, form, refByKey]);
 
   const collect = () => {
     if (!draft) return;
     setRules((prev) => [
       ...prev,
-      { id: `${Date.now()}-${prev.length}`, conditions, entityIds, action: draft },
+      { id: `${Date.now()}-${prev.length}`, conditions, entityIds, action: draft, enabled: true },
     ]);
     // Empty the fields that identify THIS rule, so the draft stops being a
     // valid action — otherwise the rule just collected would also still be
-    // pending and every write would be planned twice. The property set and
-    // mode stay, since the next rule usually targets the same set.
-    setPropName('');
-    setValue('');
-    setTemplate('');
-    setSourceKey('');
+    // pending and every write would be planned twice. Property set, type,
+    // unit and mode stay, since the next rule usually shares them.
+    patch({ propName: '', value: '', template: '', sourceKey: '', newName: '', deleteKeys: [] });
+    setTab('table');
   };
 
-  const move = (index: number, delta: number) => setRules((prev) => {
+  const toggleRule = (id: string) => setRules((p) => p.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
+  const removeRule = (id: string) => setRules((p) => p.filter((r) => r.id !== id));
+  const moveRule = (id: string, delta: number) => setRules((prev) => {
+    const i = prev.findIndex((r) => r.id === id);
+    const to = i + delta;
+    if (i < 0 || to < 0 || to >= prev.length) return prev;
     const next = [...prev];
-    const to = index + delta;
-    if (to < 0 || to >= next.length) return prev;
-    [next[index], next[to]] = [next[to], next[index]];
+    [next[i], next[to]] = [next[to], next[i]];
     return next;
   });
 
-  const remove = (index: number) => setRules((prev) => prev.filter((_, i) => i !== index));
-
-  /** Rules to run: whatever was collected, plus the unsaved draft — so a single
-   *  rule can be applied without the extra "sammeln" click. */
+  /** Rules to run: whatever is in the table, plus the unsaved draft — so a
+   *  single rule can be applied without the extra "add to table" click. */
   const pending = useMemo<AttributeRule[]>(
-    () => (draft ? [...rules, { id: 'draft', conditions, entityIds, action: draft }] : rules),
+    () => (draft ? [...rules, { id: 'draft', conditions, entityIds, action: draft, enabled: true }] : rules),
     [rules, draft, conditions, entityIds],
   );
 
-  /** Read property values for one entity, as strings (the rule model is
-   *  string-valued).
+  /**
+   * Read property values for one entity, as strings.
    *
-   *  Reads through `IfcStoreBase.getProperties`, NOT the columnar
-   *  `properties` table: a STEP parse leaves that table empty on purpose and
-   *  answers through `getProperties` instead (issue #577, see
-   *  `packages/data/src/data-store.ts`), so going through the table returned no
-   *  sets at all here and every value-reading action silently did nothing. The
-   *  table is still used when it actually holds rows (cache-restored stores).
-   *
-   *  Results are cached per entity for the lifetime of one dialog session —
-   *  planning re-reads the same entities for every rule, and `getProperties`
-   *  resolves them from the source each time. */
+   * Reads through `IfcStoreBase.getProperties`, NOT the columnar `properties`
+   * table: a STEP parse leaves that table empty on purpose and answers through
+   * `getProperties` instead (issue #577, see `packages/data/src/data-store.ts`).
+   * The table is still preferred when it actually holds rows (cache-restored
+   * stores). Sets are cached per entity for one dialog session, since planning
+   * re-reads the same entities for every rule.
+   */
   const readers = useMemo(() => {
     const cache = new Map<number, Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>>();
     const setsOf = (entityId: number) => {
@@ -203,12 +187,14 @@ export function AttributeRulesDialog({
     [store, pending, readers],
   );
 
+  const activeRuleCount = pending.filter((r) => r.enabled).length;
+
   const apply = useCallback(() => {
     if (!modelId || !store || writes.length === 0) return;
     setApplying(true);
     try {
-      // `setProperty` needs a mutation view registered for the model; create one
-      // lazily the same way the zone write-back does (useZoneSpatialZones).
+      // `setProperty` needs a mutation view registered for the model; create
+      // one lazily the same way the zone write-back does.
       if (!getMutationView(modelId)) {
         const view = new MutablePropertyView(store.properties || null, modelId);
         configureMutationView(view, store);
@@ -217,7 +203,7 @@ export function AttributeRulesDialog({
       let ok = 0;
       for (const w of writes) {
         const result = w.op === 'set'
-          ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', PropertyValueType.Label)
+          ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
           : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
         if (result) ok += 1;
       }
@@ -225,231 +211,152 @@ export function AttributeRulesDialog({
         toast.error('No attribute could be written (the model may be read-only in this session).');
         return;
       }
-      toast.success(`Applied ${pending.length} rule(s): ${ok.toLocaleString()} attribute write(s).`);
+      toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s).`);
       setRules([]);
+      setForm(EMPTY_ACTION_FORM);
       onOpenChange(false);
     } finally {
       setApplying(false);
     }
-  }, [modelId, store, writes, pending.length, getMutationView, registerMutationView, setProperty, deleteProperty, onOpenChange]);
-
-  const targetFields = (
-    <div className="grid grid-cols-2 gap-3">
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="ar-pset">Property set</Label>
-        <Input id="ar-pset" value={psetName} onChange={(e) => setPsetName(e.target.value)} placeholder="Pset_Custom" className="h-8" />
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="ar-prop">Attribute</Label>
-        <Input id="ar-prop" value={propName} onChange={(e) => setPropName(e.target.value)} placeholder="Status" className="h-8" />
-      </div>
-    </div>
-  );
-
-  const modeField = (
-    <div className="flex flex-col gap-1.5">
-      <Label>Mode</Label>
-      <Select value={mode} onValueChange={(v) => setMode(v as WriteMode)}>
-        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="overwrite">Overwrite — always write</SelectItem>
-          <SelectItem value="add">Add — only where empty</SelectItem>
-        </SelectContent>
-      </Select>
-    </div>
-  );
-
-  const sourceField = (label: string) => (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
-      <Select value={sourceKey} onValueChange={setSourceKey}>
-        <SelectTrigger className="h-8"><SelectValue placeholder="Select an attribute…" /></SelectTrigger>
-        <SelectContent className="max-h-72">
-          {propertyRefs.map((r) => (
-            <SelectItem key={refKey(r)} value={refKey(r)}>{refLabel(r)}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
+  }, [modelId, store, writes, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, onOpenChange]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] max-w-5xl flex-col gap-0 p-0">
-        <DialogHeader className="border-b px-5 py-3">
-          <DialogTitle>Attribute rules</DialogTitle>
-          <DialogDescription>
-            Write attributes onto the objects your filter matched. Rules are collected below and applied together.
-          </DialogDescription>
-        </DialogHeader>
+      <DialogContent hideCloseButton className="flex h-[86vh] max-w-5xl flex-col gap-0 p-0">
+        <DialogTitle className="sr-only">Attribute rules</DialogTitle>
+        <DialogDescription className="sr-only">
+          Write attributes onto the objects the object filter matched.
+        </DialogDescription>
 
-        <Tabs value={kind} onValueChange={(v) => setKind(v as ActionKind)} className="flex min-h-0 flex-1 flex-col">
-          <div className="border-b px-5 py-2">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)} className="flex min-h-0 flex-1 flex-col">
+          {/* Header: pill tabs left, close right — same shape as Search/Filter. */}
+          <div className="flex items-center justify-between border-b px-4 py-3">
             <TabsList>
-              {KINDS.map((k) => <TabsTrigger key={k} value={k}>{ACTION_LABELS[k]}</TabsTrigger>)}
+              <TabsTrigger value="rules">
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                Rules
+              </TabsTrigger>
+              <TabsTrigger value="table">
+                <Table2 className="mr-1.5 h-3.5 w-3.5" />
+                Rules table
+                {rules.length > 0 && <Badge variant="secondary" className="ml-1.5">{rules.length}</Badge>}
+              </TabsTrigger>
             </TabsList>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => onOpenChange(false)}
+              aria-label="Close attribute rules"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X />
+            </Button>
           </div>
 
-          <div className="grid min-h-0 flex-1 grid-cols-2 gap-0 overflow-hidden">
-            {/* ── Bedingung — taken from the object filter ── */}
-            <section className="flex min-h-0 flex-col border-r">
-              <header className="flex items-center justify-between border-b px-5 py-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Condition</span>
-                <Badge variant="secondary">{entityIds.length.toLocaleString()} objects</Badge>
-              </header>
-              <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-3">
-                {conditions.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No filter is active — every rule would hit all {entityIds.length.toLocaleString()} objects.
-                    Set a value in the object filter first to narrow it down.
-                  </p>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Attribute</TableHead>
-                        <TableHead>Value</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {conditions.map((c) => (
-                        <TableRow key={c.label}>
-                          <TableCell className="font-medium">{c.label}</TableCell>
-                          <TableCell className="font-mono text-xs">{c.value}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                )}
-                <p className="mt-3 text-[11px] text-muted-foreground">
-                  Taken from the object filter. Adjust it there to change which objects a rule hits.
-                </p>
-              </div>
-            </section>
-
-            {/* ── Aktion ── */}
-            <section className="flex min-h-0 flex-col">
-              <header className="border-b px-5 py-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Action</span>
-              </header>
-              <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-3">
-                <TabsContent value="add" className="mt-0 flex flex-col gap-3">
-                  {targetFields}
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="ar-value">Value</Label>
-                    <Input id="ar-value" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Final" className="h-8" />
-                  </div>
-                  {modeField}
-                </TabsContent>
-
-                <TabsContent value="compose" className="mt-0 flex flex-col gap-3">
-                  {targetFields}
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="ar-template">Value from existing attributes</Label>
-                    <Input id="ar-template" value={template} onChange={(e) => setTemplate(e.target.value)} placeholder="@Attr{ProjectID}@Attr{LevelNo}" className="h-8 font-mono" />
-                    <p className="text-[11px] text-muted-foreground">
-                      <code>@Attr{'{Name}'}</code> inserts that attribute&rsquo;s value. Text outside the tokens is kept.
-                    </p>
-                    {templateTokens(template).length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {templateTokens(template).map((t) => (
-                          <Badge key={t} variant={attributeNames.includes(t) ? 'secondary' : 'destructive'}>{t}</Badge>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  {modeField}
-                </TabsContent>
-
-                <TabsContent value="copy" className="mt-0 flex flex-col gap-3">
-                  {sourceField('Copy from')}
-                  <Separator />
-                  {targetFields}
-                  {modeField}
-                </TabsContent>
-
-                <TabsContent value="rename" className="mt-0 flex flex-col gap-3">
-                  {sourceField('Rename')}
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="ar-newname">New name</Label>
-                    <Input id="ar-newname" value={propName} onChange={(e) => setPropName(e.target.value)} placeholder="State" className="h-8" />
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">Stays in the same property set: the value moves to the new name and the old one is removed.</p>
-                </TabsContent>
-
-                <TabsContent value="delete" className="mt-0 flex flex-col gap-3">
-                  {sourceField('Attribute to delete')}
-                  <p className="text-[11px] text-muted-foreground">Removed from every matched object that carries it.</p>
-                </TabsContent>
-              </div>
-            </section>
-          </div>
-
-          {/* ── Ausgangstabelle — collected rules ── */}
-          <div className="flex max-h-[34%] min-h-[6rem] flex-col border-t">
-            <header className="flex items-center justify-between border-b px-5 py-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Collected rules</span>
-              <Button type="button" variant="secondary" size="sm" onClick={collect} disabled={!draft}>
-                <ListPlus className="mr-1.5 h-3.5 w-3.5" />
-                Collect rule
-              </Button>
-            </header>
-            <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-              {rules.length === 0 ? (
-                <p className="px-5 py-4 text-sm text-muted-foreground">
-                  No rules collected. Fill in an action and press <em>Collect rule</em> to stack several, or apply the current one directly.
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-40">Action</TableHead>
-                      <TableHead>Definition</TableHead>
-                      <TableHead className="w-28">Objects</TableHead>
-                      <TableHead className="w-24 text-right">Order</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rules.map((r, i) => (
-                      <TableRow key={r.id}>
-                        <TableCell><Badge variant="secondary">{ACTION_LABELS[r.action.kind]}</Badge></TableCell>
-                        <TableCell className="font-mono text-xs">{describeAction(r.action)}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{r.entityIds.length.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-0.5">
-                            <Button type="button" variant="ghost" size="icon-sm" onClick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">
-                              <ArrowUp className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button type="button" variant="ghost" size="icon-sm" onClick={() => move(i, 1)} disabled={i === rules.length - 1} aria-label="Move down">
-                              <ArrowDown className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button type="button" variant="ghost" size="icon-sm" onClick={() => remove(i)} aria-label="Delete rule" className="text-red-500 hover:bg-red-500/10 hover:text-red-400">
-                              <X className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
+          {/* ── Tab 1: build a rule ── */}
+          <TabsContent value="rules" className="mt-0 flex min-h-0 flex-1 flex-col">
+            {/* Action picker */}
+            <div className="flex flex-wrap gap-1.5 border-b px-4 py-2.5">
+              {KINDS.map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setKind(k)}
+                  aria-pressed={kind === k}
+                  className={cn(
+                    'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                    kind === k
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                  )}
+                >
+                  {ACTION_LABELS[k]}
+                </button>
+              ))}
             </div>
-          </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] overflow-hidden">
+              {/* Bedingung */}
+              <section className="flex min-h-0 flex-col border-r">
+                <header className="flex items-center justify-between border-b px-4 py-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Condition</span>
+                  <Badge variant={conditions.length > 0 ? 'default' : 'secondary'}>
+                    {entityIds.length.toLocaleString()} objects
+                  </Badge>
+                </header>
+                <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                  {conditions.length === 0 ? (
+                    <div className="rounded-md border border-dashed px-3 py-4">
+                      <p className="text-xs text-muted-foreground">
+                        No filter is active — a rule would hit all {entityIds.length.toLocaleString()} objects.
+                        Set a value in the object filter to narrow it down.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      {conditions.map((c) => (
+                        <div key={c.label} className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5">
+                          <span className="truncate text-xs font-medium">{c.label}</span>
+                          <span className="truncate font-mono text-[11px] text-muted-foreground">{c.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-3 text-[11px] text-muted-foreground">
+                    Taken from the object filter. Adjust it there to change which objects a rule hits.
+                  </p>
+                </div>
+              </section>
+
+              {/* Aktion */}
+              <section className="flex min-h-0 flex-col">
+                <header className="border-b px-4 py-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Action — {ACTION_LABELS[kind]}
+                  </span>
+                </header>
+                <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                  <ActionEditor
+                    kind={kind}
+                    form={form}
+                    patch={patch}
+                    propertyRefs={propertyRefs}
+                    psetNames={psetNames}
+                    attributeNames={attributeNames}
+                  />
+                </div>
+                <div className="border-t px-4 py-2.5">
+                  <Button type="button" variant="secondary" size="sm" onClick={collect} disabled={!draft} className="w-full">
+                    <ListPlus className="mr-1.5 h-3.5 w-3.5" />
+                    Add to table
+                  </Button>
+                </div>
+              </section>
+            </div>
+          </TabsContent>
+
+          {/* ── Tab 2: the collected rules ── */}
+          <TabsContent value="table" className="mt-0 flex min-h-0 flex-1 flex-col">
+            <div className="scrollbar-thin min-h-0 flex-1 overflow-auto">
+              <RulesTable rules={rules} onToggle={toggleRule} onMove={moveRule} onRemove={removeRule} />
+            </div>
+          </TabsContent>
         </Tabs>
 
-        <DialogFooter className="items-center justify-between border-t px-5 py-3 sm:justify-between">
+        {/* Footer — shared by both tabs */}
+        <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
           <span className="text-xs text-muted-foreground">
             {writes.length > 0
-              ? `${pending.length} rule(s) · ${writes.length.toLocaleString()} attribute write(s)`
+              ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)`
               : 'Nothing to apply yet'}
           </span>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="button" onClick={apply} disabled={writes.length === 0 || applying}>
               {applying ? 'Applying…' : 'Apply'}
             </Button>
           </div>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

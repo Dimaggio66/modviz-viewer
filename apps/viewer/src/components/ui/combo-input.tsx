@@ -140,7 +140,16 @@ export function ComboInput({
               commit(filtered[highlight]);
             }
           } else if (e.key === 'Escape') {
-            if (open) { e.stopPropagation(); setOpen(false); }
+            if (open) {
+              // Escape closes the suggestion list only. React's
+              // stopPropagation doesn't reach Radix's DOCUMENT-level dismiss
+              // listener, so a combo inside a Dialog would close the whole
+              // dialog on the first Escape — stop the native event too.
+              e.stopPropagation();
+              e.nativeEvent.stopImmediatePropagation();
+              e.preventDefault();
+              setOpen(false);
+            }
           }
         }}
         className={className}
