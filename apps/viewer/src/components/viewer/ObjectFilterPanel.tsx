@@ -196,6 +196,21 @@ function roundLabel(raw: string): string {
   return raw.trim() !== '' && Number.isFinite(n) ? String(Number(n.toFixed(6))) : raw;
 }
 
+/** Order value strings for the dropdown: numeric values (areas, volumes,
+ *  elevations, ids) compare as numbers so the list runs low→high and the
+ *  largest isn't lexicographically stranded (a plain `.sort()` puts "982"
+ *  after "2318" because it compares "9" vs "2"). Non-numeric values fall back
+ *  to locale order and sort after the numbers. */
+function compareValues(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  const aNum = a.trim() !== '' && Number.isFinite(na);
+  const bNum = b.trim() !== '' && Number.isFinite(nb);
+  if (aNum && bNum) return na - nb;
+  if (aNum !== bNum) return aNum ? -1 : 1;
+  return a.localeCompare(b);
+}
+
 const asOptions = (values: readonly string[]): Option[] => values.map((v) => ({ value: v, label: roundLabel(v) }));
 
 /** The raw (unrounded) value behind a selected/typed label — for numeric cells
@@ -269,7 +284,7 @@ export function ObjectFilterPanel() {
         if (v) seen.add(v);
         if (seen.size >= 5000) break;
       }
-      result.set(label, [...seen].sort());
+      result.set(label, [...seen].sort(compareValues));
     }
     return result;
   }, [activeStore, modelSummary.objectIds]);
@@ -317,10 +332,10 @@ export function ObjectFilterPanel() {
       return groups;
     };
     for (const [propName, g] of group(psets, values.propertyValues)) {
-      out.push({ id: `prop:${propName}`, kind: 'property', label: propName, setNames: g.sets, propName, options: asOptions([...g.values].sort()) });
+      out.push({ id: `prop:${propName}`, kind: 'property', label: propName, setNames: g.sets, propName, options: asOptions([...g.values].sort(compareValues)) });
     }
     for (const [quantityName, g] of group(qtos.map(([s, q]) => [s, q.map(([n]) => n)]), values.quantityValues)) {
-      out.push({ id: `qty:${quantityName}`, kind: 'quantity', label: quantityName, setNames: g.sets, quantityName, options: asOptions([...g.values].sort()) });
+      out.push({ id: `qty:${quantityName}`, kind: 'quantity', label: quantityName, setNames: g.sets, quantityName, options: asOptions([...g.values].sort(compareValues)) });
     }
 
     out.sort((a, b) => a.label.localeCompare(b.label));
