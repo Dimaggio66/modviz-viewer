@@ -203,47 +203,41 @@ export function ObjectFilterPanel() {
   const [selections, setSelections] = useState<Map<string, string>>(new Map());
   const [matched, setMatched] = useState<number | null>(null);
 
-  // One pass over the model's geometry: the object ids (universe for
-  // client-side attribute filtering + the "N Objects" total) and the
-  // geometry-bearing IFC classes (the "Bauteile" the ifcType picker offers —
-  // excludes schema infrastructure like RIBiTWO does).
+  // Object universe: every IfcObjectDefinition instance (products + type
+  // objects + groups + spatial objects like rooms/spaces) from the type index
+  // — NOT only the geometry-bearing ones, so the value dropdowns list every
+  // object's attributes (rooms, spaces, …) the way RIBiTWO does, and the total
+  // matches. ifcType options stay the geometry-bearing classes ("Bauteile").
   const modelSummary = useMemo(() => {
-    const meshes = activeModel?.geometryResult?.meshes;
-    if (!meshes) return { objectIds: [] as number[], ifcTypes: [] as string[] };
-    const ids = new Set<number>();
-    const types = new Set<string>();
-    for (const m of meshes) {
-      ids.add(m.expressId);
-      if (m.ifcType) types.add(m.ifcType);
-    }
-    return { objectIds: [...ids], ifcTypes: [...types].sort() };
-  }, [activeModel?.geometryResult]);
-
-  // Total "objects" the RIBiTWO way: every IfcObjectDefinition instance
-  // (products + type objects + groups/systems + project), not just the
-  // geometry-bearing ones. Summed over the disjoint byType buckets.
-  const totalObjects = useMemo(() => {
     const byType = activeStore?.entityIndex?.byType;
-    if (!byType) return 0;
-    let n = 0;
-    for (const [typeName, ids] of byType) {
-      if (isObjectDefinitionClass(typeName)) n += ids.length;
+    const objectIds: number[] = [];
+    if (byType) {
+      for (const [typeName, ids] of byType) {
+        if (isObjectDefinitionClass(typeName)) for (const id of ids) objectIds.push(id);
+      }
     }
-    return n;
-  }, [activeStore]);
+    const meshes = activeModel?.geometryResult?.meshes;
+    const types = new Set<string>();
+    if (meshes) for (const m of meshes) if (m.ifcType) types.add(m.ifcType);
+    return { objectIds, ifcTypes: [...types].sort() };
+  }, [activeStore, activeModel?.geometryResult]);
+
+  const totalObjects = modelSummary.objectIds.length;
 
   // Distinct values per client-side attribute (sampled + capped) so those
   // cells are dropdowns too, not just free-text — every value cell offers both.
   const attributeValues = useMemo(() => {
     const result = new Map<string, string[]>();
     if (!activeStore) return result;
-    const sample = modelSummary.objectIds.slice(0, 5000);
+    // Scan the whole object universe (bounded for pathological models) and
+    // keep a generous distinct set, so dropdowns aren't truncated like before.
+    const sample = modelSummary.objectIds.length > 50_000 ? modelSummary.objectIds.slice(0, 50_000) : modelSummary.objectIds;
     for (const { label, accessor } of ATTRIBUTE_PARAMS) {
       const seen = new Set<string>();
       for (const id of sample) {
         const v = accessor(activeStore, id);
         if (v) seen.add(v);
-        if (seen.size >= 200) break;
+        if (seen.size >= 5000) break;
       }
       result.set(label, [...seen].sort());
     }
@@ -291,7 +285,7 @@ export function ObjectFilterPanel() {
     if (!activeStore) return;
     const byId = new Map(rows.map((r) => [r.id, r]));
     const engineRules: FilterRule[] = [];
-    const attrFilters: Array<{ accessor: Accessor; wildcard: boolean; term: string }> = [];
+    const attrFilters: Array<{ accessor: Accessor; wildcard: boolean; term: string; absent: boolean }> = [];
 
     for (const [id, text] of selections) {
       const row = byId.get(id);
@@ -303,8 +297,12 @@ export function ObjectFilterPanel() {
         const { wildcard, term } = parsePattern(t);
         if (term) engineRules.push(Rule.property(row.setName, row.propName, wildcard ? 'contains' : 'eq', term));
       } else if (row.kind === 'attribute') {
-        const { wildcard, term } = parsePattern(t);
-        if (term) attrFilters.push({ accessor: row.accessor, wildcard, term });
+        if (t === NONE_LABEL) {
+          attrFilters.push({ accessor: row.accessor, wildcard: false, term: '', absent: true });
+        } else {
+          const { wildcard, term } = parsePattern(t);
+          if (term) attrFilters.push({ accessor: row.accessor, wildcard, term, absent: false });
+        }
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
         if (vals.length === 0) continue;
@@ -337,7 +335,12 @@ export function ObjectFilterPanel() {
         }
         if (attrFilters.length > 0) {
           const universe = ids ?? modelSummary.objectIds;
-          ids = universe.filter((id) => attrFilters.every((f) => matches(f.accessor(activeStore, id), f.wildcard, f.term)));
+          ids = universe.filter((id) =>
+            attrFilters.every((f) => {
+              const v = f.accessor(activeStore, id);
+              return f.absent ? v === '' : matches(v, f.wildcard, f.term);
+            }),
+          );
         }
         if (cancelled) return;
         const finalIds = ids ?? [];
@@ -361,13 +364,16 @@ export function ObjectFilterPanel() {
   const virtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 44,
+    // Fixed row height (no dynamic measurement) — every row is a single value
+    // cell with an optional set-name subline, both truncated to one line, so a
+    // constant height keeps the total size exact and the list fully scrollable.
+    estimateSize: () => 46,
     overscan: 12,
   });
 
   const comboOptions = (r: Row): string[] => {
     if (r.kind === 'inert') return [];
-    if (r.kind === 'property') return [NONE_LABEL, ...r.options.map((o) => o.label)];
+    if (r.kind === 'property' || r.kind === 'attribute') return [NONE_LABEL, ...r.options.map((o) => o.label)];
     return r.options.map((o) => o.label);
   };
 
@@ -430,12 +436,10 @@ export function ObjectFilterPanel() {
               return (
                 <div
                   key={r.id}
-                  data-index={vi.index}
-                  ref={virtualizer.measureElement}
-                  className="absolute left-0 top-0 w-full border-b border-border/50"
-                  style={{ transform: `translateY(${vi.start}px)` }}
+                  className="absolute left-0 top-0 flex w-full items-center border-b border-border/50"
+                  style={{ height: `${vi.size}px`, transform: `translateY(${vi.start}px)` }}
                 >
-                  <div className="grid grid-cols-2 items-center gap-2 px-3 py-1">
+                  <div className="grid w-full grid-cols-2 items-center gap-2 px-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm text-foreground" title={r.label}>{r.label}</div>
                       {r.kind === 'property' && (
