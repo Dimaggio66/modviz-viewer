@@ -30,7 +30,10 @@ export interface ComboInputProps {
   'aria-label'?: string;
 }
 
-interface Anchor { left: number; top: number; width: number }
+/** Fixed-position placement for the portaled list. Opens downward from `top`
+ *  or, when the input sits too low, upward from `bottom`; `maxHeight` is capped
+ *  to the space actually available so the last option is always reachable. */
+interface Anchor { left: number; width: number; maxHeight: number; top?: number; bottom?: number }
 
 export function ComboInput({
   value,
@@ -59,7 +62,19 @@ export function ComboInput({
     const el = inputRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setAnchor({ left: r.left, top: r.bottom, width: r.width });
+    const gap = 4;
+    const margin = 8;
+    const spaceBelow = window.innerHeight - r.bottom - gap - margin;
+    const spaceAbove = r.top - gap - margin;
+    // Open upward only when there's little room below and more room above,
+    // so a row low in the panel still shows its full (scrollable) list.
+    const openUp = spaceBelow < 200 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(140, Math.floor(openUp ? spaceAbove : spaceBelow));
+    setAnchor(
+      openUp
+        ? { left: r.left, width: r.width, maxHeight, bottom: window.innerHeight - r.top + gap }
+        : { left: r.left, width: r.width, maxHeight, top: r.bottom + gap },
+    );
   }, []);
 
   // Track the input's position while open (capture = also catch ancestor
@@ -131,9 +146,16 @@ export function ComboInput({
           // dialog, so re-enable them here or mouse clicks/scroll are dead.
           // Stop pointerdown from bubbling to the dialog's dismissable layer
           // so selecting a value doesn't also close the whole modal.
-          style={{ position: 'fixed', left: anchor.left, top: anchor.top + 4, minWidth: anchor.width, pointerEvents: 'auto' }}
+          style={{
+            position: 'fixed',
+            left: anchor.left,
+            ...(anchor.top !== undefined ? { top: anchor.top } : { bottom: anchor.bottom }),
+            minWidth: anchor.width,
+            maxHeight: anchor.maxHeight,
+            pointerEvents: 'auto',
+          }}
           onPointerDown={(e) => e.stopPropagation()}
-          className="popover-surface z-[120] max-h-60 w-max max-w-[20rem] overflow-y-auto rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
+          className="popover-surface z-[120] w-max max-w-[20rem] overflow-y-auto rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
         >
           {filtered.map((o, i) => (
             <button
@@ -150,7 +172,6 @@ export function ComboInput({
                   ? 'bg-zinc-100 dark:bg-zinc-800'
                   : 'hover:bg-zinc-50 dark:hover:bg-zinc-900',
               )}
-              title={o}
             >
               {o}
             </button>
