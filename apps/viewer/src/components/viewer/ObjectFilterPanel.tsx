@@ -33,6 +33,7 @@ import { Search, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import { RelationshipType } from '@ifc-lite/data';
 import { Input } from '@/components/ui/input';
 import { ComboInput } from '@/components/ui/combo-input';
 import { cn } from '@/lib/utils';
@@ -73,6 +74,24 @@ const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
   { label: 'ifcObjectType', accessor: (s, id) => s.entities.getObjectType?.(id) ?? '' },
   { label: 'ifcTag', accessor: (s, id) => s.entities.getTag?.(id) ?? '' },
   { label: 'ifcID', accessor: (_s, id) => String(id) },
+  {
+    label: 'ifcTypeObjectName',
+    accessor: (s, id) => {
+      const typeIds = s.relationships?.getRelated(id, RelationshipType.DefinesByType, 'inverse');
+      const typeId = typeIds && typeIds.length > 0 ? typeIds[0] : undefined;
+      return typeId !== undefined ? s.entities.getName(typeId) ?? '' : '';
+    },
+  },
+  {
+    label: 'ifcStoreyElevation',
+    accessor: (s, id) => {
+      const sh = s.spatialHierarchy;
+      const storeyId = sh?.elementToStorey.get(id);
+      if (storeyId === undefined) return '';
+      const elev = sh?.storeyElevations.get(storeyId);
+      return elev === undefined ? '' : String(elev);
+    },
+  },
 ];
 
 /** ifc parameters listed for completeness but not yet filterable (need a
@@ -80,7 +99,7 @@ const ATTRIBUTE_PARAMS: ReadonlyArray<{ label: string; accessor: Accessor }> = [
 const INERT_IFC_PARAMS: readonly string[] = [
   'ifcElevation', 'ifcHasFilling', 'ifcIsFilling', 'ifcIsGeometry', 'ifcLongName',
   'ifcOverallHeight', 'ifcOverallWidth', 'ifcPresentationLayerAssignment',
-  'ifcRefLatitude', 'ifcRefLongitude', 'ifcStoreyElevation', 'ifcTypeObjectName',
+  'ifcRefLatitude', 'ifcRefLongitude',
 ];
 
 interface Option { value: string; label: string }
