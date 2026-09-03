@@ -4,7 +4,7 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
-import { loadRules, saveRules, clearRules, projectKeyFor, __internal } from './attribute-rules-store.js';
+import { loadRules, saveRules, saveApplied, loadApplied, clearRules, projectKeyFor, __internal } from './attribute-rules-store.js';
 import type { AttributeRule } from './attribute-rules.js';
 
 /** Minimal in-memory localStorage so the module under test can be exercised
@@ -92,6 +92,31 @@ describe('attribute-rules-store', () => {
     (globalThis as { localStorage?: unknown }).localStorage = undefined;
     assert.strictEqual(saveRules(KEY, [rule('a')]), false);
     assert.deepStrictEqual(loadRules(KEY), []);
+  });
+
+  it('keeps the applied snapshot when the rules are replaced', () => {
+    saveRules(KEY, [rule('a')]);
+    saveApplied(KEY, [rule('a')]);
+    // The user deletes the rule; what was applied must survive so the next
+    // apply knows what to roll back.
+    saveRules(KEY, []);
+    assert.deepStrictEqual(loadRules(KEY), []);
+    assert.deepStrictEqual(loadApplied(KEY).map((r) => r.id), ['a']);
+  });
+
+  it('keeps the rules when the applied snapshot is replaced', () => {
+    saveRules(KEY, [rule('a')]);
+    saveApplied(KEY, [rule('b')]);
+    assert.deepStrictEqual(loadRules(KEY).map((r) => r.id), ['a']);
+    assert.deepStrictEqual(loadApplied(KEY).map((r) => r.id), ['b']);
+  });
+
+  it('clearing drops both rules and the applied snapshot', () => {
+    saveRules(KEY, [rule('a')]);
+    saveApplied(KEY, [rule('a')]);
+    clearRules(KEY);
+    assert.deepStrictEqual(loadRules(KEY), []);
+    assert.deepStrictEqual(loadApplied(KEY), []);
   });
 
   it('project key separates revisions of the same file name', () => {

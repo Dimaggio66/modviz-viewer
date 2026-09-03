@@ -479,12 +479,19 @@ export function ObjectFilterPanel() {
     const overlaySets = new Map<string, Set<string>>(); // propName -> set names
     for (const [key, entry] of mutationOverlay) {
       const { setName, propName: name } = entry.ref;
+      const merged = new Set(values.propertyValues.get(key) ?? []);
+      // The base model already carrying values keeps the attribute alive even
+      // if a rule removed it from some objects.
+      let live = merged.size > 0;
+      for (const v of entry.values.values()) if (v !== null && v !== '') { merged.add(v); live = true; }
+      values.propertyValues.set(key, [...merged]);
+      // Every entry is a deletion and the file never had the attribute: the
+      // rule that created it has been rolled back, so it must NOT leave a row
+      // behind — that is what made a deleted rule's attribute stay forever.
+      if (!live) continue;
       let sets = overlaySets.get(name);
       if (!sets) { sets = new Set(); overlaySets.set(name, sets); }
       sets.add(setName);
-      const merged = new Set(values.propertyValues.get(key) ?? []);
-      for (const v of entry.values.values()) if (v !== null && v !== '') merged.add(v);
-      values.propertyValues.set(key, [...merged]);
     }
 
     const grouped = group(psets, values.propertyValues);

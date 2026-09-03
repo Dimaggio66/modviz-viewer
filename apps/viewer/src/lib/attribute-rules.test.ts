@@ -13,6 +13,8 @@ import {
   ruleTableRows,
   coerceValue,
   propertyValueTypeOf,
+  staleTargets,
+  targetKey,
   type AttributeRule,
   type PropReader,
 } from './attribute-rules.js';
@@ -157,6 +159,55 @@ describe('ruleTableRows', () => {
   it('emits one Aus row per deleted attribute', () => {
     const rows = ruleTableRows([rule({ kind: 'delete', targets: [{ psetName: 'P', propName: 'A' }, { psetName: 'P', propName: 'B' }] }, [1])]);
     assert.strictEqual(rows.filter((r) => r.kind === 'out').length, 2);
+  });
+});
+
+describe('staleTargets — what an apply must roll back', () => {
+  const add = (id: string, prop: string, ids = [1, 2]) =>
+    rule({ kind: 'add', target: { psetName: 'P', propName: prop }, value: 'v', ...TEXT, mode: 'addOverwrite' }, ids);
+
+  it('reports nothing while the rule set is unchanged', () => {
+    const r = { ...add('a', 'A'), id: 'a' };
+    assert.deepStrictEqual(staleTargets([r], [r]), []);
+  });
+
+  it('reports every address of a rule that was deleted', () => {
+    const r = { ...add('a', 'A'), id: 'a' };
+    const out = staleTargets([r], []);
+    assert.deepStrictEqual(out.map(targetKey), ['1|P|A', '2|P|A']);
+  });
+
+  it('reports a rule that was switched off', () => {
+    const r = { ...add('a', 'A'), id: 'a' };
+    assert.strictEqual(staleTargets([r], [{ ...r, enabled: false }]).length, 2);
+  });
+
+  it('keeps addresses another rule still writes', () => {
+    const a = { ...add('a', 'A'), id: 'a' };
+    const b = { ...add('b', 'A', [1]), id: 'b' };
+    // b still writes 1|P|A, so only 2|P|A is stale.
+    assert.deepStrictEqual(staleTargets([a], [b]).map(targetKey), ['2|P|A']);
+  });
+
+  it('reports an address only once', () => {
+    const a = { ...add('a', 'A', [1]), id: 'a' };
+    assert.strictEqual(staleTargets([a, { ...a, id: 'b' }], []).length, 1);
+  });
+
+  it('rename reports both the created and the removed name', () => {
+    const r: AttributeRule = {
+      ...rule({ kind: 'rename', source: { psetName: 'P', propName: 'Old' }, propName: 'New' }, [1]),
+      id: 'r',
+    };
+    assert.deepStrictEqual(staleTargets([r], []).map(targetKey), ['1|P|New', '1|P|Old']);
+  });
+
+  it('delete reports what it removed, so rolling back restores it', () => {
+    const r: AttributeRule = {
+      ...rule({ kind: 'delete', targets: [{ psetName: 'P', propName: 'A' }] }, [1]),
+      id: 'r',
+    };
+    assert.deepStrictEqual(staleTargets([r], []).map(targetKey), ['1|P|A']);
   });
 });
 

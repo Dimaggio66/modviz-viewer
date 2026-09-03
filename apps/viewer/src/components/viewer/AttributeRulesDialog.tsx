@@ -36,10 +36,10 @@ import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, planWrites,
+  ACTION_LABELS, planWrites, staleTargets,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
 } from '@/lib/attribute-rules';
-import { loadRules, saveRules } from '@/lib/attribute-rules-store';
+import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
   type ActionForm, type ActionKind,
@@ -213,6 +213,14 @@ export function AttributeRulesDialog({
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
 
+  /** Addresses the last apply left behind that no rule wants any more — the
+   *  work an apply has to undo. Deleting every rule leaves no writes at all,
+   *  so Apply must stay reachable on this count alone. */
+  const rollbackCount = useMemo(
+    () => (open && projectKey ? staleTargets(loadApplied(projectKey), pending).length : 0),
+    [open, projectKey, pending],
+  );
+
   /**
    * Write every enabled rule and KEEP the rules: they stay in the table,
    * marked with what they just wrote, and are saved for the project. The
@@ -223,7 +231,7 @@ export function AttributeRulesDialog({
    * Rules are planned one at a time so each can report its own write count.
    */
   const apply = useCallback(() => {
-    if (!modelId || !store || writes.length === 0) return;
+    if (!modelId || !store || (writes.length === 0 && rollbackCount === 0)) return;
     setApplying(true);
     try {
       // `setProperty` needs a mutation view registered for the model; create
@@ -236,6 +244,23 @@ export function AttributeRulesDialog({
       const now = Date.now();
       const counts = new Map<string, number>();
       let ok = 0;
+
+      // Roll back first: anything the previous apply wrote that no rule asks
+      // for any more (its rule was deleted or switched off) is restored to the
+      // model's base state — the value the parsed file carries, or removed
+      // entirely when the file never had it. Without this a rule's attribute
+      // would survive its own rule and stay in the property panel and the
+      // object filter forever.
+      let reverted = 0;
+      for (const t of staleTargets(loadApplied(projectKey), pending)) {
+        // `readers.read` goes through the parsed store, never the overlay, so
+        // it answers with the pre-rule value even after the rule wrote.
+        const base = readers.read(t.entityId, t.psetName, t.propName);
+        const result = base === null
+          ? deleteProperty(modelId, t.entityId, t.psetName, t.propName)
+          : setProperty(modelId, t.entityId, t.psetName, t.propName, base, PropertyValueType.Label);
+        if (result) reverted += 1;
+      }
       for (const rule of pending) {
         if (!rule.enabled) continue;
         let ruleOk = 0;
@@ -248,7 +273,7 @@ export function AttributeRulesDialog({
         counts.set(rule.id, ruleOk);
         ok += ruleOk;
       }
-      if (ok === 0) {
+      if (ok === 0 && reverted === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
         return;
       }
@@ -257,12 +282,17 @@ export function AttributeRulesDialog({
       const stamp = (r: AttributeRule, countKey: string, id = r.id): AttributeRule =>
         counts.has(countKey) ? { ...r, id, appliedAt: now, appliedWrites: counts.get(countKey)! } : r;
       const draftRule = pending.find((r) => r.id === 'draft');
-      commit([
+      const next = [
         ...rules.map((r) => stamp(r, r.id)),
         ...(draftRule ? [stamp(draftRule, 'draft', `${now}-applied`)] : []),
-      ]);
+      ];
+      commit(next);
+      // Remember what is now in the model, so the NEXT apply can roll back
+      // whatever gets deleted or switched off in the meantime.
+      saveApplied(projectKey, next.filter((r) => r.enabled));
       if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', newName: '', deleteKeys: [] });
-      toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s).`);
+      const undone = reverted > 0 ? `, ${reverted.toLocaleString()} rolled back` : '';
+      toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s)${undone}.`);
     } finally {
       setApplying(false);
     }
@@ -395,8 +425,11 @@ export function AttributeRulesDialog({
         <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
           <div className="flex min-w-0 flex-col gap-0.5">
             <span className="text-xs text-muted-foreground">
-              {writes.length > 0
-                ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)`
+              {writes.length > 0 || rollbackCount > 0
+                ? [
+                    writes.length > 0 ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)` : null,
+                    rollbackCount > 0 ? `${rollbackCount.toLocaleString()} to roll back` : null,
+                  ].filter(Boolean).join(' · ')
                 : 'Nothing to apply yet'}
             </span>
             {rules.length > 0 && (
@@ -411,7 +444,7 @@ export function AttributeRulesDialog({
           </div>
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-            <Button type="button" onClick={apply} disabled={writes.length === 0 || applying}>
+            <Button type="button" onClick={apply} disabled={(writes.length === 0 && rollbackCount === 0) || applying}>
               {applying ? 'Applying…' : 'Apply now'}
             </Button>
           </div>

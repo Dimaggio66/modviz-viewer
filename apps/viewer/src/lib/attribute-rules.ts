@@ -240,6 +240,66 @@ export function planWrites(
   return writes;
 }
 
+/** One (entity, pset, property) address a rule writes to. */
+export interface RuleTarget {
+  entityId: number;
+  psetName: string;
+  propName: string;
+}
+
+/** Stable key for a target, for set arithmetic between applies. */
+export const targetKey = (t: RuleTarget) => `${t.entityId}|${t.psetName}|${t.propName}`;
+
+/**
+ * Every address a rule touches, regardless of whether a given object actually
+ * received a write. Used to reconcile applies: whatever the previous apply
+ * touched but the current rule set no longer does has to be rolled back, so
+ * deleting a rule and applying again removes the attribute it created instead
+ * of leaving it in the model forever.
+ *
+ * `rename` reports both the name it creates and the one it removes, and
+ * `delete` reports what it removed — rolling those back restores the base
+ * value, which is exactly what "this rule no longer applies" should mean.
+ */
+export function ruleTargets(rule: AttributeRule): RuleTarget[] {
+  const a = rule.action;
+  const refs: PropRef[] =
+    a.kind === 'add' || a.kind === 'compose' || a.kind === 'copy' ? [a.target]
+    : a.kind === 'rename' ? [{ psetName: a.source.psetName, propName: a.propName }, a.source]
+    : a.targets;
+  const out: RuleTarget[] = [];
+  for (const id of rule.entityIds) {
+    for (const r of refs) out.push({ entityId: id, psetName: r.psetName, propName: r.propName });
+  }
+  return out;
+}
+
+/**
+ * Addresses the previous apply touched that the current rules no longer do.
+ * The caller restores each one to its base (pre-rule) state.
+ */
+export function staleTargets(
+  previous: readonly AttributeRule[],
+  current: readonly AttributeRule[],
+): RuleTarget[] {
+  const wanted = new Set<string>();
+  for (const r of current) {
+    if (!r.enabled) continue;
+    for (const t of ruleTargets(r)) wanted.add(targetKey(t));
+  }
+  const seen = new Set<string>();
+  const out: RuleTarget[] = [];
+  for (const r of previous) {
+    for (const t of ruleTargets(r)) {
+      const k = targetKey(t);
+      if (wanted.has(k) || seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
 /** One-line description of an action, for compact summaries. */
 export function describeAction(a: RuleAction): string {
   const at = (r: PropRef) => `${r.psetName}.${r.propName}`;
