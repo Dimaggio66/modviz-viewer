@@ -33,7 +33,7 @@ import { Search, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import { EntityExtractor, getAttributeNames } from '@ifc-lite/parser';
+import { EntityExtractor, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import { Input } from '@/components/ui/input';
 import { ComboInput } from '@/components/ui/combo-input';
@@ -47,7 +47,20 @@ import {
 } from '@/lib/search/filter-schema';
 import { Rule, type FilterRule } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
-import { isProductClass } from '@/lib/compare/compareScope';
+
+/** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
+ *  (IfcWallType, IfcDoorType, …), a group/system, or the project — the broad
+ *  "object" population RIBiTWO's total counts, not just the geometric products.
+ *  Cached per type name (byType has O(100) distinct names). */
+const objectDefinitionCache = new Map<string, boolean>();
+function isObjectDefinitionClass(typeName: string): boolean {
+  const upper = typeName.toUpperCase();
+  const cached = objectDefinitionCache.get(upper);
+  if (cached !== undefined) return cached;
+  const result = getInheritanceChainAcrossSchemas(upper).some((a) => a.toUpperCase() === 'IFCOBJECTDEFINITION');
+  objectDefinitionCache.set(upper, result);
+  return result;
+}
 
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
@@ -206,15 +219,15 @@ export function ObjectFilterPanel() {
     return { objectIds: [...ids], ifcTypes: [...types].sort() };
   }, [activeModel?.geometryResult]);
 
-  // Total "objects" the RIBiTWO way: every IfcProduct instance (physical
-  // elements + spatial structure + openings/spaces/annotations), not just the
+  // Total "objects" the RIBiTWO way: every IfcObjectDefinition instance
+  // (products + type objects + groups/systems + project), not just the
   // geometry-bearing ones. Summed over the disjoint byType buckets.
   const totalObjects = useMemo(() => {
     const byType = activeStore?.entityIndex?.byType;
     if (!byType) return 0;
     let n = 0;
     for (const [typeName, ids] of byType) {
-      if (isProductClass(typeName)) n += ids.length;
+      if (isObjectDefinitionClass(typeName)) n += ids.length;
     }
     return n;
   }, [activeStore]);
