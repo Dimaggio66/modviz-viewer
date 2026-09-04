@@ -352,52 +352,50 @@ export interface RuleTarget {
 
 /** Stable key for a target, for set arithmetic between applies. */
 export const targetKey = (t: RuleTarget) => `${t.entityId}|${t.psetName}|${t.propName}`;
+/** Stable key for an address, independent of which objects carry it. */
+export const refKeyOf = (r: PropRef) => `${r.psetName}|${r.propName}`;
 
 /**
- * Every address a rule touches, regardless of whether a given object actually
- * received a write. Used to reconcile applies: whatever the previous apply
- * touched but the current rule set no longer does has to be rolled back, so
- * deleting a rule and applying again removes the attribute it created instead
- * of leaving it in the model forever.
+ * The attribute ADDRESSES a rule writes to — not the objects.
+ *
+ * Rolling back used to enumerate `rule.entityIds`, which is empty for every
+ * rule that resolves its own objects (an imported mapping, or anything scoped
+ * to "all objects"). Those rules therefore rolled back nothing at all, and the
+ * attributes they created outlived their own deletion. Addresses are stable
+ * either way; which objects actually carry one is answered by the session's
+ * mutation record at rollback time.
  *
  * `rename` reports both the name it creates and the one it removes, and
- * `delete` reports what it removed — rolling those back restores the base
- * value, which is exactly what "this rule no longer applies" should mean.
+ * `delete` reports what it removed — restoring those puts the original back.
  */
-export function ruleTargets(rule: AttributeRule): RuleTarget[] {
+export function ruleTargetRefs(rule: AttributeRule): PropRef[] {
   const a = rule.action;
-  const refs: PropRef[] =
-    a.kind === 'add' || a.kind === 'compose' || a.kind === 'copy' ? [a.target]
+  return a.kind === 'add' || a.kind === 'compose' || a.kind === 'copy' ? [a.target]
     : a.kind === 'rename' ? [{ psetName: a.source.psetName, propName: a.propName }, a.source]
     : a.targets;
-  const out: RuleTarget[] = [];
-  for (const id of rule.entityIds) {
-    for (const r of refs) out.push({ entityId: id, psetName: r.psetName, propName: r.propName });
-  }
-  return out;
 }
 
 /**
- * Addresses the previous apply touched that the current rules no longer do.
- * The caller restores each one to its base (pre-rule) state.
+ * Addresses the previous apply wrote that no enabled rule writes any more.
+ * The caller restores every object that carries one to its base state.
  */
-export function staleTargets(
+export function staleTargetRefs(
   previous: readonly AttributeRule[],
   current: readonly AttributeRule[],
-): RuleTarget[] {
+): PropRef[] {
   const wanted = new Set<string>();
   for (const r of current) {
     if (!r.enabled) continue;
-    for (const t of ruleTargets(r)) wanted.add(targetKey(t));
+    for (const ref of ruleTargetRefs(r)) wanted.add(refKeyOf(ref));
   }
   const seen = new Set<string>();
-  const out: RuleTarget[] = [];
+  const out: PropRef[] = [];
   for (const r of previous) {
-    for (const t of ruleTargets(r)) {
-      const k = targetKey(t);
+    for (const ref of ruleTargetRefs(r)) {
+      const k = refKeyOf(ref);
       if (wanted.has(k) || seen.has(k)) continue;
       seen.add(k);
-      out.push(t);
+      out.push(ref);
     }
   }
   return out;

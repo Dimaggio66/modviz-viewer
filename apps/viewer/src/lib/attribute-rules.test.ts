@@ -13,8 +13,8 @@ import {
   ruleTableRows,
   coerceValue,
   propertyValueTypeOf,
-  staleTargets,
-  targetKey,
+  staleTargetRefs,
+  refKeyOf,
   type AttributeRule,
   type PropReader,
 } from './attribute-rules.js';
@@ -190,36 +190,46 @@ describe('planWrites — only the changes', () => {
   });
 });
 
-describe('staleTargets — what an apply must roll back', () => {
-  const add = (id: string, prop: string, ids = [1, 2]) =>
+describe('staleTargetRefs — what an apply must roll back', () => {
+  const add = (prop: string, ids: number[] = [1, 2]) =>
     rule({ kind: 'add', target: { psetName: 'P', propName: prop }, value: 'v', ...TEXT, mode: 'addOverwrite' }, ids);
 
   it('reports nothing while the rule set is unchanged', () => {
-    const r = { ...add('a', 'A'), id: 'a' };
-    assert.deepStrictEqual(staleTargets([r], [r]), []);
+    const r = { ...add('A'), id: 'a' };
+    assert.deepStrictEqual(staleTargetRefs([r], [r]), []);
   });
 
-  it('reports every address of a rule that was deleted', () => {
-    const r = { ...add('a', 'A'), id: 'a' };
-    const out = staleTargets([r], []);
-    assert.deepStrictEqual(out.map(targetKey), ['1|P|A', '2|P|A']);
+  it('reports the address of a rule that was deleted', () => {
+    const r = { ...add('A'), id: 'a' };
+    assert.deepStrictEqual(staleTargetRefs([r], []).map(refKeyOf), ['P|A']);
   });
 
   it('reports a rule that was switched off', () => {
-    const r = { ...add('a', 'A'), id: 'a' };
-    assert.strictEqual(staleTargets([r], [{ ...r, enabled: false }]).length, 2);
+    const r = { ...add('A'), id: 'a' };
+    assert.strictEqual(staleTargetRefs([r], [{ ...r, enabled: false }]).length, 1);
   });
 
-  it('keeps addresses another rule still writes', () => {
-    const a = { ...add('a', 'A'), id: 'a' };
-    const b = { ...add('b', 'A', [1]), id: 'b' };
-    // b still writes 1|P|A, so only 2|P|A is stale.
-    assert.deepStrictEqual(staleTargets([a], [b]).map(targetKey), ['2|P|A']);
+  it('keeps an address another rule still writes', () => {
+    const a = { ...add('A'), id: 'a' };
+    const b = { ...add('A', [1]), id: 'b' };
+    assert.deepStrictEqual(staleTargetRefs([a], [b]), []);
   });
 
   it('reports an address only once', () => {
-    const a = { ...add('a', 'A', [1]), id: 'a' };
-    assert.strictEqual(staleTargets([a, { ...a, id: 'b' }], []).length, 1);
+    const a = { ...add('A', [1]), id: 'a' };
+    assert.strictEqual(staleTargetRefs([a, { ...a, id: 'b' }], []).length, 1);
+  });
+
+  it('rolls back a rule that resolves its OWN objects and carries no id list', () => {
+    // An imported mapping (or an "all objects" rule) has entityIds: [] — the
+    // old entity-based rollback produced nothing for these, so the attributes
+    // they created survived deleting the rule.
+    const imported: AttributeRule = {
+      id: 'xml-1', conditions: [], match: [{ attribute: '5D_Typ', value: '*IST*' }], entityIds: [],
+      action: { kind: 'add', target: { psetName: '5D', propName: '5D_Rohbauhöhe' }, value: 'x', ...TEXT, mode: 'add' },
+      enabled: true,
+    };
+    assert.deepStrictEqual(staleTargetRefs([imported], []).map(refKeyOf), ['5D|5D_Rohbauhöhe']);
   });
 
   it('rename reports both the created and the removed name', () => {
@@ -227,7 +237,7 @@ describe('staleTargets — what an apply must roll back', () => {
       ...rule({ kind: 'rename', source: { psetName: 'P', propName: 'Old' }, propName: 'New' }, [1]),
       id: 'r',
     };
-    assert.deepStrictEqual(staleTargets([r], []).map(targetKey), ['1|P|New', '1|P|Old']);
+    assert.deepStrictEqual(staleTargetRefs([r], []).map(refKeyOf), ['P|New', 'P|Old']);
   });
 
   it('delete reports what it removed, so rolling back restores it', () => {
@@ -235,7 +245,7 @@ describe('staleTargets — what an apply must roll back', () => {
       ...rule({ kind: 'delete', targets: [{ psetName: 'P', propName: 'A' }] }, [1]),
       id: 'r',
     };
-    assert.deepStrictEqual(staleTargets([r], []).map(targetKey), ['1|P|A']);
+    assert.deepStrictEqual(staleTargetRefs([r], []).map(refKeyOf), ['P|A']);
   });
 });
 

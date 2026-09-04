@@ -40,7 +40,7 @@ import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, staleTargets,
+  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, refKeyOf, staleTargetRefs,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
   type RuleEditField, type RuleMatch, type RuleTableRow,
 } from '@/lib/attribute-rules';
@@ -471,13 +471,37 @@ export function AttributeRulesDialog({
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
 
-  /** Addresses the last apply left behind that no rule wants any more — the
-   *  work an apply has to undo. Deleting every rule leaves no writes at all,
-   *  so Apply must stay reachable on this count alone. */
-  const rollbackCount = useMemo(
-    () => (open && projectKey ? staleTargets(loadApplied(projectKey), pending).length : 0),
-    [open, projectKey, pending],
-  );
+  /**
+   * Objects this session actually wrote at each attribute address. Rolling a
+   * rule back means putting these back, and the mutation history is the only
+   * exact record of them — a rule that resolves its own objects carries no id
+   * list to consult.
+   */
+  const writtenAt = useMemo(() => {
+    const idx = new Map<string, number[]>();
+    const view = modelId ? getMutationView(modelId) : null;
+    if (!view) return idx;
+    for (const m of view.getMutations()) {
+      if (!m.psetName || !m.propName) continue;
+      const key = refKeyOf({ psetName: m.psetName, propName: m.propName });
+      let ids = idx.get(key);
+      if (!ids) { ids = []; idx.set(key, ids); }
+      if (!ids.includes(m.entityId)) ids.push(m.entityId);
+    }
+    return idx;
+  }, [modelId, getMutationView, open, rules]);
+
+  /** The objects a rollback would touch. Deleting every rule leaves no writes
+   *  at all, so Apply must stay reachable on this count alone. */
+  const rollbackTargets = useMemo(() => {
+    if (!open || !projectKey) return [] as Array<{ entityId: number; psetName: string; propName: string }>;
+    const out: Array<{ entityId: number; psetName: string; propName: string }> = [];
+    for (const ref of staleTargetRefs(loadApplied(projectKey), pending)) {
+      for (const entityId of writtenAt.get(refKeyOf(ref)) ?? []) out.push({ entityId, ...ref });
+    }
+    return out;
+  }, [open, projectKey, pending, writtenAt]);
+  const rollbackCount = rollbackTargets.length;
 
   /**
    * Write every enabled rule and KEEP the rules: they stay in the table,
@@ -513,7 +537,7 @@ export function AttributeRulesDialog({
       // would survive its own rule and stay in the property panel and the
       // object filter forever.
       let reverted = 0;
-      const stale = staleTargets(loadApplied(projectKey), pending);
+      const stale = rollbackTargets;
       const liveWrites = plan(pending);
       const total = stale.length + liveWrites.length;
       let done = 0;
@@ -580,7 +604,7 @@ export function AttributeRulesDialog({
       setApplying(false);
       onProgress?.(null);
     }
-  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch, onOpenChange, onProgress]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
