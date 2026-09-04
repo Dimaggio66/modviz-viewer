@@ -77,6 +77,8 @@ function isObjectDefinitionClass(typeName: string): boolean {
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
 const ISOLATE_DEBOUNCE_MS = 250;
+/** How many matched objects a facet scan reads before it stops. */
+const FACET_SCAN_CAP = 20_000;
 
 /** Concrete option values a field selects via a query — matched against each
  *  option's raw value OR its display label (rounded numbers, prefix-stripped
@@ -272,8 +274,10 @@ const FilterRow = memo(function FilterRow({
   value,
   active,
   facet,
+  selfFacet,
   onChange,
   onClear,
+  onOpenChange,
 }: {
   row: Row;
   value: string;
@@ -281,21 +285,29 @@ const FilterRow = memo(function FilterRow({
   /** Values still reachable per attribute under the current filter, or null
    *  while nothing is filtered. */
   facet: Facet | null;
+  /** Reachable values for THIS row under the other filters only — set while its
+   *  list is open, so a committed row can be reopened without its own value
+   *  narrowing it to itself. */
+  selfFacet: Facet | null;
   onChange: (id: string, value: string) => void;
   onClear: (id: string) => void;
+  onOpenChange: (id: string | null) => void;
 }) {
   const options = useMemo<string[]>(() => {
     if (row.kind === 'inert') return [];
     let opts = row.options;
-    // Narrow to what the current match set still contains — but never the row
-    // you are editing, or picking a different value in it would be impossible.
-    if (facet && !active) {
-      const reachable = facet.values.get(row.label);
+    // Narrow to what the current match set still contains. The row you are
+    // editing is narrowed by the OTHER filters instead (`selfFacet`) — its own
+    // value must not narrow it, or picking a different one is impossible, but
+    // the rest of the filter still applies.
+    const use = selfFacet ?? (active ? null : facet);
+    if (use) {
+      const reachable = use.values.get(row.label);
       // No entry means "no matched object carries this attribute" only when the
       // scan saw every match. On a capped scan absence proves nothing, so keep
       // the full list — an empty dropdown is a dead end, a wide one is not.
       if (reachable) opts = opts.filter((o) => reachable.has(o.value));
-      else if (facet.complete) opts = [];
+      else if (use.complete) opts = [];
     }
     // Several sets can carry the same attribute, and rounding makes distinct
     // raw values print identically — show each label once.
@@ -303,7 +315,7 @@ const FilterRow = memo(function FilterRow({
     const labels: string[] = [];
     for (const o of opts) if (!seen.has(o.label)) { seen.add(o.label); labels.push(o.label); }
     return row.kind === 'property' || row.kind === 'attribute' ? [NONE_LABEL, ...labels] : labels;
-  }, [row, facet, active]);
+  }, [row, facet, selfFacet, active]);
 
   return (
     <div className="flex w-full items-center border-b border-border/50" style={{ minHeight: 46 }}>
@@ -318,6 +330,7 @@ const FilterRow = memo(function FilterRow({
           <ComboInput
             value={value}
             onChange={(v) => onChange(row.id, v)}
+            onOpenChange={(o) => onOpenChange(o ? row.id : null)}
             options={options}
             placeholder={row.kind === 'inert' ? 'soon' : ''}
             className="h-7 min-w-0 flex-1 text-xs"
@@ -467,20 +480,19 @@ export function ObjectFilterPanel() {
    * Null while no filter is active: every value is reachable then anyway, and
    * scanning the whole model for nothing would just cost time.
    */
-  const facetValues = useMemo(() => {
-    if (!activeStore || matched === null || matchedIds.length === 0) return null;
+  const collectValues = useCallback((ids: number[], only: string | null) => {
     const idx = new Map<string, Set<string>>();
+    if (!activeStore) return idx;
     const add = (name: string, v: string | null | undefined) => {
+      if (only !== null && name !== only) return;
       if (v === null || v === undefined || v === '') return;
       let bucket = idx.get(name);
       if (!bucket) { bucket = new Set(); idx.set(name, bucket); }
       if (bucket.size < 5000) bucket.add(v);
     };
     const str = (v: unknown) => (v === undefined || v === null ? null : String(v));
-    // Bounded so a filter that still matches most of a huge model stays snappy.
-    const scan = matchedIds.length > 20_000 ? matchedIds.slice(0, 20_000) : matchedIds;
     const typeSets = new Map<number, Array<{ properties?: Array<{ name: string; value: unknown }> }>>();
-    for (const id of scan) {
+    for (const id of ids) {
       for (const set of activeStore.getProperties?.(id) ?? []) {
         for (const p of set.properties ?? []) add(p.name, str(p.value));
       }
@@ -501,12 +513,26 @@ export function ObjectFilterPanel() {
       for (const { label, accessor } of ATTRIBUTE_PARAMS) add(label, accessor(activeStore, id));
     }
     // Values a rule wrote live in the overlay, not in the store.
-    const matchedSet = new Set(scan);
+    const seen = new Set(ids);
     for (const entry of mutationOverlay.values()) {
-      for (const [id, v] of entry.values) if (v !== null && matchedSet.has(id)) add(entry.ref.propName, v);
+      for (const [id, v] of entry.values) if (v !== null && seen.has(id)) add(entry.ref.propName, v);
     }
-    return { values: idx, complete: scan.length === matchedIds.length };
-  }, [activeStore, matched, matchedIds, mutationOverlay]);
+    return idx;
+  }, [activeStore, mutationOverlay]);
+
+  /** Bounded so a filter that still matches most of a huge model stays snappy. */
+  const capScan = (ids: number[]) => (ids.length > FACET_SCAN_CAP ? ids.slice(0, FACET_SCAN_CAP) : ids);
+
+  const facetValues = useMemo(() => {
+    if (!activeStore || matched === null || matchedIds.length === 0) return null;
+    const scan = capScan(matchedIds);
+    return { values: collectValues(scan, null), complete: scan.length === matchedIds.length };
+  }, [activeStore, matched, matchedIds, collectValues]);
+
+  /** Which row's value list is open, and that row's leave-one-out facet. */
+  const [openRowId, setOpenRowId] = useState<string | null>(null);
+  const [openRowFacet, setOpenRowFacet] = useState<{ rowId: string; facet: Facet } | null>(null);
+  const setOpenRow = useCallback((id: string | null) => setOpenRowId(id), []);
 
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
@@ -594,10 +620,12 @@ export function ObjectFilterPanel() {
     return out;
   }, [activeStore, modelSummary.ifcTypes, attributeValues, mutationOverlay]);
 
-  // Build match sources from the entries and isolate the intersection —
-  // debounced so typing doesn't thrash. Stale runs are discarded.
-  useEffect(() => {
-    if (!activeStore) return;
+  /**
+   * Compile the entries into match sources. `skipId` leaves one row out — that
+   * is what lets a row be faceted by *the other* active filters without being
+   * narrowed by its own current value.
+   */
+  const compileSelections = useCallback((skipId: string | null) => {
     const byId = new Map(rows.map((r) => [r.id, r]));
     // Single-rule conditions are AND-combined in one pass; a name-grouped
     // property/quantity spanning several psets becomes an OR group evaluated
@@ -611,6 +639,7 @@ export function ObjectFilterPanel() {
     };
 
     for (const [id, text] of selections) {
+      if (id === skipId) continue;
       const row = byId.get(id);
       if (!row) continue;
       const t = text.trim();
@@ -701,8 +730,45 @@ export function ObjectFilterPanel() {
       }
       // 'inert' rows contribute nothing yet.
     }
+    return { andRules, orGroups, attrFilters };
+  }, [rows, selections, mutationOverlay]);
 
-    if (andRules.length === 0 && orGroups.length === 0 && attrFilters.length === 0) {
+  /** Run compiled sources down to the intersected id list; null if cancelled. */
+  const runMatch = useCallback(async (
+    c: ReturnType<typeof compileSelections>,
+    cancelled: () => boolean,
+  ): Promise<number[] | null> => {
+    if (!activeStore) return null;
+    const modelArg = [{ id: activeModelId ?? 'default', store: activeStore }];
+    let ids: number[] | null = null;
+    const intersect = (next: number[]) => {
+      if (ids === null) { ids = next; return; }
+      const set = new Set(next);
+      ids = ids.filter((x) => set.has(x));
+    };
+    if (c.andRules.length > 0) {
+      const res = await evaluateFilterRulesFederated(modelArg, c.andRules, 'AND', { limit: 200_000 });
+      if (cancelled()) return null;
+      intersect(res.map((m) => m.expressId));
+    }
+    for (const grp of c.orGroups) {
+      const res = await evaluateFilterRulesFederated(modelArg, grp, 'OR', { limit: 200_000 });
+      if (cancelled()) return null;
+      intersect(res.map((m) => m.expressId));
+    }
+    if (c.attrFilters.length > 0) {
+      const universe = ids ?? modelSummary.objectIds;
+      ids = universe.filter((id) => c.attrFilters.every((f) => f.test(f.accessor(activeStore, id))));
+    }
+    return cancelled() ? null : ids ?? [];
+  }, [activeStore, activeModelId, modelSummary.objectIds]);
+
+  // Build match sources from the entries and isolate the intersection —
+  // debounced so typing doesn't thrash. Stale runs are discarded.
+  useEffect(() => {
+    if (!activeStore) return;
+    const c = compileSelections(null);
+    if (c.andRules.length === 0 && c.orGroups.length === 0 && c.attrFilters.length === 0) {
       clearIsolation();
       clearSelection();
       setMatched(null);
@@ -713,29 +779,8 @@ export function ObjectFilterPanel() {
     let cancelled = false;
     const timer = setTimeout(() => {
       void (async () => {
-        const modelArg = [{ id: activeModelId ?? 'default', store: activeStore }];
-        let ids: number[] | null = null;
-        const intersect = (next: number[]) => {
-          if (ids === null) { ids = next; return; }
-          const set = new Set(next);
-          ids = ids.filter((x) => set.has(x));
-        };
-        if (andRules.length > 0) {
-          const res = await evaluateFilterRulesFederated(modelArg, andRules, 'AND', { limit: 200_000 });
-          if (cancelled) return;
-          intersect(res.map((m) => m.expressId));
-        }
-        for (const grp of orGroups) {
-          const res = await evaluateFilterRulesFederated(modelArg, grp, 'OR', { limit: 200_000 });
-          if (cancelled) return;
-          intersect(res.map((m) => m.expressId));
-        }
-        if (attrFilters.length > 0) {
-          const universe = ids ?? modelSummary.objectIds;
-          ids = universe.filter((id) => attrFilters.every((f) => f.test(f.accessor(activeStore, id))));
-        }
-        if (cancelled) return;
-        const finalIds = ids ?? [];
+        const finalIds = await runMatch(c, () => cancelled);
+        if (finalIds === null) return;
         // `isolateEntities` TOGGLES: handed the set that is already isolated it
         // clears isolation instead. Re-picking a value that is already chosen
         // re-runs this effect with an unchanged match, which would drop the
@@ -760,7 +805,42 @@ export function ObjectFilterPanel() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeStore, activeModelId, models, selections, rows, modelSummary.objectIds, mutationOverlay, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection]);
+  }, [activeStore, activeModelId, models, compileSelections, runMatch, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection]);
+
+  /**
+   * Facet the row whose list is open by the OTHER filters. Skipping the facet
+   * entirely for that row (which is what "don't narrow the row you're editing"
+   * used to mean) handed back every value in the model, including ones the
+   * remaining filters had already ruled out — so a committed second filter
+   * looked unfiltered the moment you reopened it.
+   *
+   * Only computed while a list is actually open: it costs one more evaluation,
+   * and nothing else needs it.
+   */
+  useEffect(() => {
+    if (!activeStore || openRowId === null) { setOpenRowFacet(null); return; }
+    const row = rows.find((r) => r.id === openRowId);
+    // Not active? The shared facet already narrows it correctly.
+    if (!row || (selections.get(openRowId) ?? '').trim() === '') { setOpenRowFacet(null); return; }
+    const c = compileSelections(openRowId);
+    if (c.andRules.length === 0 && c.orGroups.length === 0 && c.attrFilters.length === 0) {
+      setOpenRowFacet(null); // it is the only filter — the full list is right
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const ids = await runMatch(c, () => cancelled);
+        if (ids === null || cancelled) return;
+        const scan = capScan(ids);
+        setOpenRowFacet({
+          rowId: openRowId,
+          facet: { values: collectValues(scan, row.label), complete: scan.length === ids.length },
+        });
+      })();
+    }, ISOLATE_DEBOUNCE_MS);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [activeStore, openRowId, rows, selections, compileSelections, runMatch, collectValues]);
 
   const isActive = (id: string) => (selections.get(id) ?? '').trim() !== '';
 
@@ -974,8 +1054,10 @@ export function ObjectFilterPanel() {
                 value={selections.get(item.row.id) ?? ''}
                 active={isActive(item.row.id)}
                 facet={facetValues}
+                selfFacet={openRowFacet?.rowId === item.row.id ? openRowFacet.facet : null}
                 onChange={setValue}
                 onClear={clearRow}
+                onOpenChange={setOpenRow}
               />
             ),
           )

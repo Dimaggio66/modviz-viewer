@@ -22,6 +22,9 @@ import { cn } from '@/lib/utils';
 export interface ComboInputProps {
   value: string;
   onChange: (next: string) => void;
+  /** Fired when the list opens and closes, so the caller can compute its
+   *  options lazily and stop paying for them once it is shut. */
+  onOpenChange?: (open: boolean) => void;
   options: ReadonlyArray<string>;
   placeholder?: string;
   className?: string;
@@ -38,6 +41,7 @@ interface Anchor { left: number; width: number; maxHeight: number; top?: number;
 export function ComboInput({
   value,
   onChange,
+  onOpenChange,
   options,
   placeholder,
   className,
@@ -45,6 +49,12 @@ export function ComboInput({
   'aria-label': ariaLabel,
 }: ComboInputProps) {
   const [open, setOpen] = useState(false);
+  // Reported from an effect rather than the handlers: the list closes from
+  // blur, Escape, outside-click and selection alike, and only `open` sees them
+  // all. Held in a ref so an inline callback doesn't re-fire it every render.
+  const openCb = useRef(onOpenChange);
+  openCb.current = onOpenChange;
+  useEffect(() => { openCb.current?.(open); }, [open]);
   const [highlight, setHighlight] = useState(0);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   // Narrow the list by `value` only while actively typing. Reopening a field
