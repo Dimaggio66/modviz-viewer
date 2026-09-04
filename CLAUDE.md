@@ -71,3 +71,53 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+# Project rules for ifc-lite
+
+Everything above is the upstream Karpathy guideline text, kept verbatim so it
+can be diffed against its source. The rules below are specific to this repo.
+
+## 5. Scope Gate
+
+**Show the plan before a large change, not after.**
+
+- More than ~150 changed lines, or more than 3 files: state a 3-line plan and
+  wait for confirmation before writing code.
+- A new dependency, a new architectural pattern, or deleting an existing
+  behaviour: raise it first, even if the diff is small.
+- Splitting one request into several smaller, verifiable steps is always
+  allowed and usually better than one large one.
+
+This is the checkable form of "Simplicity First" — "think about it" is not
+something either of us can verify afterwards; a line count is.
+
+## 6. Verification In The Running App
+
+**Typecheck and tests are the floor, not the proof.**
+
+Finish a change to the viewer with all three:
+1. `pnpm typecheck` (root, turbo)
+2. the tests covering the touched module
+3. a live check in the running viewer against a real model
+
+The third one is not ceremony. In this codebase it caught defects the first two
+structurally cannot see, because they are about what the IFC data actually
+contains:
+- the columnar property table is empty by design after a STEP parse
+  (issue #577) — reads have to go through `getProperties`;
+- attributes can live on the defining **type**, not the occurrence, and a type
+  entity answers `getProperties` with nothing at all;
+- rules that resolve their own objects carry no entity-id list, so anything
+  keyed on `entityIds` silently does nothing.
+
+Each of those typechecked cleanly and passed unit tests while being wrong.
+
+## 7. Report What Actually Happened
+
+- Name the numbers a check produced, not just "works".
+- If a bug is found while verifying, say so plainly, including when it was
+  something introduced earlier in the same session.
+- If part of a request was not delivered, say which part and why — do not let
+  it disappear into a summary.
