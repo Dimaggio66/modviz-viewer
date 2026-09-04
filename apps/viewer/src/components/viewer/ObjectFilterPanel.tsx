@@ -39,7 +39,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ListFilter, Search, Table2, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import { EntityExtractor, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
+import { EntityExtractor, extractTypeEntityOwnProperties, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import { Input } from '@/components/ui/input';
 import { ComboInput } from '@/components/ui/combo-input';
@@ -233,6 +233,19 @@ function rawValueOf(row: Row, text: string): string {
   return opts?.find((o) => o.label === text)?.value ?? text;
 }
 
+/**
+ * EVERY raw value a picked label stands for. Rounding for display collapses
+ * distinct stored values onto one label (0.1 and 0.10000000000000001 both
+ * print as "0.1"), and several property sets can carry the same attribute — so
+ * matching only the first hit silently found nothing. Falls back to the text
+ * itself for a freely typed value.
+ */
+function rawValuesOf(row: Row, text: string): string[] {
+  const opts = 'options' in row ? row.options : undefined;
+  const hits = opts?.filter((o) => o.label === text || o.value === text).map((o) => o.value) ?? [];
+  return hits.length > 0 ? [...new Set(hits)] : [text];
+}
+
 function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'predefinedType' }>, input: string): string[] {
   const t = input.trim();
   if (!t) return [];
@@ -248,20 +261,35 @@ const FilterRow = memo(function FilterRow({
   row,
   value,
   active,
+  facet,
   onChange,
   onClear,
 }: {
   row: Row;
   value: string;
   active: boolean;
+  /** Values still reachable per attribute under the current filter, or null
+   *  while nothing is filtered. */
+  facet: ReadonlyMap<string, ReadonlySet<string>> | null;
   onChange: (id: string, value: string) => void;
   onClear: (id: string) => void;
 }) {
   const options = useMemo<string[]>(() => {
     if (row.kind === 'inert') return [];
-    if (row.kind === 'property' || row.kind === 'attribute') return [NONE_LABEL, ...row.options.map((o) => o.label)];
-    return row.options.map((o) => o.label);
-  }, [row]);
+    let opts = row.options;
+    // Narrow to what the current match set still contains — but never the row
+    // you are editing, or picking a different value in it would be impossible.
+    if (facet && !active) {
+      const reachable = facet.get(row.label);
+      opts = reachable ? opts.filter((o) => reachable.has(o.value)) : [];
+    }
+    // Several sets can carry the same attribute, and rounding makes distinct
+    // raw values print identically — show each label once.
+    const seen = new Set<string>();
+    const labels: string[] = [];
+    for (const o of opts) if (!seen.has(o.label)) { seen.add(o.label); labels.push(o.label); }
+    return row.kind === 'property' || row.kind === 'attribute' ? [NONE_LABEL, ...labels] : labels;
+  }, [row, facet, active]);
 
   return (
     <div className="flex w-full items-center border-b border-border/50" style={{ minHeight: 46 }}>
@@ -412,6 +440,57 @@ export function ObjectFilterPanel() {
     // place, so its identity never changes when a rule writes.
   }, [activeModelId, getMutationView, mutationCount]);
 
+  /**
+   * Faceted values: which values each attribute still has among the objects
+   * the filter currently matches. Once `5D_Material_Mapped = EPS` is set, the
+   * other rows should only offer what actually occurs on those objects, so
+   * narrowing further (`5D_Dicke = 0.1`) can only ever hit something.
+   *
+   * Keyed by attribute NAME, which is also how the rows are grouped, so this
+   * never has to look at `rows` — depending on them would close a loop
+   * (rows -> isolate effect -> matched ids -> facets -> rows).
+   *
+   * Null while no filter is active: every value is reachable then anyway, and
+   * scanning the whole model for nothing would just cost time.
+   */
+  const facetValues = useMemo(() => {
+    if (!activeStore || matched === null || matchedIds.length === 0) return null;
+    const idx = new Map<string, Set<string>>();
+    const add = (name: string, v: string | null | undefined) => {
+      if (v === null || v === undefined || v === '') return;
+      let bucket = idx.get(name);
+      if (!bucket) { bucket = new Set(); idx.set(name, bucket); }
+      if (bucket.size < 5000) bucket.add(v);
+    };
+    const str = (v: unknown) => (v === undefined || v === null ? null : String(v));
+    // Bounded so a filter that still matches most of a huge model stays snappy.
+    const scan = matchedIds.length > 20_000 ? matchedIds.slice(0, 20_000) : matchedIds;
+    const typeSets = new Map<number, Array<{ properties?: Array<{ name: string; value: unknown }> }>>();
+    for (const id of scan) {
+      for (const set of activeStore.getProperties?.(id) ?? []) {
+        for (const p of set.properties ?? []) add(p.name, str(p.value));
+      }
+      // Type-inherited properties count too — the rows list them.
+      const typeIds = activeStore.relationships?.getRelated(id, RelationshipType.DefinesByType, 'inverse');
+      const typeId = typeIds && typeIds.length > 0 ? typeIds[0] : undefined;
+      if (typeId !== undefined) {
+        let sets = typeSets.get(typeId);
+        if (!sets) { sets = extractTypeEntityOwnProperties(activeStore, typeId); typeSets.set(typeId, sets); }
+        for (const set of sets) for (const p of set.properties ?? []) add(p.name, str(p.value));
+      }
+      for (const qset of activeStore.quantities?.getForEntity?.(id) ?? []) {
+        for (const q of qset.quantities ?? []) add(q.name, str(q.value));
+      }
+      for (const { label, accessor } of ATTRIBUTE_PARAMS) add(label, accessor(activeStore, id));
+    }
+    // Values a rule wrote live in the overlay, not in the store.
+    const matchedSet = new Set(scan);
+    for (const entry of mutationOverlay.values()) {
+      for (const [id, v] of entry.values) if (v !== null && matchedSet.has(id)) add(entry.ref.propName, v);
+    }
+    return idx;
+  }, [activeStore, matched, matchedIds, mutationOverlay]);
+
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
@@ -553,8 +632,8 @@ export function ObjectFilterPanel() {
           if (t === NONE_LABEL) attrFilters.push({ accessor, test: (v) => v === '' });
           else if (test) attrFilters.push({ accessor, test });
           else {
-            const raw = rawValueOf(row, t).toLowerCase();
-            attrFilters.push({ accessor, test: (v) => v.toLowerCase() === raw });
+            const allowed = new Set(rawValuesOf(row, t).map((x) => x.toLowerCase()));
+            attrFilters.push({ accessor, test: (v) => allowed.has(v.toLowerCase()) });
           }
           continue;
         }
@@ -563,7 +642,7 @@ export function ObjectFilterPanel() {
           for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
           continue;
         }
-        const vals = test ? resolveOptionValues(row.options, test) : [rawValueOf(row, t)];
+        const vals = test ? resolveOptionValues(row.options, test) : rawValuesOf(row, t);
         if (vals.length === 0) continue;
         const group: FilterRule[] = [];
         for (const s of row.setNames) for (const v of vals) group.push(Rule.property(s, row.propName, 'eq', v));
@@ -578,9 +657,14 @@ export function ObjectFilterPanel() {
           if (group.length === 0) continue;
           addGroup(group);
         } else {
-          const parsed = parseNumeric(rawValueOf(row, t));
-          if (!parsed) continue;
-          addGroup(row.setNames.map((s) => Rule.quantity(s, row.quantityName, parsed.op, parsed.value)));
+          const group: FilterRule[] = [];
+          for (const raw of rawValuesOf(row, t)) {
+            const parsed = parseNumeric(raw);
+            if (!parsed) continue;
+            for (const s of row.setNames) group.push(Rule.quantity(s, row.quantityName, parsed.op, parsed.value));
+          }
+          if (group.length === 0) continue;
+          addGroup(group);
         }
       } else if (row.kind === 'attribute') {
         if (t === NONE_LABEL) {
@@ -588,8 +672,8 @@ export function ObjectFilterPanel() {
         } else if (test) {
           attrFilters.push({ accessor: row.accessor, test });
         } else {
-          const raw = rawValueOf(row, t).toLowerCase();
-          attrFilters.push({ accessor: row.accessor, test: (v) => v.toLowerCase() === raw });
+          const allowed = new Set(rawValuesOf(row, t).map((x) => x.toLowerCase()));
+          attrFilters.push({ accessor: row.accessor, test: (v) => allowed.has(v.toLowerCase()) });
         }
       } else if (row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType') {
         const vals = resolveSetValues(row, t);
@@ -863,6 +947,7 @@ export function ObjectFilterPanel() {
                 row={item.row}
                 value={selections.get(item.row.id) ?? ''}
                 active={isActive(item.row.id)}
+                facet={facetValues}
                 onChange={setValue}
                 onClear={clearRow}
               />
