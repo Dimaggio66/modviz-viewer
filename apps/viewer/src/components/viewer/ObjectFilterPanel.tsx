@@ -254,6 +254,16 @@ function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'pred
   return row.options.filter((o) => o.label.toLowerCase() === term || o.value.toLowerCase() === term).map((o) => o.value);
 }
 
+/**
+ * The values still reachable under the current filter, keyed by attribute name,
+ * plus whether the scan behind them covered every match. Faceting is only
+ * allowed to *remove* a value when `complete` — see the narrowing in FilterRow.
+ */
+interface Facet {
+  values: ReadonlyMap<string, ReadonlySet<string>>;
+  complete: boolean;
+}
+
 /** One attribute row. Memoized and fed stable callbacks so that typing in a
  *  single value field re-renders only that row — the property list can run to
  *  hundreds of rows, and this keeps per-keystroke work O(1) instead of O(rows). */
@@ -270,7 +280,7 @@ const FilterRow = memo(function FilterRow({
   active: boolean;
   /** Values still reachable per attribute under the current filter, or null
    *  while nothing is filtered. */
-  facet: ReadonlyMap<string, ReadonlySet<string>> | null;
+  facet: Facet | null;
   onChange: (id: string, value: string) => void;
   onClear: (id: string) => void;
 }) {
@@ -280,8 +290,12 @@ const FilterRow = memo(function FilterRow({
     // Narrow to what the current match set still contains — but never the row
     // you are editing, or picking a different value in it would be impossible.
     if (facet && !active) {
-      const reachable = facet.get(row.label);
-      opts = reachable ? opts.filter((o) => reachable.has(o.value)) : [];
+      const reachable = facet.values.get(row.label);
+      // No entry means "no matched object carries this attribute" only when the
+      // scan saw every match. On a capped scan absence proves nothing, so keep
+      // the full list — an empty dropdown is a dead end, a wide one is not.
+      if (reachable) opts = opts.filter((o) => reachable.has(o.value));
+      else if (facet.complete) opts = [];
     }
     // Several sets can carry the same attribute, and rounding makes distinct
     // raw values print identically — show each label once.
@@ -478,7 +492,10 @@ export function ObjectFilterPanel() {
         if (!sets) { sets = extractTypeEntityOwnProperties(activeStore, typeId); typeSets.set(typeId, sets); }
         for (const set of sets) for (const p of set.properties ?? []) add(p.name, str(p.value));
       }
-      for (const qset of activeStore.quantities?.getForEntity?.(id) ?? []) {
+      // Quantities resolve through `getQuantities`, never the columnar table:
+      // after a STEP parse that table is empty by design (#577), so reading it
+      // here silently emptied every quantity dropdown once a filter was set.
+      for (const qset of activeStore.getQuantities?.(id) ?? []) {
         for (const q of qset.quantities ?? []) add(q.name, str(q.value));
       }
       for (const { label, accessor } of ATTRIBUTE_PARAMS) add(label, accessor(activeStore, id));
@@ -488,7 +505,7 @@ export function ObjectFilterPanel() {
     for (const entry of mutationOverlay.values()) {
       for (const [id, v] of entry.values) if (v !== null && matchedSet.has(id)) add(entry.ref.propName, v);
     }
-    return idx;
+    return { values: idx, complete: scan.length === matchedIds.length };
   }, [activeStore, matched, matchedIds, mutationOverlay]);
 
   const rows = useMemo<Row[]>(() => {
@@ -719,7 +736,16 @@ export function ObjectFilterPanel() {
         }
         if (cancelled) return;
         const finalIds = ids ?? [];
-        isolateEntities(finalIds);
+        // `isolateEntities` TOGGLES: handed the set that is already isolated it
+        // clears isolation instead. Re-picking a value that is already chosen
+        // re-runs this effect with an unchanged match, which would drop the
+        // isolation and show the whole model again — so only write when the set
+        // really differs. The panel wants "the isolation IS this match", and
+        // toggling is the isolate *button*'s contract, not this one's.
+        const current = useViewerStore.getState().isolatedEntities;
+        const unchanged = current !== null && current.size === finalIds.length
+          && finalIds.every((id) => current.has(id));
+        if (!unchanged) isolateEntities(finalIds);
         // Highlight the matches too, not just isolate them: `selectedEntityIds`
         // is the renderer's highlight channel (Viewport.tsx) and drives the
         // selection count chip, so the hits light up and stay actionable
