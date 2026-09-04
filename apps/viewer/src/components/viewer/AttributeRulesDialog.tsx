@@ -24,9 +24,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ListPlus, Sparkles, Table2, Upload, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
-import { PropertyValueType } from '@ifc-lite/data';
+import { PropertyValueType, RelationshipType } from '@ifc-lite/data';
 import { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import { extractTypeEntityOwnProperties } from '@ifc-lite/parser';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -81,6 +82,9 @@ export interface AttributeRulesDialogProps {
 /** Writes per yield to the event loop while applying. Large enough that the
  *  run stays fast, small enough that the bar moves smoothly. */
 const PROGRESS_CHUNK = 400;
+
+/** Delay before the write preview is recomputed while you type. */
+const PREVIEW_DEBOUNCE_MS = 350;
 
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
 
@@ -347,11 +351,26 @@ export function AttributeRulesDialog({
     type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
     const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v));
 
+    /**
+     * Property sets a property may be inherited from: the ones the object
+     * itself carries, plus the ones on its defining type. The object filter
+     * folds type psets in (it labels them "Daten(Typ)"), so a condition or a
+     * copy source naming such an attribute has to see them too — otherwise a
+     * rule built from a perfectly good filter matches nothing at all.
+     */
+    const typeIdOf = (entityId: number): number | undefined => {
+      const ids = store?.relationships?.getRelated(entityId, RelationshipType.DefinesByType, 'inverse');
+      return ids && ids.length > 0 ? ids[0] : undefined;
+    };
+
     /** Build a (pset, prop) and a by-name reader over a source of sets. */
     const readersOver = (setsOf: (id: number) => Sets) => {
       const read = (entityId: number, pset: string, prop: string): string | null => {
+        // The filter suffixes an inherited set with "(Typ)"; the set itself
+        // carries the bare name, so accept either spelling.
+        const bare = pset.endsWith('(Typ)') ? pset.slice(0, -5) : pset;
         for (const set of setsOf(entityId)) {
-          if (set.name !== pset) continue;
+          if (set.name !== pset && set.name !== bare) continue;
           for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
         }
         return null;
@@ -370,13 +389,33 @@ export function AttributeRulesDialog({
     // this. Reads through `getProperties`, since a STEP parse leaves the
     // columnar table empty by design (issue #577).
     const baseCache = new Map<number, Sets>();
+    const ownSets = (entityId: number): Sets => {
+      const table = store?.properties;
+      const fromTable = table && table.count !== 0 ? table.getForEntity?.(entityId) : undefined;
+      if (fromTable && fromTable.length > 0) return fromTable;
+      const own = store?.getProperties?.(entityId) ?? [];
+      if (own.length > 0 || !store) return own;
+      // A TYPE entity's own HasPropertySets are not exposed through the
+      // occurrence extractor — `getProperties` returns nothing for it (the
+      // same reason configureMutationView installs a separate path). Without
+      // this, every attribute that lives only on the type is invisible here
+      // and a rule built on it matches nothing.
+      const typeName = store.entities?.getTypeName?.(entityId) ?? '';
+      return typeName.endsWith('Type') ? (extractTypeEntityOwnProperties(store, entityId) as Sets) : own;
+    };
+    const typeSetCache = new Map<number, Sets>();
     const baseSets = (entityId: number) => {
       let sets = baseCache.get(entityId);
       if (!sets) {
-        const table = store?.properties;
-        sets = (table && table.count !== 0 ? table.getForEntity?.(entityId) : undefined)
-          ?? store?.getProperties?.(entityId)
-          ?? [];
+        const own = ownSets(entityId);
+        const typeId = typeIdOf(entityId);
+        let inherited: Sets = [];
+        if (typeId !== undefined) {
+          inherited = typeSetCache.get(typeId) ?? ownSets(typeId);
+          typeSetCache.set(typeId, inherited);
+        }
+        // Own sets first: an occurrence value overrides the type's.
+        sets = inherited.length > 0 ? [...own, ...inherited] : own;
         baseCache.set(entityId, sets);
       }
       return sets;
@@ -391,7 +430,14 @@ export function AttributeRulesDialog({
     const effSets = (entityId: number) => {
       if (!view) return baseSets(entityId);
       let sets = effCache.get(entityId);
-      if (!sets) { sets = (view.getForEntity(entityId) as Sets) ?? baseSets(entityId); effCache.set(entityId, sets); }
+      if (!sets) {
+        const merged = (view.getForEntity(entityId) as Sets) ?? [];
+        const typeId = typeIdOf(entityId);
+        const inherited = typeId !== undefined ? (typeSetCache.get(typeId) ?? ownSets(typeId)) : [];
+        if (typeId !== undefined) typeSetCache.set(typeId, inherited);
+        sets = inherited.length > 0 ? [...merged, ...inherited] : merged;
+        effCache.set(entityId, sets);
+      }
       return sets;
     };
 
@@ -403,10 +449,25 @@ export function AttributeRulesDialog({
   }, [store, open, readIfcParam, modelId, getMutationView]);
   readersRef.current = readers;
 
-  const writes = useMemo(
-    () => (store && pending.length > 0 ? planWrites(pending, readers.effective.read, readers.effective.readByName, universe) : []),
-    [store, pending, readers, universe],
+  /**
+   * Planning walks every candidate object, so doing it on each keystroke made
+   * the action form stutter. The PREVIEW runs on a debounced copy of the
+   * rules; the apply re-plans from the live state, so the delay can never
+   * cause it to write something stale.
+   */
+  const [previewRules, setPreviewRules] = useState<AttributeRule[]>([]);
+  useEffect(() => {
+    const t = setTimeout(() => setPreviewRules(pending), PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [pending]);
+
+  const plan = useCallback(
+    (rules: readonly AttributeRule[]) =>
+      (store && rules.length > 0 ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe) : []),
+    [store, readers, universe],
   );
+
+  const writes = useMemo(() => plan(previewRules), [plan, previewRules]);
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
 
@@ -453,7 +514,8 @@ export function AttributeRulesDialog({
       // object filter forever.
       let reverted = 0;
       const stale = staleTargets(loadApplied(projectKey), pending);
-      const total = stale.length + writes.length;
+      const liveWrites = plan(pending);
+      const total = stale.length + liveWrites.length;
       let done = 0;
       // Yield to the browser every so often, otherwise a 20k-write run blocks
       // the main thread and the progress bar never paints a single frame.
@@ -483,7 +545,7 @@ export function AttributeRulesDialog({
       // Each write carries its rule id instead.
       for (const r of pending) if (r.enabled) counts.set(r.id, 0);
       await tick('Applying rules…');
-      for (const w of writes) {
+      for (const w of liveWrites) {
         const result = w.op === 'set'
           ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
           : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
