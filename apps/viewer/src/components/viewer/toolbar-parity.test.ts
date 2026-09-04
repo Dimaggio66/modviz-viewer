@@ -51,12 +51,17 @@ import { useViewerStore } from '@/store/index.js';
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-type Surface = 'classic' | 'ribbon';
+type Surface = 'floating' | 'classic' | 'ribbon';
 
 const ROOTS: Record<Surface, string> = {
+  floating: 'components/viewer/ribbon/FloatingToolbar.tsx',
   classic: 'components/viewer/MainToolbar.tsx',
   ribbon: 'components/viewer/ribbon/RibbonToolbar.tsx',
 };
+
+/** The two surfaces the floating toolbar replaced. They are no longer
+ *  mounted anywhere; they are kept as the inventory of what shipped. */
+const RETIRED: Surface[] = ['classic', 'ribbon'];
 
 /**
  * Directories the walk does not descend into. `components/ui` is design-system
@@ -67,65 +72,38 @@ const ROOTS: Record<Surface, string> = {
 const STOP_PREFIXES = ['components/ui/', 'lib/', 'store/', 'icons/', 'sdk/'];
 
 /**
- * Every entry is a capability ONE toolbar deliberately does not offer.
- * Adding one is a design decision: say why here, or wire the capability
- * into both surfaces instead.
+ * The retired toolbars reached a few things only through controls the
+ * floating toolbar does not render. Those are listed by ORIGIN, not by
+ * symbol: naming the control that carried them says *why* they went, and
+ * keeps the guard sharp — a symbol is excused only when EVERY file it was
+ * reachable from is listed here, so the same capability disappearing from
+ * anywhere else still fails.
  */
-const ALLOWLIST: { surface: Surface; symbol: string; reason: string }[] = [
+const ALLOWLIST: { origin: string; reason: string }[] = [
   {
-    surface: 'ribbon',
-    symbol: 'ribbonTab',
-    reason: 'Tabs are the ribbon\'s own geography; the classic strip has no tabs to select.',
+    origin: 'components/viewer/SearchInline.tsx',
+    reason: 'The classic strip embedded an inline search popover with Vim-style result cycling. '
+      + 'The ribbon already replaced it with the shared SearchModal, which the Elements mode opens, '
+      + 'and the floating toolbar inherits that choice.',
   },
   {
-    surface: 'ribbon',
-    symbol: 'setRibbonTab',
-    reason: 'Same: only the ribbon has a tab to switch, including via the contextual-tab driver.',
+    origin: 'components/viewer/ribbon/RibbonSwitchNotice.tsx',
+    reason: 'The banner that explained the classic/ribbon switch, and started the walkthrough for it. '
+      + 'With one toolbar there is no switch to explain.',
   },
   {
-    surface: 'ribbon',
-    symbol: 'ribbonCollapsed',
-    reason: 'Collapse/expand of the command band — the classic strip is a single strip with nothing to collapse.',
+    origin: 'lib/tours/',
+    reason: 'Guided-tour state, reached only through the switch notice above. The tours themselves are '
+      + 'unaffected: LearnTab, PanelTourButton, TourInvite and the command palette all still start them.',
   },
   {
-    surface: 'ribbon',
-    symbol: 'setRibbonCollapsed',
-    reason: 'Same as ribbonCollapsed.',
+    origin: 'hooks/ids/loadIdsContent.ts',
+    reason: 'Pulled in by the tour demo-kit, not by a toolbar control. IDS validation runs through '
+      + 'useIDS and opens from the sidebar.',
   },
   {
-    surface: 'ribbon',
-    symbol: 'ribbonContextualTabs',
-    reason: '"Follow work" makes the active tab follow the working context; meaningless without tabs.',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'setRibbonContextualTabs',
-    reason: 'Same as ribbonContextualTabs.',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'isMobile',
-    reason: 'RibbonSwitchNotice suppresses its one-time "the toolbar changed" line on mobile, where neither desktop toolbar renders at all (ViewerLayout picks MobileToolbar).',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'hierarchyMode',
-    reason: 'The Elements tab mirrors the hierarchy panel\'s grouping switch as a ribbon shortcut. The capability itself lives in HierarchyPanel, which both toolbar styles show, so classic users are not missing it.',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'setHierarchyMode',
-    reason: 'Same shortcut as hierarchyMode.',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'setPanelShownInSidebar',
-    reason: 'Used only to reveal the hierarchy panel when that ribbon shortcut is pressed.',
-  },
-  {
-    surface: 'ribbon',
-    symbol: 'setLeftPanelCollapsed',
-    reason: 'Same: un-collapses the left panel so the hierarchy shortcut has somewhere to land.',
+    origin: 'hooks/useSearchIndex.ts',
+    reason: 'The index behind the retired inline search. SearchModal builds its own.',
   },
 ];
 
@@ -329,65 +307,86 @@ function capabilities(files: Iterable<string>): Map<string, Set<string>> {
 }
 
 const surfaces = {
+  floating: capabilities(closure(ROOTS.floating)),
   classic: capabilities(closure(ROOTS.classic)),
   ribbon: capabilities(closure(ROOTS.ribbon)),
 } satisfies Record<Surface, Map<string, Set<string>>>;
 
-function exclusiveTo(surface: Surface): string[] {
-  const other: Surface = surface === 'classic' ? 'ribbon' : 'classic';
-  return [...surfaces[surface].keys()].filter((symbol) => !surfaces[other].has(symbol)).sort();
+/** Everything the retired toolbars between them could reach. */
+function retiredCapabilities(): Map<string, Set<string>> {
+  const union = new Map<string, Set<string>>();
+  for (const surface of RETIRED) {
+    for (const [symbol, files] of surfaces[surface]) {
+      let where = union.get(symbol);
+      if (!where) { where = new Set(); union.set(symbol, where); }
+      for (const file of files) where.add(file);
+    }
+  }
+  return union;
 }
 
-function allowed(surface: Surface): Set<string> {
-  return new Set(ALLOWLIST.filter((entry) => entry.surface === surface).map((entry) => entry.symbol));
+const retired = retiredCapabilities();
+
+/** True when every file this symbol came from is an allowlisted origin. */
+function excused(symbol: string): boolean {
+  const origins = retired.get(symbol);
+  if (!origins || origins.size === 0) return false;
+  return [...origins].every((file) => {
+    const normalized = file.split(path.sep).join('/');
+    return ALLOWLIST.some((entry) => normalized.startsWith(entry.origin));
+  });
 }
 
-function describeSymbol(surface: Surface, symbol: string): string {
-  return `${symbol} (only in ${[...(surfaces[surface].get(symbol) ?? [])].join(', ')})`;
+/** Reached by the retired pair but not by the toolbar that shipped. */
+function dropped(): string[] {
+  return [...retired.keys()].filter((symbol) => !surfaces.floating.has(symbol)).sort();
 }
 
-describe('toolbar parity between the classic strip and the ribbon', () => {
-  it('walks a non-trivial closure for both surfaces', () => {
+function describeSymbol(symbol: string): string {
+  return `${symbol} (was reachable from ${[...(retired.get(symbol) ?? [])].join(', ')})`;
+}
+
+describe('the floating toolbar carries what the retired toolbars offered', () => {
+  it('walks a non-trivial closure for every surface', () => {
     // Guards the guard: a broken resolver would silently compare two empty
     // sets and pass forever.
-    assert.ok(surfaces.classic.size > 50, `classic reached only ${surfaces.classic.size} symbols`);
-    assert.ok(surfaces.ribbon.size > 50, `ribbon reached only ${surfaces.ribbon.size} symbols`);
+    for (const surface of ['floating', ...RETIRED] as Surface[]) {
+      assert.ok(surfaces[surface].size > 50, `${surface} reached only ${surfaces[surface].size} symbols`);
+    }
   });
 
-  it('hosts no capability in the classic strip that the ribbon cannot reach', () => {
-    const unexplained = exclusiveTo('classic').filter((symbol) => !allowed('classic').has(symbol));
+  it('drops no capability the classic strip or the ribbon could reach', () => {
+    const unexplained = dropped().filter((symbol) => !excused(symbol));
     assert.deepEqual(
-      unexplained.map((symbol) => describeSymbol('classic', symbol)),
+      unexplained.map(describeSymbol),
       [],
-      'classic-only capabilities: wire them into the ribbon too, or add an ALLOWLIST entry saying why not',
-    );
-  });
-
-  it('hosts no capability in the ribbon that the classic strip cannot reach', () => {
-    const unexplained = exclusiveTo('ribbon').filter((symbol) => !allowed('ribbon').has(symbol));
-    assert.deepEqual(
-      unexplained.map((symbol) => describeSymbol('ribbon', symbol)),
-      [],
-      'ribbon-only capabilities: wire them into the classic strip too, or add an ALLOWLIST entry saying why not',
+      'these capabilities shipped before and the floating toolbar cannot reach them: '
+      + 'wire them in, or add an ALLOWLIST entry saying why they are gone',
     );
   });
 
   it('carries no stale allowlist entry', () => {
+    // An origin nothing is dropped from any more has stopped excusing
+    // anything, and its reason has stopped being true.
+    const dropping = new Set<string>();
+    for (const symbol of dropped()) {
+      for (const file of retired.get(symbol) ?? []) dropping.add(file.split(path.sep).join('/'));
+    }
     const stale = ALLOWLIST
-      .filter((entry) => !exclusiveTo(entry.surface).includes(entry.symbol))
-      .map((entry) => `${entry.surface}:${entry.symbol}`);
-    assert.deepEqual(stale, [], 'these are no longer one-sided — delete the entry with its reason');
+      .filter((entry) => ![...dropping].some((file) => file.startsWith(entry.origin)))
+      .map((entry) => entry.origin);
+    assert.deepEqual(stale, [], 'nothing is dropped from these any more — delete the entry with its reason');
   });
 
-  it('reaches the same camera commands from both surfaces', () => {
+  it('reaches every camera command the retired toolbars reached', () => {
     // The camera set is the one this guard was written for, so it is asserted
-    // on its own too: an exclusive here can never be right, since both styles
-    // render the same shared command list (toolbar/CameraCommands).
-    const cameraOf = (surface: Surface) =>
-      [...surfaces[surface].keys()].filter((symbol) => symbol.startsWith('camera:')).sort();
-    assert.deepEqual(cameraOf('classic'), cameraOf('ribbon'));
+    // on its own too: both retired styles rendered the same shared command
+    // list (toolbar/CameraCommands), and so does the floating toolbar.
+    const cameraOf = (caps: Map<string, Set<string>>) =>
+      [...caps.keys()].filter((symbol) => symbol.startsWith('camera:')).sort();
+    assert.deepEqual(cameraOf(surfaces.floating), cameraOf(retired));
     for (const id of ['camera:zoomIn', 'camera:zoomOut', 'camera:rotateLeft', 'camera:rotateRight']) {
-      assert.ok(surfaces.classic.has(id), `${id} unreachable from the classic strip`);
+      assert.ok(surfaces.floating.has(id), `${id} unreachable from the floating toolbar`);
     }
   });
 });

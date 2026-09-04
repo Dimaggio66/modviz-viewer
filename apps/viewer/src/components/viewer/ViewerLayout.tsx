@@ -6,9 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { PanelImperativeHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { MainToolbar } from './MainToolbar';
 import { MobileToolbar } from './MobileToolbar';
-import { RibbonToolbar } from './ribbon/RibbonToolbar';
+import { FloatingToolbar } from './ribbon/FloatingToolbar';
 import { HierarchyPanel } from './HierarchyPanel';
 import { ObjectFilterPanel } from './ObjectFilterPanel';
 import { AddElementPanel } from './AddElementPanel';
@@ -200,8 +199,6 @@ export function ViewerLayout() {
 
   // Initialize theme on mount
   const theme = useViewerStore((s) => s.theme);
-  // Desktop toolbar style (issue #1686): classic strip or tabbed ribbon.
-  const toolbarStyle = useViewerStore((s) => s.toolbarStyle);
   const isMobile = useViewerStore((s) => s.isMobile);
   const setIsMobile = useViewerStore((s) => s.setIsMobile);
   const leftPanelCollapsed = useViewerStore((s) => s.leftPanelCollapsed);
@@ -435,13 +432,11 @@ export function ViewerLayout() {
         <SearchModal />
         <TourHost />
 
-        {/* Main Toolbar — compact MobileToolbar on mobile; on desktop the
-            user picks classic strip vs tabbed ribbon (issue #1686). */}
+        {/* Command surface — the compact MobileToolbar on mobile, otherwise
+            the floating three-pill toolbar, which overlays the workspace. */}
         {isMobile
           ? <MobileToolbar />
-          : toolbarStyle === 'ribbon'
-            ? <RibbonToolbar onShowShortcuts={shortcutsDialog.toggle} />
-            : <MainToolbar onShowShortcuts={shortcutsDialog.toggle} />}
+          : <FloatingToolbar onShowShortcuts={shortcutsDialog.toggle} />}
 
         {/* Main Content Area - Desktop Layout */}
         {!isMobile && (
