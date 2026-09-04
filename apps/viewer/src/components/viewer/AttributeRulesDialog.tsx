@@ -31,14 +31,17 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { ComboInput } from '@/components/ui/combo-input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, applyRuleEdit, planWrites, staleTargets,
+  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, staleTargets,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
-  type RuleEditField, type RuleTableRow,
+  type RuleEditField, type RuleMatch, type RuleTableRow,
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
@@ -71,6 +74,8 @@ export interface AttributeRulesDialogProps {
   /** Reports how far an apply has got, so the progress can be shown outside
    *  this dialog — it closes as soon as the run starts. `null` = finished. */
   onProgress?: (state: { done: number; total: number; label: string } | null) => void;
+  /** Objects currently selected in 3D (local express ids). */
+  selectedIds: readonly number[];
 }
 
 /** Writes per yield to the event loop while applying. Large enough that the
@@ -79,9 +84,12 @@ const PROGRESS_CHUNK = 400;
 
 const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
 
+/** Where a new rule takes its objects from — RIBiTWO's "Alle Objekte" menu. */
+export type RuleScope = 'all' | 'filter' | 'selection';
+
 export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
-  universe, readIfcParam, onProgress,
+  universe, readIfcParam, onProgress, selectedIds,
 }: AttributeRulesDialogProps) {
   const { setProperty, deleteProperty, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
@@ -94,6 +102,11 @@ export function AttributeRulesDialog({
 
   const [tab, setTab] = useState<'rules' | 'table'>('rules');
   const [kind, setKind] = useState<ActionKind>('add');
+  /** RIBiTWO's "Alle Objekte" split button — where a new rule starts from. */
+  const [scope, setScope] = useState<RuleScope>('filter');
+  /** Which condition attributes are ticked, and the value each one uses. */
+  const [uncheckedConditions, setUnchecked] = useState<Set<string>>(new Set());
+  const [conditionValues, setConditionValues] = useState<Record<string, string>>({});
   const [form, setForm] = useState<ActionForm>(EMPTY_ACTION_FORM);
   const [rules, setRules] = useState<AttributeRule[]>([]);
   const [applying, setApplying] = useState(false);
@@ -131,6 +144,100 @@ export function AttributeRulesDialog({
     [propertyRefs],
   );
 
+  /**
+   * Pick the scope that fits when the assistant OPENS: the filter if one is
+   * active, else the 3D selection, else the whole model. Deciding on every
+   * render instead would strand the choice — once it fell back to "all
+   * objects" because no filter existed yet, it never returned to the filter.
+   */
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setScope(conditions.length > 0 ? 'filter' : selectedIds.length > 0 ? 'selection' : 'all');
+      setUnchecked(new Set());
+      setConditionValues({});
+    }
+    wasOpen.current = open;
+  }, [open, conditions.length, selectedIds.length]);
+
+  /** …but never sit on a scope that has nothing behind it any more. */
+  useEffect(() => {
+    if (scope === 'filter' && conditions.length === 0) setScope('all');
+    if (scope === 'selection' && selectedIds.length === 0) setScope(conditions.length > 0 ? 'filter' : 'all');
+  }, [scope, conditions.length, selectedIds.length]);
+
+  /**
+   * The attributes offered as conditions. From the filter that is what it
+   * matched on; from a selection it is what the first selected object carries,
+   * so any of them can be promoted to a condition (RIB BIM Qualifier §6.8.1.2.1
+   * — "durch Aktivieren des Attributs die Bedingung festlegen").
+   */
+  const candidateConditions = useMemo<RuleConditionSnapshot[]>(() => {
+    if (scope === 'filter') return conditions;
+    if (scope === 'selection' && selectedIds.length > 0 && store) {
+      const first = selectedIds[0];
+      const out: RuleConditionSnapshot[] = [];
+      for (const set of store.getProperties?.(first) ?? []) {
+        for (const p of set.properties ?? []) {
+          if (p.value === undefined || p.value === null || p.value === '') continue;
+          out.push({ label: p.name, value: String(p.value) });
+        }
+      }
+      return out.sort((a, b) => a.label.localeCompare(b.label));
+    }
+    return [];
+  }, [scope, conditions, selectedIds, store]);
+
+  /** Conditions start ticked when they come from the filter (they already
+   *  describe the selection) and unticked for a selected object's attributes. */
+  const checkedConditions = useMemo(() => {
+    const on = new Set<string>();
+    if (scope === 'filter') for (const c of candidateConditions) if (!uncheckedConditions.has(c.label)) on.add(c.label);
+    else for (const c of candidateConditions) if (uncheckedConditions.has(`+${c.label}`)) on.add(c.label);
+    return on;
+  }, [scope, candidateConditions, uncheckedConditions]);
+
+  const toggleCondition = (label: string) => setUnchecked((prev) => {
+    const next = new Set(prev);
+    // Filter conditions are opt-OUT, a selected object's attributes opt-IN.
+    const key = scope === 'filter' ? label : `+${label}`;
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const setConditionValue = (label: string, value: string) =>
+    setConditionValues((prev) => ({ ...prev, [label]: value }));
+
+  /** Distinct values of one attribute, for its condition dropdown. `*` is
+   *  offered first: it stands for every value the attribute has. Reads go
+   *  through a ref because the readers are defined further down. */
+  const readersRef = useRef<{ effective: { readByName: (id: number, prop: string) => string | null } } | null>(null);
+  const valuesFor = useCallback((label: string) => {
+    const seen = new Set<string>();
+    const ids = scope === 'selection' ? selectedIds : entityIds.slice(0, 4000);
+    for (const id of ids) {
+      const v = readersRef.current?.effective.readByName(id, label);
+      if (v) seen.add(v);
+      if (seen.size >= 300) break;
+    }
+    return ['*', ...[...seen].sort((a, b) => a.localeCompare(b))];
+  }, [scope, selectedIds, entityIds]);
+
+  /** The conditions a new rule will carry. */
+  const activeMatch = useMemo<RuleMatch[]>(
+    () => candidateConditions
+      .filter((c) => checkedConditions.has(c.label))
+      .map((c) => ({ attribute: c.label, value: (conditionValues[c.label] ?? c.value).trim() || '*' })),
+    [candidateConditions, checkedConditions, conditionValues],
+  );
+
+  /** Objects a new rule starts from, before its own conditions narrow it. */
+  const scopeIds = useMemo<number[]>(
+    () => (scope === 'selection' ? [...selectedIds] : scope === 'filter' ? entityIds : []),
+    [scope, selectedIds, entityIds],
+  );
+  const scopeCount = scope === 'all' ? universe.length : scopeIds.length;
+
   /** The action the form currently describes, or null when incomplete. */
   const draft = useMemo<RuleAction | null>(() => {
     const target = { psetName: form.psetName.trim(), propName: form.propName.trim() };
@@ -153,7 +260,16 @@ export function AttributeRulesDialog({
     if (!draft) return;
     commit([
       ...rules,
-      { id: `${Date.now()}-${rules.length}`, conditions, entityIds, action: draft, enabled: true },
+      {
+        id: `${Date.now()}-${rules.length}`,
+        conditions: activeMatch.map((m) => ({ label: m.attribute, value: m.value })),
+        // The rule resolves its own conditions, so it keeps working after a
+        // reload and narrows the scope the same way every time it runs.
+        match: activeMatch,
+        entityIds: scope === 'all' ? [] : [...scopeIds],
+        action: draft,
+        enabled: true,
+      },
     ]);
     // Empty the fields that identify THIS rule, so the draft stops being a
     // valid action — otherwise the rule just collected would also still be
@@ -204,8 +320,17 @@ export function AttributeRulesDialog({
   /** Rules to run: whatever is in the table, plus the unsaved draft — so a
    *  single rule can be applied without the extra "add to table" click. */
   const pending = useMemo<AttributeRule[]>(
-    () => (draft ? [...rules, { id: 'draft', conditions, entityIds, action: draft, enabled: true }] : rules),
-    [rules, draft, conditions, entityIds],
+    () => (draft
+      ? [...rules, {
+          id: 'draft',
+          conditions: activeMatch.map((m) => ({ label: m.attribute, value: m.value })),
+          match: activeMatch,
+          entityIds: scope === 'all' ? [] : [...scopeIds],
+          action: draft,
+          enabled: true,
+        }]
+      : rules),
+    [rules, draft, activeMatch, scope, scopeIds],
   );
 
   /**
@@ -276,6 +401,7 @@ export function AttributeRulesDialog({
     // `open` is a dependency so each time the dialog opens it starts from
     // fresh values rather than a cache filled before the last apply.
   }, [store, open, readIfcParam, modelId, getMutationView]);
+  readersRef.current = readers;
 
   const writes = useMemo(
     () => (store && pending.length > 0 ? planWrites(pending, readers.effective.read, readers.effective.readByName, universe) : []),
@@ -472,35 +598,89 @@ export function AttributeRulesDialog({
             </div>
 
             <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] overflow-hidden">
-              {/* Bedingung */}
+              {/* Bedingung — scope + the attributes that make up the condition */}
               <section className="flex min-h-0 flex-col border-r">
                 <header className="flex items-center justify-between border-b px-4 py-2">
                   <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Condition</span>
-                  <Badge variant={conditions.length > 0 ? 'default' : 'secondary'}>
-                    {entityIds.length.toLocaleString()} objects
+                  <Badge variant={scopeCount > 0 ? 'default' : 'secondary'}>
+                    {scopeCount.toLocaleString()} objects
                   </Badge>
                 </header>
+
+                {/* RIBiTWO's "Alle Objekte" split button: which objects a rule starts from. */}
+                <div className="border-b px-4 py-2">
+                  <Select value={scope} onValueChange={(v) => setScope(v as RuleScope)}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All objects</SelectItem>
+                      <SelectItem value="filter" disabled={conditions.length === 0}>From the current filter</SelectItem>
+                      <SelectItem value="selection" disabled={selectedIds.length === 0}>Selected objects</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-3">
-                  {conditions.length === 0 ? (
-                    <div className="rounded-md border border-dashed px-3 py-4">
-                      <p className="text-xs text-muted-foreground">
-                        No filter is active — a rule would hit all {entityIds.length.toLocaleString()} objects.
-                        Set a value in the object filter to narrow it down.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-1.5">
-                      {conditions.map((c) => (
-                        <div key={c.label} className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5">
-                          <span className="truncate text-xs font-medium">{c.label}</span>
-                          <span className="truncate font-mono text-[11px] text-muted-foreground">{c.value}</span>
-                        </div>
-                      ))}
+                  {scope === 'all' && (
+                    <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
+                      No condition — the rule writes to every object in the model.
+                    </p>
+                  )}
+
+                  {scope === 'selection' && (
+                    <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
+                      The rule writes to the {selectedIds.length.toLocaleString()} object(s) selected in 3D.
+                      Tick an attribute below to narrow it further.
+                    </p>
+                  )}
+
+                  {scope === 'filter' && conditions.length === 0 && (
+                    <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
+                      No filter is active. Set a value in the object filter first.
+                    </p>
+                  )}
+
+                  {candidateConditions.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      {candidateConditions.map((c) => {
+                        const on = checkedConditions.has(c.label);
+                        return (
+                          <div key={c.label} className={cn(
+                            'flex items-center gap-2 rounded-md border px-2 py-1.5',
+                            on ? 'border-primary/40 bg-accent/40' : 'border-border',
+                          )}>
+                            <Checkbox
+                              checked={on}
+                              onCheckedChange={() => toggleCondition(c.label)}
+                              aria-label={`Use ${c.label} as a condition`}
+                            />
+                            <span className="min-w-0 flex-1 truncate text-xs font-medium" title={c.label}>{c.label}</span>
+                            <div className="w-[45%] shrink-0">
+                              <ComboInput
+                                value={conditionValues[c.label] ?? c.value}
+                                onChange={(v) => setConditionValue(c.label, v)}
+                                options={valuesFor(c.label)}
+                                placeholder="*"
+                                className="h-7 text-[11px]"
+                                maxRendered={500}
+                                aria-label={`Value for ${c.label}`}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
-                  <p className="mt-3 text-[11px] text-muted-foreground">
-                    Taken from the object filter. Adjust it there to change which objects a rule hits.
+
+                  {/* RIBiTWO's hint under the pane: what an object must carry. */}
+                  <p className="mt-3 rounded-md bg-muted/40 px-2.5 py-2 text-[11px] text-muted-foreground">
+                    <span className="font-medium">An object matches when:</span>{' '}
+                    <span className="font-mono">{describeConditions(activeMatch)}</span>
                   </p>
+                  {scope === 'filter' && (
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      Values come from the object filter — edit them here to refine the rule, or use <code>*</code> for every value of that attribute.
+                    </p>
+                  )}
                 </div>
               </section>
 

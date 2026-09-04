@@ -300,7 +300,7 @@ const FilterRow = memo(function FilterRow({
 });
 
 export function ObjectFilterPanel() {
-  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection, getMutationView, mutationCount } = useViewerStore(
+  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection, getMutationView, mutationCount, selectedEntityIds } = useViewerStore(
     useShallow((s) => ({
       models: s.models,
       activeModelId: s.activeModelId,
@@ -308,6 +308,7 @@ export function ObjectFilterPanel() {
       clearIsolation: s.clearIsolation,
       setSelectedEntityIds: s.setSelectedEntityIds,
       clearSelection: s.clearSelection,
+      selectedEntityIds: s.selectedEntityIds,
       getMutationView: s.getMutationView,
       // Cheap version signal: every property write pushes onto the undo stack,
       // so its depth changing means the overlay below must be rebuilt.
@@ -701,15 +702,30 @@ export function ObjectFilterPanel() {
     return out.sort((a, b) => a.psetName.localeCompare(b.psetName) || a.propName.localeCompare(b.propName));
   }, [rows]);
 
+  /** The 3D selection as LOCAL express ids — the renderer's highlight channel
+   *  holds global ids, and the rules assistant addresses the model locally. */
+  const selectedLocalIds = useMemo(() => {
+    if (!activeModelId) return [];
+    const offset = models.get(activeModelId)?.idOffset ?? 0;
+    return [...selectedEntityIds].map((g) => g - offset).filter((id) => id > 0);
+  }, [selectedEntityIds, activeModelId, models]);
+
   /** Resolve an ifc-level parameter by name for the attribute-rules assistant.
    *  Mapping files use these both as copy sources and as conditions
    *  (`ifcTypeObjectName` feeds 5D_Typ, which 56 later maps key off), and they
    *  are not properties, so the property readers cannot answer them. */
   const readIfcParam = useCallback((entityId: number, name: string): string | null => {
     if (!activeStore) return null;
-    const param = ATTRIBUTE_PARAMS.find((p) => p.label.toLowerCase() === name.toLowerCase());
-    if (!param) return null;
-    return param.accessor(activeStore, entityId) || null;
+    const lower = name.toLowerCase();
+    // The set dimensions are rows of this panel but not ATTRIBUTE_PARAMS, and
+    // conditions name them constantly (`ifcType = WALL`).
+    if (lower === 'ifctype') return activeStore.entities.getTypeName(entityId) || null;
+    if (lower === 'ifcbuildingstoreyname') {
+      const storeyId = activeStore.spatialHierarchy?.elementToStorey.get(entityId);
+      return storeyId === undefined ? null : activeStore.entities.getName(storeyId) || null;
+    }
+    const param = ATTRIBUTE_PARAMS.find((p) => p.label.toLowerCase() === lower);
+    return param ? param.accessor(activeStore, entityId) || null : null;
   }, [activeStore]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -890,6 +906,7 @@ export function ObjectFilterPanel() {
         propertyRefs={propertyRefs}
         projectKey={projectKeyFor(activeModel?.name, totalObjects)}
         universe={modelSummary.objectIds}
+        selectedIds={selectedLocalIds}
         readIfcParam={readIfcParam}
       />
     </div>

@@ -132,8 +132,18 @@ export interface RuleMatch {
   value: string;
 }
 
-/** RIBiTWO's marker for "this attribute must not be present". */
+/** RIBiTWO's marker for "this attribute must not be present". The object
+ *  filter writes the same intent as `<Not set>`, so both are accepted. */
 export const NOT_EXISTING = '<Not Existing>';
+const ABSENT_MARKERS = new Set(['<not existing>', '<not set>']);
+export const meansAbsent = (value: string) => ABSENT_MARKERS.has(value.trim().toLowerCase());
+
+/** A one-line reading of a rule's conditions, mirroring RIBiTWO's
+ *  "Enthält ein Objekt folgende Attribute: …" hint under the condition pane. */
+export function describeConditions(match: readonly RuleMatch[]): string {
+  if (match.length === 0) return 'Every object in scope.';
+  return match.map((c) => `${c.attribute} = ${c.value}`).join('  and  ');
+}
 
 export interface AttributeRule {
   id: string;
@@ -262,9 +272,7 @@ export function planWrites(
     if (!rule.match || rule.match.length === 0) return true;
     return rule.match.every((c) => {
       const value = readAttribute(id, c.attribute);
-      if (c.value.trim().toLowerCase() === NOT_EXISTING.toLowerCase()) {
-        return value === null || value === '';
-      }
+      if (meansAbsent(c.value)) return value === null || value === '';
       if (value === null) return false;
       return compileValueMatch(c.value)(value);
     });
