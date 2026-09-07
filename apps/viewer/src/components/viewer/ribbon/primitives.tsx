@@ -145,6 +145,11 @@ export function RibbonSmallStack({ children, className }: { children: React.Reac
 /**
  * A flat command cluster. The accessible group name remains for screen
  * readers, while visual grouping comes from the separators between clusters.
+ *
+ * Neither carries a `modviz-command-*` class any more. Those were written for
+ * the ribbon's 6rem band, where the group drew its own bordered, filled box
+ * and the divider was set to `display: none`. Inside a floating pill that is
+ * a panel within a panel, and it inverts what this comment promises.
  */
 export function RibbonGroup({ label, children, className }: {
   label: string;
@@ -155,7 +160,7 @@ export function RibbonGroup({ label, children, className }: {
     <div
       role="group"
       aria-label={label}
-      className={cn('modviz-command-group flex shrink-0 items-center gap-0.5', className)}
+      className={cn('flex shrink-0 items-center gap-0.5', className)}
     >
       {children}
     </div>
@@ -164,5 +169,5 @@ export function RibbonGroup({ label, children, className }: {
 
 /** Hairline divider between command groups. */
 export function RibbonGroupDivider() {
-  return <Separator orientation="vertical" className="modviz-command-divider mx-1 h-6 shrink-0" />;
+  return <Separator orientation="vertical" className="mx-1 h-6 shrink-0" />;
 }

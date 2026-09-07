@@ -102,19 +102,33 @@ export function FloatingToolbar({ onShowShortcuts }: FloatingToolbarProps = {} a
   return (
     <div
       className={cn(
-        'viewer-topbar modviz-toolbar-shell modviz-floating-toolbar',
+        'modviz-floating-toolbar',
         // No fill and no border of its own: the shell's background runs
         // straight through, so the pills read as floating on one continuous
         // surface rather than sitting in a bar. It still takes part in the
         // column layout — the docked side panels start below it, they are not
         // covered by it.
-        'pointer-events-none relative z-50 flex shrink-0 items-start gap-3 bg-transparent p-3',
+        //
+        // Deliberately NOT `viewer-topbar` / `modviz-toolbar-shell`: those
+        // belong to the two docked toolbars this one replaced, and their rules
+        // repaint the band with `!important`, which `bg-transparent` below
+        // cannot win against. Same reason the pills avoid `modviz-ribbon-band`
+        // (height: 6rem) and `modviz-toolbar-utilities` (its own fill and a
+        // pill-shaped 9999px radius). Re-adding any of them brings the bar back.
+        //
+        // Grid, not flex: `mx-auto` centred the middle pill in the space LEFT OVER
+        // between the other two, so an unequal left/right width pushed it off by
+        // exactly half the difference. Two `1fr` outer columns are equal by
+        // construction, so column 2 is the window centre. `1fr` (not
+        // `minmax(0,1fr)`) keeps each side at least its own min-content, so a
+        // narrow window drifts the centre instead of clipping a pill.
+        'pointer-events-none relative z-50 grid shrink-0 grid-cols-[1fr_auto_1fr] items-start gap-3 bg-transparent p-3',
       )}
     >
       {fileCommands.fileInputs}
 
       {/* ── 1 · Workspace modes ── */}
-      <div className="flex shrink-0 flex-col items-start gap-2">
+      <div className="col-start-1 flex shrink-0 flex-col items-start gap-2">
         <Tabs value={activeTab} onValueChange={(id) => handleTabChange(id as RibbonTabId)}>
           <TabsList
             aria-label="Workspace modes"
@@ -182,7 +196,7 @@ export function FloatingToolbar({ onShowShortcuts }: FloatingToolbarProps = {} a
           aria-label={`${activeTab} commands`}
           className={cn(
             COMMAND_PILL_CLASS,
-            'modviz-ribbon-band mx-auto max-w-[calc(100vw-26rem)] overflow-x-auto overflow-y-hidden',
+            'col-start-2 max-w-[calc(100vw-26rem)] overflow-x-auto overflow-y-hidden',
           )}
         >
           {activeTab === 'file' && <FileTab fileCommands={fileCommands} />}
@@ -195,13 +209,13 @@ export function FloatingToolbar({ onShowShortcuts }: FloatingToolbarProps = {} a
       )}
 
       {/* ── 3 · Model-level actions ── */}
-      <div className={cn(COMMAND_PILL_CLASS, 'modviz-toolbar-utilities ml-auto')}>
+      <div className={cn(COMMAND_PILL_CLASS, 'col-start-3 justify-self-end')}>
         <ExtensionToolbarSlot slot="toolbar.right" />
         <ExportChangesButton />
 
         <Tooltip>
           <TooltipTrigger asChild>
-            <div className="modviz-ribbon-theme">
+            <div>
               <ThemeSwitch />
             </div>
           </TooltipTrigger>
