@@ -257,6 +257,29 @@ function resolveSetValues(row: Extract<Row, { kind: 'ifcType' | 'storey' | 'pred
 }
 
 /**
+ * The raw value(s) a RULE CONDITION has to be matched against.
+ *
+ * A chip carries what the dropdown SHOWS: the ifcType row drops the "Ifc"
+ * prefix and uppercases, numeric labels are rounded. A rule is evaluated
+ * against what the model STORES — `getTypeName` answers "IfcCovering", never
+ * "COVERING" — and a bare condition term is an EXACT match, so handing the
+ * label over meant the rule matched nothing and "Apply now" stayed dead.
+ * The filter already resolves label -> raw before matching; conditions skipped
+ * that step. Several raw values behind one rounded label become an OR query,
+ * which the condition language speaks natively.
+ */
+function conditionValueOf(row: Row, text: string): string {
+  if (isQueryExpr(text)) return text;
+  const raw = row.kind === 'ifcType' || row.kind === 'storey' || row.kind === 'predefinedType'
+    ? resolveSetValues(row, text)
+    : rawValuesOf(row, text);
+  if (raw.length === 0) return text;
+  if (raw.length === 1) return raw[0];
+  // A raw value carrying an operator would be re-read as a query, not a term.
+  return raw.some((v) => /[*&|]/.test(v)) ? text : raw.join(' || ');
+}
+
+/**
  * The values still reachable under the current filter, keyed by attribute name,
  * plus whether the scan behind them covered every match. Faceting is only
  * allowed to *remove* a value when `complete` — see the narrowing in FilterRow.
@@ -873,10 +896,14 @@ export function ObjectFilterPanel() {
   // Active fields as removable chips (label + entered value).
   const chips = useMemo(() => {
     const byId = new Map(rows.map((r) => [r.id, r] as const));
-    const out: Array<{ id: string; label: string; value: string }> = [];
+    // `value` is what the chip shows, `raw` what a rule condition is matched
+    // against — see conditionValueOf.
+    const out: Array<{ id: string; label: string; value: string; raw: string }> = [];
     for (const [id, v] of selections) {
       const value = v.trim();
-      if (value) out.push({ id, label: byId.get(id)?.label ?? id, value });
+      if (!value) continue;
+      const row = byId.get(id);
+      out.push({ id, label: row?.label ?? id, value, raw: row ? conditionValueOf(row, value) : value });
     }
     return out;
   }, [selections, rows]);
@@ -1090,7 +1117,7 @@ export function ObjectFilterPanel() {
         open={rulesOpen}
         onOpenChange={setRulesOpen}
         onProgress={setRuleProgress}
-        conditions={chips.map((c) => ({ label: c.label, value: c.value }))}
+        conditions={chips.map((c) => ({ label: c.label, value: c.raw }))}
         // With no filter set, the rules would target the whole model — pass the
         // full object universe so the dialog can say so honestly.
         entityIds={matched === null ? modelSummary.objectIds : matchedIds}
