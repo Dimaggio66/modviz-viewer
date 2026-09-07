@@ -45,6 +45,25 @@ export interface LvRollup {
   value: number | null;
   feedingRows: number;
   openRows: number;
+  /**
+   * Elements counted by MORE THAN ONE feeding row, i.e. measured twice into
+   * the same position. Two rules can legitimately point at one LV, but only
+   * while they select different elements: the moment one row's objects are a
+   * subset of another's, the position is overstated by exactly that overlap.
+   * Nothing about the sum looks wrong when it happens, which is why it is
+   * counted rather than left to be noticed.
+   */
+  overlapping: number;
+  /** The rows involved in that overlap, so it can be resolved. */
+  overlapRows: string[];
+}
+
+/** What one Auswahlgruppe currently selects. */
+export interface GroupResult {
+  /** Objects the condition matches, or `null` when it cannot be read. */
+  matched: number | null;
+  /** Why it cannot be read, or why it cannot be evaluated here. */
+  problem: string | null;
 }
 
 export interface ProjectResults {
@@ -52,6 +71,8 @@ export interface ProjectResults {
   rows: Map<string, RowResult>;
   /** Keyed by {@link lvRollupKey}. */
   lv: Map<string, LvRollup>;
+  /** Keyed by group name — every group, whether a row uses it or not. */
+  gruppen: Map<string, GroupResult>;
 }
 
 export const lvRollupKey = (tlk: string, lv: string): string => `${tlk.trim()}${lv.trim()}`;
@@ -66,6 +87,8 @@ export function evaluateProject(
   makeContext: (ids: readonly number[]) => QtoContext,
 ): ProjectResults {
   const rows = new Map<string, RowResult>();
+  const gruppen = new Map<string, GroupResult>();
+  const contributed = new Map<string, number[]>();
   const byKey = new Map(project.rows.map((r) => [r.schluessel, r]));
   const groupIds = new Map<string, number[] | null>();
 
@@ -74,17 +97,39 @@ export function evaluateProject(
     if (groupIds.has(name)) return groupIds.get(name)!;
     const gruppe = project.gruppen.find((g) => g.name === name);
     let ids: number[] | null;
-    if (!gruppe || !gruppe.bedingung.trim()) {
+    let problem: string | null = null;
+    if (!gruppe) {
+      // A row naming a group that is not in the catalogue selects nothing
+      // rather than everything: widening a scope by accident overstates.
+      ids = null;
+      problem = 'Gruppe existiert nicht';
+    } else if (!gruppe.bedingung.trim()) {
       // A group without a condition narrows nothing rather than selecting
-      // nothing — an empty row in the catalogue must not zero a quantity.
+      // nothing — an empty entry in the catalogue must not zero a quantity.
       ids = [...universe];
     } else {
       const parsed = parseQtoQuery(groupQuery(gruppe.bedingung.trim()));
-      ids = parsed.ok ? evaluateQtoQuery(parsed.expr, makeContext(universe)).matchedIds : null;
+      if (!parsed.ok) {
+        ids = null;
+        problem = parsed.error;
+      } else {
+        const r = evaluateQtoQuery(parsed.expr, makeContext(universe));
+        if (r.value === null) {
+          ids = null;
+          problem = r.unsupported.join('; ');
+        } else {
+          ids = r.matchedIds;
+        }
+      }
     }
     groupIds.set(name, ids);
+    gruppen.set(name, { matched: ids?.length ?? null, problem });
     return ids;
   };
+
+  // Every group is resolved, not only the referenced ones, so the catalogue
+  // can show a hit count while it is being written.
+  for (const g of project.gruppen) idsOfGroup(g.name);
 
   for (const tree of buildTree(project.rows)) {
     const row = tree.row;
@@ -100,8 +145,11 @@ export function evaluateProject(
     }
 
     if (brokenGroup !== null) {
+      const why = gruppen.get(brokenGroup)?.problem;
       rows.set(row.schluessel, {
-        value: null, unit: null, unsupported: [`Auswahlgruppe "${brokenGroup}" ist nicht lesbar`],
+        value: null,
+        unit: null,
+        unsupported: [`Auswahlgruppe "${brokenGroup}": ${why ?? 'nicht auswertbar'}`],
         matched: 0, skipped: 0, unresolved: 0,
       });
       continue;
@@ -125,13 +173,20 @@ export function evaluateProject(
       skipped: r.skipped.length,
       unresolved: r.unresolved.length,
     });
+    // Kept only for the overlap check below, never handed out: a few hundred
+    // rows over a few thousand objects each would be a lot to carry around.
+    contributed.set(row.schluessel, r.matchedIds);
   }
 
   const lv = new Map<string, LvRollup>();
+  /** Which rows measured a given element into a given position. */
+  const seenPerLv = new Map<string, Map<number, string[]>>();
+
   for (const row of project.rows) {
     if (rowKind(row) !== 'position') continue;
     const key = lvRollupKey(row.tlk, row.lv);
-    const current = lv.get(key) ?? { value: 0, feedingRows: 0, openRows: 0 };
+    const current = lv.get(key)
+      ?? { value: 0, feedingRows: 0, openRows: 0, overlapping: 0, overlapRows: [] };
     const res = rows.get(row.schluessel);
     current.feedingRows += 1;
     if (!res || res.value === null) {
@@ -140,14 +195,39 @@ export function evaluateProject(
     } else if (current.value !== null) {
       current.value += res.value;
     }
+
+    const seen = seenPerLv.get(key) ?? new Map<number, string[]>();
+    for (const id of contributed.get(row.schluessel) ?? []) {
+      const by = seen.get(id);
+      if (by) by.push(row.schluessel);
+      else seen.set(id, [row.schluessel]);
+    }
+    seenPerLv.set(key, seen);
     lv.set(key, current);
   }
+
+  for (const [key, seen] of seenPerLv) {
+    const roll = lv.get(key);
+    if (!roll) continue;
+    const culprits = new Set<string>();
+    let doubled = 0;
+    for (const by of seen.values()) {
+      if (by.length < 2) continue;
+      doubled += 1;
+      for (const k of by) culprits.add(k);
+    }
+    roll.overlapping = doubled;
+    roll.overlapRows = [...culprits].sort();
+  }
+
   // A position nothing points at is listed too, so it is visibly unassigned
   // rather than quietly absent.
   for (const p of project.positionen) {
     const key = lvRollupKey(p.tlk, p.lv);
-    if (!lv.has(key)) lv.set(key, { value: null, feedingRows: 0, openRows: 0 });
+    if (!lv.has(key)) {
+      lv.set(key, { value: null, feedingRows: 0, openRows: 0, overlapping: 0, overlapRows: [] });
+    }
   }
 
-  return { rows, lv };
+  return { rows, lv, gruppen };
 }

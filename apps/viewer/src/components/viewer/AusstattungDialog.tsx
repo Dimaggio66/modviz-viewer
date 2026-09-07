@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Plus, Table2, Workflow } from 'lucide-react';
+import { Check, Layers, Plus, Table2, TriangleAlert, Workflow } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -30,12 +30,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import {
   compareKeys, emptyProject,
-  type AusstattungProject, type AusstattungRow, type LvPosition,
+  type AusstattungProject, type AusstattungRow, type Auswahlgruppe, type LvPosition,
 } from '@/lib/ausstattung/model';
 import { evaluateProject, lvRollupKey } from '@/lib/ausstattung/evaluate';
 import { loadAusstattung, saveAusstattung } from '@/lib/ausstattung/store';
 import type { QtoContext } from '@/lib/quantities/qto-query';
 import { AusstattungTable } from './ausstattung/AusstattungTable';
+import { GruppenTable } from './ausstattung/GruppenTable';
 import { LvTable } from './ausstattung/LvTable';
 
 interface Props {
@@ -73,10 +74,20 @@ export function AusstattungDialog({
 
   /** Row quantities and the LV roll-ups, from the pure module so the same
    *  calculation can be checked against a real model without a browser. */
-  const { rows: results, lv: rollups } = useMemo(
+  const { rows: results, lv: rollups, gruppen: groupResults } = useMemo(
     () => evaluateProject(project, universe, ctxFor),
     [project, universe, ctxFor],
   );
+
+  /** How many rows name each group — an unused group is worth seeing. */
+  const groupUsage = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const r of project.rows) {
+      const n = r.auswahlgruppe.trim();
+      if (n) out.set(n, (out.get(n) ?? 0) + 1);
+    }
+    return out;
+  }, [project.rows]);
 
   const editRow = useCallback((schluessel: string, delta: Partial<AusstattungRow>) => {
     patch({
@@ -128,9 +139,49 @@ export function AusstattungDialog({
     patch({ ...project, positionen: project.positionen.filter((p) => !(p.tlk === tlk && p.lv === lv)) });
   }, [patch, project]);
 
+  const addGruppe = useCallback(() => {
+    const taken = new Set(project.gruppen.map((g) => g.name));
+    let n = 1;
+    while (taken.has(`Gruppe ${n}`)) n += 1;
+    const gruppe: Auswahlgruppe = { name: `Gruppe ${n}`, bedingung: '' };
+    patch({ ...project, gruppen: [...project.gruppen, gruppe] });
+  }, [patch, project]);
+
+  /** Renaming a group carries every row that names it along, otherwise the
+   *  rename silently turns those rows into references to nothing. */
+  const editGruppe = useCallback((name: string, delta: Partial<Auswahlgruppe>) => {
+    const renamed = delta.name !== undefined && delta.name !== name ? delta.name : null;
+    if (renamed !== null && (renamed === '' || project.gruppen.some((g) => g.name === renamed))) {
+      return; // an empty or duplicate name would orphan or merge rows
+    }
+    patch({
+      ...project,
+      gruppen: project.gruppen.map((g) => (g.name === name ? { ...g, ...delta } : g)),
+      rows: renamed === null
+        ? project.rows
+        : project.rows.map((r) => (r.auswahlgruppe === name ? { ...r, auswahlgruppe: renamed } : r)),
+    });
+  }, [patch, project]);
+
+  const removeGruppe = useCallback((name: string) => {
+    patch({
+      ...project,
+      gruppen: project.gruppen.filter((g) => g.name !== name),
+      // The rows keep the name so the loss is visible as "Gruppe existiert
+      // nicht" rather than silently widening their scope to the whole model.
+      rows: project.rows,
+    });
+  }, [patch, project]);
+
   const offen = useMemo(
     () => [...results.values()].filter((r) => r.value === null).length,
     [results],
+  );
+
+  /** Positions whose sum counts at least one element twice. */
+  const doppelt = useMemo(
+    () => [...rollups.values()].filter((r) => r.overlapping > 0).length,
+    [rollups],
   );
 
   return (
@@ -152,6 +203,12 @@ export function AusstattungDialog({
                   {project.rows.length}
                 </Badge>
               </TabsTrigger>
+              <TabsTrigger value="gruppen" className="gap-1.5 text-xs">
+                <Layers className="h-3.5 w-3.5" /> Auswahlgruppen
+                <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">
+                  {project.gruppen.length}
+                </Badge>
+              </TabsTrigger>
               <TabsTrigger value="lv" className="gap-1.5 text-xs">
                 <Table2 className="h-3.5 w-3.5" /> LV / TLK
                 <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">
@@ -161,7 +218,10 @@ export function AusstattungDialog({
             </TabsList>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={() => addRow('')} className="text-xs">
-                <Plus className="mr-1.5 h-3.5 w-3.5" /> Zeile hinzufügen
+                <Plus className="mr-1.5 h-3.5 w-3.5" /> Zeile
+              </Button>
+              <Button variant="outline" size="sm" onClick={addGruppe} className="text-xs">
+                <Plus className="mr-1.5 h-3.5 w-3.5" /> Gruppe
               </Button>
               <Button variant="outline" size="sm" onClick={addPosition} className="text-xs">
                 <Plus className="mr-1.5 h-3.5 w-3.5" /> LV-Position
@@ -180,6 +240,17 @@ export function AusstattungDialog({
             />
           </TabsContent>
 
+          <TabsContent value="gruppen" className="mt-0 min-h-0 flex-1 overflow-auto">
+            <GruppenTable
+              gruppen={project.gruppen}
+              results={groupResults}
+              usage={groupUsage}
+              onEdit={editGruppe}
+              onRemove={removeGruppe}
+              onAdd={addGruppe}
+            />
+          </TabsContent>
+
           <TabsContent value="lv" className="mt-0 min-h-0 flex-1 overflow-auto">
             <LvTable
               positionen={project.positionen}
@@ -193,9 +264,17 @@ export function AusstattungDialog({
 
         <div className="flex items-center justify-between gap-3 border-t px-4 py-2.5">
           <div className="flex flex-col gap-0.5">
-            <span className="text-xs text-muted-foreground">
-              {universe.length.toLocaleString('de-DE')} Objekte im Modell
-              {offen > 0 && ` · ${offen} Zeile(n) ohne Menge`}
+            <span className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                {universe.length.toLocaleString('de-DE')} Objekte im Modell
+                {offen > 0 && ` · ${offen} Zeile(n) ohne Menge`}
+              </span>
+              {doppelt > 0 && (
+                <Badge variant="destructive" className="gap-1 px-1.5 py-0 text-[10px]">
+                  <TriangleAlert className="h-2.5 w-2.5" aria-hidden="true" />
+                  {doppelt} Position(en) mit Doppelzählung
+                </Badge>
+              )}
             </span>
             <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
               {persisted ? (

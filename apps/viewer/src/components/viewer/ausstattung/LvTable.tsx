@@ -15,7 +15,7 @@
  */
 
 import { useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2, TriangleAlert } from 'lucide-react';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
@@ -136,10 +136,27 @@ export function LvTable({ positionen, rollups, onEdit, onRemove, onAdd }: Props)
                     ohne Zuordnung
                   </Badge>
                 ) : (
-                  <span className="text-muted-foreground">
-                    {feeding}
-                    {roll && roll.openRows > 0 ? ` (${roll.openRows} offen)` : ''}
-                  </span>
+                  <div className="flex flex-col items-start gap-1">
+                    <span className="text-muted-foreground">
+                      {feeding}
+                      {roll && roll.openRows > 0 ? ` (${roll.openRows} offen)` : ''}
+                    </span>
+                    {roll && roll.overlapping > 0 && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge variant="destructive" className="cursor-default gap-1 px-1.5 py-0 text-[10px]">
+                            <TriangleAlert className="h-2.5 w-2.5" aria-hidden="true" />
+                            {roll.overlapping.toLocaleString('de-DE')} doppelt
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent side="left" className="max-w-xs">
+                          {roll.overlapping.toLocaleString('de-DE')} Objekt(e) werden von mehreren
+                          Zeilen in diese Position gemessen — die Summe ist um diesen Anteil zu hoch.
+                          Betroffen: {roll.overlapRows.join(', ')}
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
                 )}
               </TableCell>
               <TableCell>
