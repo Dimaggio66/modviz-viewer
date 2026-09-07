@@ -36,7 +36,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ListFilter, Search, Table2, X } from 'lucide-react';
+import { ListFilter, Search, Table2, Workflow, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { EntityExtractor, extractTypeEntityOwnProperties, getAttributeNames, getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
@@ -57,6 +57,7 @@ import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 import { compileQuery, isQueryExpr } from '@/lib/value-query';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { AttributeRulesDialog } from './AttributeRulesDialog';
+import { AusstattungDialog } from './AusstattungDialog';
 import { projectKeyFor } from '@/lib/attribute-rules-store';
 import type { PropRef } from '@/lib/attribute-rules';
 
@@ -404,6 +405,7 @@ export function ObjectFilterPanel() {
   /** Ids behind `matched` — handed to the attribute-rules assistant. */
   const [matchedIds, setMatchedIds] = useState<number[]>([]);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [ausstattungOpen, setAusstattungOpen] = useState(false);
   /** Progress of a running rule apply. The assistant closes when it starts, so
    *  the bar lives here, where it stays visible over the model. */
   const [ruleProgress, setRuleProgress] = useState<{ done: number; total: number; label: string } | null>(null);
@@ -945,6 +947,38 @@ export function ObjectFilterPanel() {
     return param ? param.accessor(activeStore, entityId) || null : null;
   }, [activeStore]);
 
+  /**
+   * One attribute by bare name for the Ausstattung table: the LIVE value the
+   * attribute rules produced when there is one, otherwise the parsed file, and
+   * an ifc-level parameter last.
+   *
+   * This is deliberately a smaller reader than the one inside
+   * AttributeRulesDialog, which additionally folds in type-inherited sets.
+   * The two should become one module; copying that hundred-line cache here to
+   * pretend they already are would have been the worse trade.
+   */
+  const readAttributeByName = useCallback((entityId: number, name: string): string | null => {
+    if (!activeStore) return null;
+    type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
+    const view = activeModelId ? getMutationView(activeModelId) : null;
+    const sets = ((view?.getForEntity(entityId) as Sets | undefined)
+      ?? (activeStore.getProperties?.(entityId) as Sets | undefined)
+      ?? []);
+    for (const set of sets) {
+      for (const p of set.properties ?? []) {
+        if (p.name === name && p.value !== undefined && p.value !== null && p.value !== '') {
+          return String(p.value);
+        }
+      }
+    }
+    return readIfcParam(entityId, name);
+  }, [activeStore, activeModelId, getMutationView, readIfcParam]);
+
+  const ifcClassOf = useCallback(
+    (entityId: number): string | null => activeStore?.entities?.getTypeName?.(entityId) ?? null,
+    [activeStore],
+  );
+
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const setValue = useCallback((id: string, value: string) => {
@@ -999,6 +1033,20 @@ export function ObjectFilterPanel() {
           )}
         >
           <ListFilter className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setAusstattungOpen(true)}
+          disabled={!activeStore}
+          aria-label="Ausstattung"
+          title="Ausstattung — Mengenabfragen und LV-Positionen"
+          className={cn(
+            'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors',
+            'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+            'disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground',
+          )}
+        >
+          <Workflow className="h-4 w-4" />
         </button>
         <button
           type="button"
@@ -1112,6 +1160,15 @@ export function ObjectFilterPanel() {
           </p>
         </div>
       )}
+
+      <AusstattungDialog
+        open={ausstattungOpen}
+        onOpenChange={setAusstattungOpen}
+        projectKey={projectKeyFor(activeModel?.name, totalObjects)}
+        universe={modelSummary.objectIds}
+        readAttribute={readAttributeByName}
+        ifcClassOf={ifcClassOf}
+      />
 
       <AttributeRulesDialog
         open={rulesOpen}
