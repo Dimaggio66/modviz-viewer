@@ -45,6 +45,7 @@ describe('Mengenabfrage — Formel', () => {
       measure: { kind: 'count' },
       me: 'St',
       bauteil: null,
+      extras: [],
     });
   });
 
@@ -58,6 +59,7 @@ describe('Mengenabfrage — Formel', () => {
       measure: { kind: 'attribute', name: '5D_Länge' },
       me: 'm',
       bauteil: null,
+      extras: [],
     });
   });
 
@@ -354,5 +356,62 @@ describe('Zahlen', () => {
     assert.equal(attributeNumber(''), null);
     assert.equal(attributeNumber(null), null);
     assert.equal(attributeNumber('DN40'), null);
+  });
+});
+
+describe('Handbuch-Grammatik — was der Parser vorher abgelehnt hat', () => {
+  it('liest die englische Schreibweise aus dem Handbuch', () => {
+    // Wörtlich aus RIB iTWO 2026 – Ausstattung, Kapitel 4.3.3.
+    const e = parsed('QTO (Type:="Flaeche";UoM:="m";Norm:="VOB\\013";CondComp:="Gewerk==012")');
+    if (e.kind !== 'qto') return assert.fail('Form');
+    assert.deepEqual(e.measure, { kind: 'geometry', parameter: 'Flaeche' });
+    assert.equal(e.me, 'm', 'UoM ist ME');
+    assert.ok(e.bauteil, 'CondComp ist Bauteil');
+    assert.deepEqual(e.extras, [{ key: 'Norm', value: 'VOB\\013' }]);
+  });
+
+  it('verträgt das Leerzeichen vor der Klammer, das RIB selbst schreibt', () => {
+    assert.ok(parseQtoQuery('QTO (Typ:="Stückzahl";ME:="St")').ok);
+  });
+
+  it('liest optionale Parameterschlüssel, statt die ganze Formel abzulehnen', () => {
+    const e = parsed(
+      'QTO(Typ:="Mantelfläche";ME:="m²";Norm:="VOB\\018";Bauteil:="Bauteiltyp==\'Wall\'")',
+    );
+    if (e.kind !== 'qto') return assert.fail('Form');
+    assert.deepEqual(e.extras, [{ key: 'Norm', value: 'VOB\\018' }]);
+  });
+
+  it('gibt für einen nicht berücksichtigten Schlüssel KEINE Zahl zurück', () => {
+    const ctx = ctxOf({ 1: {}, 2: {} });
+    const r = run('QTO(Typ:="Stückzahl";ME:="St";Norm:="VOB\\018")', ctx);
+    assert.equal(r.value, null, 'eine Abzugsnorm zu ignorieren waere eine falsche Menge');
+    assert.deepEqual(r.unsupported, ['Parameter Norm']);
+  });
+
+  it('liest conv() aus dem Umrechnungsbeispiel des Handbuchs', () => {
+    // 4.3.2: dieselbe Formel liefert 4.686,600 bzw. 4,687 — je nach conv.
+    const p = parseQtoQuery('QTO(Typ:="Volumen";ME:="m3")*conv("kg")');
+    assert.ok(p.ok, p.ok ? '' : p.error);
+    if (!p.ok || p.expr.kind !== 'product') return assert.fail('Form');
+    const call = p.expr.factors[1]!;
+    assert.equal(call.kind, 'call');
+    if (call.kind !== 'call') return;
+    assert.equal(call.name, 'conv');
+    assert.deepEqual(call.args, [{ kind: 'text', value: 'kg' }]);
+  });
+
+  it('rechnet eine unbekannte Funktion nicht heimlich weg', () => {
+    const ctx = ctxOf({ 1: {}, 2: {} });
+    const r = run('QTO(Typ:="Stückzahl";ME:="St")*conv("kg")', ctx);
+    assert.equal(r.value, null);
+    assert.deepEqual(r.unsupported, ['Funktion conv']);
+  });
+
+  it('liest auch wenn() und sin(), ohne sie zu rechnen', () => {
+    for (const src of ['sin(1,5)', 'wenn(1;2;3)']) {
+      const p = parseQtoQuery(src);
+      assert.ok(p.ok, `${src}: ${p.ok ? '' : p.error}`);
+    }
   });
 });

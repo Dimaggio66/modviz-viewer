@@ -36,6 +36,20 @@
  * not. An element whose Bauteiltyp cannot be decided is different: it simply
  * does not match, and is counted in `unresolved` — see there.
  *
+ * PARSING IS DELIBERATELY WIDER THAN EVALUATION. RIB's grammar has far more
+ * than the three keys evaluated here — `Norm`, `Abzug`, `Versatz`,
+ * `Geometriefilter`, `HRef`, `Öffnungsbedingung` — and functions besides
+ * `roundk`, notably `conv("kg")`, whose presence changes the manual's own
+ * example from 4,686.600 to 4.687. All of them are read and kept rather than
+ * rejected: a formula that trips over one unknown key would otherwise hide
+ * everything else it says. Each one then stops the row from producing a
+ * number and names itself, because a deduction rule silently ignored is a
+ * wrong quantity, not a missing feature.
+ *
+ * Both spellings are accepted. The query language's language is a system
+ * option in RIB, and the manual writes the same query as `Typ`/`ME`/`Bauteil`
+ * and as `Type`/`UoM`/`CondComp`.
+ *
  * Units are RECORDED, NOT APPLIED. Applying `[mm]` would mean assuming which
  * unit the attribute is stored in, and a wrong assumption there is a silent
  * factor of 1000 that surfaces as a wrong price rather than as an error.
@@ -91,11 +105,31 @@ export interface BauteilFilter {
   depthSearch: boolean;
 }
 
+/** A `Name:="value"` pair the evaluator does not act on — `Norm`, `Abzug`,
+ *  `Geometriefilter` and the rest of RIB's optional keys. Kept rather than
+ *  dropped so the row can say WHICH key stopped it from producing a number. */
+export interface QtoExtraKey {
+  key: string;
+  value: string;
+}
+
 export type QtoExpr =
   | { kind: 'number'; value: number }
-  | { kind: 'qto'; measure: QtoMeasure; me: string | null; bauteil: BauteilFilter | null }
+  /** A quoted literal, which only ever appears as an argument to a function
+   *  this module does not evaluate (`conv("kg")`). */
+  | { kind: 'text'; value: string }
+  | {
+    kind: 'qto';
+    measure: QtoMeasure;
+    me: string | null;
+    bauteil: BauteilFilter | null;
+    extras: QtoExtraKey[];
+  }
   | { kind: 'product'; factors: QtoExpr[] }
-  | { kind: 'roundk'; inner: QtoExpr; digits: number };
+  | { kind: 'roundk'; inner: QtoExpr; digits: number }
+  /** Any other function — `conv`, `wenn`, `sin`. Parsed so the formula is not
+   *  rejected outright, never evaluated, and its arguments are left alone. */
+  | { kind: 'call'; name: string; args: QtoExpr[] };
 
 export type ParseResult =
   | { ok: true; expr: QtoExpr }
@@ -192,24 +226,45 @@ function parseBauteil(text: string, at: number): BauteilFilter {
   return { levels, depthSearch };
 }
 
+/**
+ * The three keys this module evaluates, in both languages RIB offers. The
+ * query language's language is a system option ("Sie können die Sprache der
+ * Mengenabfrage … einstellen"), and the manual writes the same query both
+ * ways — `QTO(Type:="Flaeche";UoM:="m";CondComp:="Gewerk==012")`. Accepting
+ * only the German spelling would fail on an English-configured project.
+ */
+const KEY_ALIASES = new Map<string, 'Typ' | 'ME' | 'Bauteil'>([
+  ['typ', 'Typ'], ['type', 'Typ'],
+  ['me', 'ME'], ['uom', 'ME'],
+  ['bauteil', 'Bauteil'], ['condcomp', 'Bauteil'],
+]);
+
 function parseQto(c: Cursor): QtoExpr {
   let measure: QtoMeasure | null = null;
   let me: string | null = null;
   let bauteil: BauteilFilter | null = null;
+  const extras: QtoExtraKey[] = [];
   do {
     c.ws();
     const keyAt = c.pos;
-    const key = /^(Typ|ME|Bauteil)\s*:=/.exec(c.src.slice(c.pos));
-    if (!key) throw new ParseError('Typ:=, ME:= oder Bauteil:= erwartet', c.pos);
-    c.pos += key[0].length;
+    const raw = /^([A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]*)\s*:=/.exec(c.src.slice(c.pos));
+    if (!raw) throw new ParseError('Parameterschlüssel erwartet (Name:=)', c.pos);
+    c.pos += raw[0].length;
     const value = readQuoted(c);
-    if (key[1] === 'Typ') {
+    const key = KEY_ALIASES.get(raw[1]!.toLowerCase());
+    if (key === undefined) {
+      // Norm, Abzug, Versatz, Geometriefilter, HRef … — read, kept, not acted
+      // on. Rejecting the formula outright would hide everything else in it.
+      extras.push({ key: raw[1]!, value });
+      continue;
+    }
+    if (key === 'Typ') {
       const attr = ATTRIBUT.exec(value.trim());
       if (attr) measure = { kind: 'attribute', name: attr[1]!.trim() };
       else if (value.trim().toLowerCase() === 'stückzahl') measure = { kind: 'count' };
       else if (value.trim()) measure = { kind: 'geometry', parameter: value.trim() };
       else throw new ParseError('Typ ist leer', keyAt);
-    } else if (key[1] === 'ME') {
+    } else if (key === 'ME') {
       me = value.trim() || null;
     } else {
       bauteil = parseBauteil(value, keyAt);
@@ -217,18 +272,44 @@ function parseQto(c: Cursor): QtoExpr {
   } while (c.eat(';'));
   if (!measure) throw new ParseError('QTO ohne Typ', c.pos);
   if (!c.eat(')')) throw new ParseError('Schliessende Klammer erwartet', c.pos);
-  return { kind: 'qto', measure, me, bauteil };
+  return { kind: 'qto', measure, me, bauteil, extras };
+}
+
+/** `name(` with the whitespace RIB's own examples put in — `QTO (Type:=…)`. */
+function readCallName(c: Cursor): string | null {
+  c.ws();
+  const m = /^([A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]*)\s*\(/.exec(c.src.slice(c.pos));
+  if (!m) return null;
+  c.pos += m[0].length;
+  return m[1]!;
 }
 
 function parseFactor(c: Cursor): QtoExpr {
-  if (c.eat('roundk(')) {
-    const inner = parseExpr(c);
-    if (!c.eat(';')) throw new ParseError('Semikolon erwartet (roundk braucht Nachkommastellen)', c.pos);
-    const digits = readCommaNumber(c);
-    if (!c.eat(')')) throw new ParseError('Schliessende Klammer erwartet', c.pos);
-    return { kind: 'roundk', inner, digits };
+  const name = readCallName(c);
+  if (name !== null) {
+    const lower = name.toLowerCase();
+    if (lower === 'qto') return parseQto(c);
+    if (lower === 'roundk') {
+      const inner = parseExpr(c);
+      if (!c.eat(';')) throw new ParseError('Semikolon erwartet (roundk braucht Nachkommastellen)', c.pos);
+      const digits = readCommaNumber(c);
+      if (!c.eat(')')) throw new ParseError('Schliessende Klammer erwartet', c.pos);
+      return { kind: 'roundk', inner, digits };
+    }
+    // conv, wenn, sin … — read so the rest of the formula survives, but never
+    // evaluated. The arguments are parsed only far enough to find the closing
+    // bracket; whatever they mean is that function's business, not ours.
+    const args: QtoExpr[] = [];
+    if (!c.eat(')')) {
+      do {
+        c.ws();
+        if (c.src[c.pos] === '"') args.push({ kind: 'text', value: readQuoted(c) });
+        else args.push(parseExpr(c));
+      } while (c.eat(';') || c.eat(','));
+      if (!c.eat(')')) throw new ParseError(`Schliessende Klammer erwartet (${name})`, c.pos);
+    }
+    return { kind: 'call', name, args };
   }
-  if (c.eat('QTO(')) return parseQto(c);
   if (c.eat('(')) {
     const inner = parseExpr(c);
     if (!c.eat(')')) throw new ParseError('Schliessende Klammer erwartet', c.pos);
@@ -426,12 +507,24 @@ function evalNode(node: QtoExpr, ctx: QtoContext, out: QtoResult, unsupported: S
   switch (node.kind) {
     case 'number':
       return node.value;
+    case 'text':
+      // Only reachable as an argument of a call, which never evaluates its
+      // arguments — so this is a formula shape nobody has met yet.
+      unsupported.add(`Zeichenkette "${node.value}" an unerwarteter Stelle`);
+      return 0;
+    case 'call':
+      unsupported.add(`Funktion ${node.name}`);
+      return 0;
     case 'roundk':
       return roundk(evalNode(node.inner, ctx, out, unsupported, unresolved), node.digits);
     case 'product':
       return node.factors.reduce((acc, f) => acc * evalNode(f, ctx, out, unsupported, unresolved), 1);
     case 'qto': {
       if (out.unit === null) out.unit = node.me;
+      // A key we do not act on changes the result RIB would produce — an
+      // Abzug or a Norm is a deduction rule, not decoration — so the row
+      // gets no number rather than one computed as if the key were absent.
+      for (const extra of node.extras) unsupported.add(`Parameter ${extra.key}`);
       const measure = node.measure;
       if (measure.kind === 'geometry' && !ctx.readGeometryParameter) {
         unsupported.add(`Geometrie-Parameter ${measure.parameter}`);
