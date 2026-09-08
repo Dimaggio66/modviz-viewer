@@ -103,7 +103,13 @@ export function ComboInput({
   useLayoutEffect(() => {
     if (!open) return;
     reposition();
-    const onScroll = () => reposition();
+    // Scrolling the list itself doesn't move the input, and re-anchoring on
+    // every wheel tick re-renders all the options for nothing.
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof Node && listRef.current?.contains(t)) return;
+      reposition();
+    };
     window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', onScroll);
     const onDown = (e: MouseEvent) => {
@@ -120,6 +126,31 @@ export function ComboInput({
   }, [open, reposition]);
 
   const showList = open && filtered.length > 0 && anchor !== null;
+
+  /**
+   * Let the wheel scroll the list.
+   *
+   * A Radix Dialog locks scrolling through `react-remove-scroll`, which puts a
+   * non-passive `wheel` listener on `document` and calls `preventDefault()` for
+   * any event whose target sits outside the dialog. This list is portaled to
+   * `<body>` to escape the modal's clipping, so it counts as outside and the
+   * wheel died over it — clicks and the arrow keys still worked, which is what
+   * made it look like a scrollbar problem.
+   *
+   * That listener is on `document` in the bubble phase, so stopping the event
+   * at the list keeps it from ever arriving. `overscroll-contain` on the list
+   * then does the job the lock was doing: without it, scrolling past the last
+   * option would carry on into the page behind the modal. Registered natively rather than as
+   * `onWheel`, because React delegates to the portal's container — `<body>` —
+   * and by then the event has already left the element.
+   */
+  useEffect(() => {
+    const el = listRef.current;
+    if (!showList || !el) return;
+    const stop = (e: WheelEvent) => e.stopPropagation();
+    el.addEventListener('wheel', stop);
+    return () => el.removeEventListener('wheel', stop);
+  }, [showList]);
 
   const commit = (v: string) => {
     onChange(v);
@@ -190,7 +221,7 @@ export function ComboInput({
           // "colorful" theme reclaims an opaque background through it. Keep the
           // zinc pairing it expects; `scrollbar-thin` is the project's thin,
           // theme-aware scrollbar utility (shadcn look, not the chunky native one).
-          className="popover-surface scrollbar-thin z-[120] w-max max-w-[20rem] overflow-y-auto rounded-md border border-zinc-300 bg-white p-1 shadow-md dark:border-zinc-600 dark:bg-zinc-800"
+          className="popover-surface scrollbar-thin z-[120] w-max max-w-[20rem] overflow-y-auto overscroll-contain rounded-md border border-zinc-300 bg-white p-1 shadow-md dark:border-zinc-600 dark:bg-zinc-800"
         >
           {filtered.map((o, i) => (
             <button
