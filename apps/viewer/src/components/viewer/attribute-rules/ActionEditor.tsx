@@ -45,6 +45,10 @@ export interface ActionForm {
   mode: WriteMode;
   /** Source attribute for copy / rename (a `refKey`). */
   sourceKey: string;
+  /** What is typed in the source picker. Held apart from `sourceKey` because
+   *  the picker is a text field: a half-typed name has to stay on screen while
+   *  it still resolves to no attribute. */
+  sourceFilter: string;
   /** New name for rename — its own field, so it can't collide with `propName`. */
   newName: string;
   /** Attributes ticked for deletion (`refKey`s) and the list's filter box. */
@@ -70,7 +74,7 @@ export const EMPTY_ACTION_FORM: ActionForm = {
   // Text and "no unit" are what nearly every attribute needs, and they are
   // what RIB pre-selects — an empty type field is a question nobody wants.
   dataType: 'text', unit: '', mode: 'addOverwrite',
-  sourceKey: '', newName: '', deleteKeys: [], deleteFilter: '', componentType: '',
+  sourceKey: '', sourceFilter: '', newName: '', deleteKeys: [], deleteFilter: '', componentType: '',
 };
 
 /** Placeholder shown in an empty text field, matching RIB's own wording. */
@@ -91,6 +95,12 @@ interface Props {
 }
 
 export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attributeNames }: Props) {
+  const sourceLabels = useMemo(() => propertyRefs.map(refLabel), [propertyRefs]);
+  const keyByLabel = useMemo(
+    () => new Map(propertyRefs.map((r) => [refLabel(r), refKey(r)])),
+    [propertyRefs],
+  );
+
   const filteredRefs = useMemo(() => {
     const q = form.deleteFilter.trim().toLowerCase();
     if (!q) return propertyRefs;
@@ -170,14 +180,30 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
     </Select>
   ));
 
+  /**
+   * The source attribute for copy / rename. A plain Select made this a scroll
+   * through every attribute the model carries, eight rows at a time, with no
+   * way to search. `ComboInput` filters as you type and its list uses the
+   * height actually available — the same picker the assistant already uses
+   * for attribute names.
+   *
+   * Only an exact label commits a `sourceKey`, so a half-typed name selects
+   * nothing: the rule stays incomplete and Apply stays disabled rather than
+   * pointing at an attribute that does not exist.
+   */
   const sourceField = (label: string) => field(label, (
-    <Select value={form.sourceKey} onValueChange={(v) => patch({ sourceKey: v })}>
-      <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Select an attribute…" /></SelectTrigger>
-      <SelectContent className="max-h-72">
-        {propertyRefs.map((r) => <SelectItem key={refKey(r)} value={refKey(r)}>{refLabel(r)}</SelectItem>)}
-      </SelectContent>
-    </Select>
-  ));
+    <ComboInput
+      value={form.sourceFilter}
+      onChange={(v) => patch({ sourceFilter: v, sourceKey: keyByLabel.get(v) ?? '' })}
+      options={sourceLabels}
+      placeholder="Select an attribute…"
+      className="h-8 text-xs"
+      maxRendered={500}
+      aria-label={label}
+    />
+  ), form.sourceFilter.trim() !== '' && form.sourceKey === '' ? (
+    <p className="text-[11px] text-amber-500">No attribute is called that — pick one from the list.</p>
+  ) : undefined);
 
   switch (kind) {
     case 'componentType':

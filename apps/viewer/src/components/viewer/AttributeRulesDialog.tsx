@@ -287,7 +287,7 @@ export function AttributeRulesDialog({
     // valid action — otherwise the rule just collected would also still be
     // pending and every write would be planned twice. Property set, type,
     // unit and mode stay, since the next rule usually shares them.
-    patch({ propName: '', value: '', template: '', sourceKey: '', newName: '', deleteKeys: [] });
+    patch({ propName: '', value: '', template: '', sourceKey: '', sourceFilter: '', newName: '', deleteKeys: [] });
     setTab('table');
   };
 
@@ -625,7 +625,7 @@ export function AttributeRulesDialog({
       // Remember what is now in the model, so the NEXT apply can roll back
       // whatever gets deleted or switched off in the meantime.
       saveApplied(projectKey, next.filter((r) => r.enabled));
-      if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', newName: '', deleteKeys: [] });
+      if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', sourceFilter: '', newName: '', deleteKeys: [] });
       const undone = reverted > 0 ? `, ${reverted.toLocaleString()} rolled back` : '';
       toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s)${undone}.`);
     } finally {
@@ -711,7 +711,7 @@ export function AttributeRulesDialog({
               ))}
             </div>
 
-            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] overflow-hidden">
+            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.45fr)] overflow-hidden">
               {/* Bedingung — scope + the attributes that make up the condition */}
               <section className="flex min-h-0 flex-col border-r">
                 <header className="flex items-center justify-between border-b px-4 py-2">
