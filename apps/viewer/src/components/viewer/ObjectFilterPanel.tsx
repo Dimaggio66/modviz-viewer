@@ -60,6 +60,7 @@ import { AttributeRulesDialog } from './AttributeRulesDialog';
 import { AusstattungDialog } from './AusstattungDialog';
 import { projectKeyFor } from '@/lib/attribute-rules-store';
 import type { PropRef } from '@/lib/attribute-rules';
+import { judgeOverlay } from '@/lib/search/attribute-liveness';
 
 /** class name -> is it an IfcObjectDefinition, i.e. a product, a type object
  *  (IfcWallType, IfcDoorType, …), a group/system, or the project — the broad
@@ -559,6 +560,37 @@ export function ObjectFilterPanel() {
   const [openRowFacet, setOpenRowFacet] = useState<{ rowId: string; facet: Facet } | null>(null);
   const setOpenRow = useCallback((id: string | null) => setOpenRowId(id), []);
 
+  /**
+   * Does ANY object still carry this attribute?
+   *
+   * The attribute list is derived from the FILE's schema, which cannot know
+   * that a rule has since removed the attribute from every object — renaming
+   * `Nenndurchmesser` to `5D_FormteilDN` left the old name in the filter
+   * forever, because the file still lists values for it.
+   *
+   * Only asked about attributes a rule actually deleted somewhere, and it
+   * stops at the first object that still has one, so the usual answer costs a
+   * single lookup. A partially removed attribute stays, which is right: some
+   * objects still have it.
+   */
+  const stillCarried = useCallback((setName: string, propName: string): boolean => {
+    if (!activeStore) return true;
+    type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
+    const view = activeModelId ? getMutationView(activeModelId) : null;
+    for (const id of modelSummary.objectIds) {
+      const sets = ((view?.getForEntity(id) as Sets | undefined)
+        ?? (activeStore.getProperties?.(id) as Sets | undefined)
+        ?? []);
+      for (const set of sets) {
+        if (set.name !== setName) continue;
+        for (const p of set.properties ?? []) {
+          if (p.name === propName && p.value !== undefined && p.value !== null && p.value !== '') return true;
+        }
+      }
+    }
+    return false;
+  }, [activeStore, activeModelId, getMutationView, modelSummary.objectIds]);
+
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
@@ -586,6 +618,9 @@ export function ObjectFilterPanel() {
     // attribute with the UNION of every value the model carries (RIBiTWO-style),
     // instead of a separate row per (set, name).
     const { psets, qtos } = discoverPropertyAndQuantitySchema(activeStore);
+    /** (set, property) pairs a rule has removed from every object. Filled by
+     *  the overlay pass below, which runs before `group` is called. */
+    const deadRefs = new Set<string>();
     const group = (
       entries: Iterable<[string, Iterable<string>]>,
       valueMap: Map<string, string[]>,
@@ -593,6 +628,9 @@ export function ObjectFilterPanel() {
       const groups = new Map<string, { sets: string[]; values: Set<string> }>();
       for (const [setName, names] of entries) {
         for (const name of names) {
+          // The schema comes from the file and still lists an attribute that
+          // has since been renamed away from every object.
+          if (deadRefs.has(propValueKey(setName, name))) continue;
           let g = groups.get(name);
           if (!g) { g = { sets: [], values: new Set() }; groups.set(name, g); }
           if (!g.sets.includes(setName)) g.sets.push(setName);
@@ -608,16 +646,14 @@ export function ObjectFilterPanel() {
     const overlaySets = new Map<string, Set<string>>(); // propName -> set names
     for (const [key, entry] of mutationOverlay) {
       const { setName, propName: name } = entry.ref;
-      const merged = new Set(values.propertyValues.get(key) ?? []);
-      // The base model already carrying values keeps the attribute alive even
-      // if a rule removed it from some objects.
-      let live = merged.size > 0;
-      for (const v of entry.values.values()) if (v !== null && v !== '') { merged.add(v); live = true; }
-      values.propertyValues.set(key, [...merged]);
-      // Every entry is a deletion and the file never had the attribute: the
-      // rule that created it has been rolled back, so it must NOT leave a row
-      // behind — that is what made a deleted rule's attribute stay forever.
-      if (!live) continue;
+      const fromFile = values.propertyValues.get(key) ?? [];
+      const { live, written } = judgeOverlay(
+        fromFile.length > 0,
+        entry.values.values(),
+        () => stillCarried(setName, name),
+      );
+      values.propertyValues.set(key, live ? [...new Set([...fromFile, ...written])] : []);
+      if (!live) { deadRefs.add(key); continue; }
       let sets = overlaySets.get(name);
       if (!sets) { sets = new Set(); overlaySets.set(name, sets); }
       sets.add(setName);
@@ -643,7 +679,7 @@ export function ObjectFilterPanel() {
 
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
-  }, [activeStore, modelSummary.ifcTypes, attributeValues, mutationOverlay]);
+  }, [activeStore, modelSummary.ifcTypes, attributeValues, mutationOverlay, stillCarried]);
 
   /**
    * Compile the entries into match sources. `skipId` leaves one row out — that
