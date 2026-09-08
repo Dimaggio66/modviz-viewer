@@ -17,13 +17,24 @@
 
 /** Does the text use the query language rather than being a literal value? */
 export function isQueryExpr(s: string): boolean {
-  return s.includes('*') || s.includes('&') || s.includes('|');
+  return s.includes('*') || s.includes('?') || s.includes('&') || s.includes('|');
 }
 
-/** One term → an anchored, case-insensitive regex with `*` standing for any
- *  run of characters (so a bare term is an exact match, `A*` starts-with, …). */
+/**
+ * One term → an anchored, case-insensitive regex. `*` stands for any run of
+ * characters and `?` for exactly one, so a bare term is an exact match, `A*`
+ * starts-with, `DN1?0` matches DN100 and DN150 but not DN1000.
+ *
+ * Both wildcards are RIB's: "Die Verwendung von Wildcards ist zulässig
+ * ('*' and '?')" (BIM Qualifier, 6.8.1.10). `?` used to sit in the escape
+ * class below and was matched literally, so a condition using it quietly
+ * selected nothing — no error, just an empty result.
+ */
 export function termToRegExp(term: string): RegExp {
-  const escaped = term.trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  const escaped = term.trim()
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
   return new RegExp(`^${escaped}$`, 'i');
 }
 
