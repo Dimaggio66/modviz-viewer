@@ -244,6 +244,13 @@ function allowedByMode(mode: WriteMode, current: string | null): boolean {
  * property by NAME across whatever set carries it, which is what the
  * `@Attr{…}` templates address (they name an attribute, not a set).
  */
+/** Attributes whose value is an IFC class name, and which therefore have the
+ *  two spellings `IfcPipeFitting` (ours) and `PIPEFITTING` (RIBiTWO's). */
+function isIfcClassCondition(attribute: string): boolean {
+  const a = attribute.toLowerCase();
+  return a === 'ifctype' || a === 'ifcclass';
+}
+
 export function planWrites(
   rules: readonly AttributeRule[],
   baseRead: PropReader,
@@ -321,7 +328,17 @@ export function planWrites(
       const value = readAttribute(id, c.attribute);
       if (meansAbsent(c.value)) return value === null || value === '';
       if (value === null) return false;
-      return compileValueMatch(c.value)(value);
+      const test = compileValueMatch(c.value);
+      if (test(value)) return true;
+      // RIBiTWO names the IFC class WITHOUT the `Ifc` prefix — its mapping
+      // files say `ifcType="PIPEFITTING"` where we answer `IfcPipeFitting`.
+      // The comparison ignores case but not that prefix, and a condition
+      // without wildcards is exact, so every such rule silently matched
+      // nothing: 16 of 16 in the Heizung mapping, among them the 11,294
+      // IfcPipeFitting that should become `5D_Kategorie = Rohrformteile`.
+      // Both spellings are accepted, so a rule collected from the object
+      // filter (which stores `IfcCovering`) keeps working too.
+      return isIfcClassCondition(c.attribute) && /^ifc/i.test(value) && test(value.slice(3));
     });
   };
 

@@ -359,3 +359,55 @@ describe('Regel nach dem Anwenden korrigieren', () => {
     assert.deepStrictEqual(w.map((x) => x.value), ['Rohre', 'Rohre', 'Endgueltig', 'Endgueltig']);
   });
 });
+
+describe('IFC-Klasse in Bedingungen', () => {
+  /** RIBiTWO schreibt die Klasse ohne `Ifc`-Praefix, wir antworten mit ihm.
+   *  Ohne Wildcards ist der Vergleich exakt, also traf frueher keine einzige
+   *  importierte ifcType-Regel etwas. */
+  const objekt = (ifcType: string): { read: PropReader; readByName: (id: number, p: string) => string | null } => ({
+    read: () => null,
+    readByName: (_id, prop) => (prop === 'ifcType' ? ifcType : null),
+  });
+
+  const regel = (bedingung: string): AttributeRule => ({
+    id: 'r', conditions: [], entityIds: [], match: [{ attribute: 'ifcType', value: bedingung }],
+    action: { kind: 'add', target: { psetName: '5D', propName: '5D_Kategorie' },
+      value: 'Rohrformteile', dataType: 'text', unit: '', mode: 'add' },
+    enabled: true,
+  });
+
+  it('nimmt RIBs Schreibweise ohne Praefix', () => {
+    const { read, readByName } = objekt('IfcPipeFitting');
+    assert.equal(planWrites([regel('PIPEFITTING')], read, readByName, [1]).length, 1);
+  });
+
+  it('nimmt weiterhin unsere eigene Schreibweise', () => {
+    // So sammelt der Objektfilter eine Bedingung ein.
+    const { read, readByName } = objekt('IfcPipeFitting');
+    assert.equal(planWrites([regel('IfcPipeFitting')], read, readByName, [1]).length, 1);
+  });
+
+  it('nimmt eine ODER-Liste und Wildcards in beiden Schreibweisen', () => {
+    const { read, readByName } = objekt('IfcValve');
+    assert.equal(planWrites([regel('VALVE||PUMP||FLOWMETER')], read, readByName, [1]).length, 1);
+    assert.equal(planWrites([regel('*VALVE*')], read, readByName, [1]).length, 1);
+  });
+
+  it('trifft trotzdem nicht die falsche Klasse', () => {
+    const { read, readByName } = objekt('IfcPipeSegment');
+    assert.equal(planWrites([regel('PIPEFITTING')], read, readByName, [1]).length, 0);
+  });
+
+  it('laesst andere Attribute in Ruhe', () => {
+    // Nur die Klassen-Attribute duerfen das Praefix verlieren; ein normales
+    // Attribut, dessen Wert zufaellig mit "Ifc" beginnt, darf das nicht.
+    const read: PropReader = () => null;
+    const readByName = (_id: number, prop: string) => (prop === 'Hersteller' ? 'IfcSoft GmbH' : null);
+    const r: AttributeRule = {
+      id: 'r', conditions: [], entityIds: [], match: [{ attribute: 'Hersteller', value: 'Soft GmbH' }],
+      action: { kind: 'add', target: { psetName: '5D', propName: 'X' }, value: 'y', dataType: 'text', unit: '', mode: 'add' },
+      enabled: true,
+    };
+    assert.equal(planWrites([r], read, readByName, [1]).length, 0);
+  });
+});
