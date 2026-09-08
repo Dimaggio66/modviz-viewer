@@ -77,9 +77,22 @@ export interface ProjectResults {
 
 export const lvRollupKey = (tlk: string, lv: string): string => `${tlk.trim()}${lv.trim()}`;
 
+/**
+ * RIB's own "Aus Filter" writes a group definition as `Object(@X=='Y')`, and
+ * that is what gets copied out of its Objekt-Auswahlgruppen panel. The wrapper
+ * carries no meaning we need — it says "this is an object query" — so it is
+ * peeled off rather than made a parse error, and a condition typed without it
+ * works just the same.
+ */
+export function stripObjectWrapper(bedingung: string): string {
+  const t = bedingung.trim();
+  const m = /^Object\s*\(([\s\S]*)\)$/i.exec(t);
+  return m ? m[1]!.trim() : t;
+}
+
 /** Wraps a bare Bauteil condition in a counting query, so one grammar serves. */
 const groupQuery = (bedingung: string): string =>
-  `QTO(Typ:="Stückzahl";ME:="St";Bauteil:="${bedingung}")`;
+  `QTO(Typ:="Stückzahl";ME:="St";Bauteil:="${stripObjectWrapper(bedingung)}")`;
 
 export function evaluateProject(
   project: AusstattungProject,

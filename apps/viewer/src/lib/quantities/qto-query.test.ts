@@ -143,10 +143,10 @@ describe('Bauteil — Bedingungen aus dem Handbuch', () => {
     assert.equal(e.bauteil.depthSearch, true);
   });
 
-  it('liest Systemparameter mit $ und Platzhalter im Text', () => {
+  it('liest ein Attribut mit Eltern-Präfix und Platzhalter im Text', () => {
     const e = parsed('QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName==\'*\';")');
     if (e.kind !== 'qto' || !e.bauteil) return assert.fail('Form');
-    assert.deepEqual(e.bauteil.levels[0]!.all[0]!.subject, { kind: 'system', name: 'MaterialName' });
+    assert.deepEqual(e.bauteil.levels[0]!.all[0]!.subject, { kind: 'inherited', name: 'MaterialName' });
     assert.equal(e.bauteil.levels[0]!.all[0]!.value.kind === 'text' && e.bauteil.levels[0]!.all[0]!.value.wildcard, true);
   });
 
@@ -334,10 +334,10 @@ describe('Mengenabfrage — was NICHT gerechnet wird, gibt keine Zahl zurück', 
     assert.equal(r.value, 4.5);
   });
 
-  it('nennt einen Systemparameter, den es nicht auflösen kann', () => {
+  it('nennt ein Eltern-Attribut, das es ohne Hierarchie nicht auflösen kann', () => {
     const r = run('QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName==\'Beton\'")', ctx);
     assert.equal(r.value, null);
-    assert.deepEqual(r.unsupported, ['Systemparameter $MaterialName']);
+    assert.match(r.unsupported[0]!, /Eltern-Objekt/);
   });
 });
 
@@ -413,5 +413,37 @@ describe('Handbuch-Grammatik — was der Parser vorher abgelehnt hat', () => {
       const p = parseQtoQuery(src);
       assert.ok(p.ok, `${src}: ${p.ok ? '' : p.error}`);
     }
+  });
+});
+
+describe('Subjekt-Schreibweisen aus den Handbüchern', () => {
+  it('liest @X wie Attribut{X} — die Form, die RIB selbst schreibt', () => {
+    // "Die Abfrage über @ ist damit identisch mit der Filterung nach Objekten
+    // über Objekt-Filter" (Ausstattung-Handbuch).
+    const e = parsed(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="@cpiComponentType=='Opening'")`);
+    if (e.kind !== 'qto' || !e.bauteil) return assert.fail('Form');
+    assert.deepEqual(e.bauteil.levels[0]!.all[0]!.subject, {
+      kind: 'attribute', name: 'cpiComponentType',
+    });
+  });
+
+  it('wertet @X auch wirklich aus', () => {
+    const ctx = ctxOf({ 1: { cpiComponentType: 'Opening' }, 2: { cpiComponentType: 'Wall' } });
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="@cpiComponentType=='Opening'")`, ctx);
+    assert.equal(r.value, 1);
+  });
+
+  it('unterscheidet $X von @X — $ darf auch am Eltern-Objekt stehen', () => {
+    const e = parsed(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName=='Holz'")`);
+    if (e.kind !== 'qto' || !e.bauteil) return assert.fail('Form');
+    assert.deepEqual(e.bauteil.levels[0]!.all[0]!.subject, {
+      kind: 'inherited', name: 'MaterialName',
+    });
+  });
+
+  it('gibt für $X keine Zahl zurück, solange die Hierarchie fehlt', () => {
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName=='Holz'")`, ctxOf({ 1: {} }));
+    assert.equal(r.value, null);
+    assert.match(r.unsupported[0]!, /Eltern-Objekt/);
   });
 });

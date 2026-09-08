@@ -72,10 +72,17 @@ export type QtoMeasure =
 export type CompareOp = '==' | '!=' | '>' | '<' | '>=' | '<=';
 
 export type ConditionSubject =
-  /** `Attribut{MaterialName}` — a property on the element. */
+  /** `Attribut{MaterialName}` or `@MaterialName` — the attribute on the
+   *  object itself. RIB writes the `@` form from its own filter. */
   | { kind: 'attribute'; name: string }
-  /** `$MaterialName`, `$Modell` — a system parameter. */
-  | { kind: 'system'; name: string }
+  /**
+   * `$MaterialName` — the attribute as it may sit on the object OR on a
+   * PARENT object. RIB: "Attribute, die sowohl am Objekt direkt als auch bei
+   * einem Eltern-Objekt vorkommen dürfen, werden durch ein vorangestelltes $
+   * gekennzeichnet." It is not a system parameter, which is what this was
+   * called before reading that; answering it needs the object hierarchy.
+   */
+  | { kind: 'inherited'; name: string }
   /** `Bauteiltyp`, `HöheOptOBB`, `Bodenversatz` — a bare parameter. */
   | { kind: 'parameter'; name: string };
 
@@ -187,21 +194,34 @@ function bauteilNumber(text: string): number {
   return Number(text.includes(',') ? text.replace(',', '.') : text);
 }
 
+/**
+ * One comparison. The subject may be written four ways, and RIB's own tools
+ * emit the `@` form most of the time — "Die Abfrage über @ ist damit identisch
+ * mit der Filterung nach Objekten über Objekt-Filter":
+ *
+ *   Attribut{MaterialName}   the long form the Mengenabfrage editor writes
+ *   @MaterialName            the same thing: the attribute on the object
+ *   $MaterialName            the object's, or a PARENT object's
+ *   Bauteiltyp               a bare parameter (component type, geometry, …)
+ */
 const COMPARISON =
-  /^\s*(?:Attribut\s*\{([^}]+)\}|\$([A-Za-zÄÖÜäöüß0-9_]+)|([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9_]*))\s*(==|!=|>=|<=|>|<)\s*(?:'([^']*)'|\(\s*(-?\d+(?:[.,]\d+)?)\s*(?:\[([^\]]*)\])?\s*\)|(-?\d+(?:[.,]\d+)?))\s*$/;
+  /^\s*(?:Attribut\s*\{([^}]+)\}|@([A-Za-zÄÖÜäöüß0-9_]+)|\$([A-Za-zÄÖÜäöüß0-9_]+)|([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9_]*))\s*(==|!=|>=|<=|>|<)\s*(?:'([^']*)'|\(\s*(-?\d+(?:[.,]\d+)?)\s*(?:\[([^\]]*)\])?\s*\)|(-?\d+(?:[.,]\d+)?))\s*$/;
 
 function parseComparison(text: string, at: number): Comparison {
   const m = COMPARISON.exec(text);
   if (!m) throw new ParseError('Bedingung nicht verstanden: ' + text.trim(), at);
+  // `@X` and `Attribut{X}` mean the same thing — the attribute on the object.
   const subject: ConditionSubject = m[1] !== undefined
     ? { kind: 'attribute', name: m[1].trim() }
     : m[2] !== undefined
-      ? { kind: 'system', name: m[2].trim() }
-      : { kind: 'parameter', name: m[3]!.trim() };
-  const value: ConditionValue = m[5] !== undefined
-    ? { kind: 'text', text: m[5], wildcard: m[5].includes('*') }
-    : { kind: 'number', value: bauteilNumber((m[6] ?? m[8])!), unit: m[7]?.trim() || null };
-  return { subject, op: m[4] as CompareOp, value };
+      ? { kind: 'attribute', name: m[2].trim() }
+      : m[3] !== undefined
+        ? { kind: 'inherited', name: m[3].trim() }
+        : { kind: 'parameter', name: m[4]!.trim() };
+  const value: ConditionValue = m[6] !== undefined
+    ? { kind: 'text', text: m[6], wildcard: m[6].includes('*') }
+    : { kind: 'number', value: bauteilNumber((m[7] ?? m[9])!), unit: m[8]?.trim() || null };
+  return { subject, op: m[5] as CompareOp, value };
 }
 
 /**
@@ -432,8 +452,11 @@ function testComparison(cmp: Comparison, id: number, ctx: QtoContext, unsupporte
   if (cmp.subject.kind === 'attribute') {
     return matchValue(cmp, ctx.readAttribute(id, cmp.subject.name));
   }
-  if (cmp.subject.kind === 'system') {
-    unsupported.add(`Systemparameter $${cmp.subject.name}`);
+  if (cmp.subject.kind === 'inherited') {
+    // Answering this means walking up to the parent objects, which needs the
+    // hierarchy the context does not carry yet — the same gap as the
+    // Tiefensuche. Reported by name rather than guessed at.
+    unsupported.add(`Attribut $${cmp.subject.name} (auch am Eltern-Objekt)`);
     return false;
   }
   // Bauteiltyp: what the mapping wrote wins, the IFC class is the fallback.

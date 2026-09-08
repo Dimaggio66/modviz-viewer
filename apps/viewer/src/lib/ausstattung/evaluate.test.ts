@@ -161,3 +161,26 @@ describe('Auswahlgruppen', () => {
     assert.match(rows.get('10')!.unsupported[0]!, /existiert nicht/);
   });
 });
+
+describe('Auswahlgruppe aus RIB einfügen', () => {
+  it('akzeptiert die Object(...)-Hülle, die RIBs "Aus Filter" erzeugt', () => {
+    const project: AusstattungProject = {
+      // Genau die Form aus Kapitel 6.7.1 bzw. dem Auswahlgruppen-Panel.
+      gruppen: [{ name: 'Wände', bedingung: "Object(@Art == 'Wand')" }],
+      positionen: [],
+      rows: [row('10', { auswahlgruppe: 'Wände', mengenabfrage: 'QTO(Typ:="Stückzahl";ME:="St")' })],
+    };
+    const { rows, gruppen } = evaluateProject(project, UNIVERSE, makeContext);
+    assert.equal(gruppen.get('Wände')?.matched, 3, 'die Huelle wird abgestreift');
+    assert.equal(rows.get('10')?.value, 3);
+  });
+
+  it('nimmt dieselbe Bedingung auch ohne Hülle', () => {
+    const project: AusstattungProject = {
+      gruppen: [{ name: 'Wände', bedingung: "@Art == 'Wand'" }],
+      positionen: [],
+      rows: [row('10', { auswahlgruppe: 'Wände', mengenabfrage: 'QTO(Typ:="Stückzahl";ME:="St")' })],
+    };
+    assert.equal(evaluateProject(project, UNIVERSE, makeContext).gruppen.get('Wände')?.matched, 3);
+  });
+});
