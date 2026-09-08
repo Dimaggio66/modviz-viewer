@@ -475,9 +475,23 @@ export function AttributeRulesDialog({
     return () => clearTimeout(t);
   }, [pending]);
 
+  /**
+   * Two readers, deliberately different ones.
+   *
+   * EFFECTIVE decides whether a write would change anything, so re-applying an
+   * unchanged rule set stays a no-op instead of rewriting 23k identical values.
+   *
+   * BASE — the parsed file — decides the write MODE. Judged against the
+   * effective state, `add` ("only where empty") sees the rule's own earlier
+   * output and refuses, so editing an applied rule planned nothing at all and
+   * Apply went dead. `add` protects what came with the model; it must not
+   * freeze a rule after its first run.
+   */
   const plan = useCallback(
     (rules: readonly AttributeRule[]) =>
-      (store && rules.length > 0 ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe) : []),
+      (store && rules.length > 0
+        ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe, readers.read)
+        : []),
     [store, readers, universe],
   );
 

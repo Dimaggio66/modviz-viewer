@@ -308,3 +308,54 @@ describe('Bauteiltyp festlegen', () => {
     assert.deepStrictEqual(out.editable, ['value', 'mode']);
   });
 });
+
+describe('Regel nach dem Anwenden korrigieren', () => {
+  const target = { psetName: '5D', propName: '5D_Kategorie' };
+  /** Die Datei kennt das Attribut nicht — es entstand erst durch die Regel. */
+  const datei: PropReader = () => null;
+  /** Der Stand nach dem ersten Anwenden: die Regel hat ihren Wert geschrieben. */
+  const nachAnwenden: PropReader = (_id, pset, prop) =>
+    (pset === target.psetName && prop === target.propName ? 'Rohrzubehoer' : null);
+  const leerByName = () => null;
+
+  it('plant erneut, wenn der Wert geändert wurde — der Fehler aus dem Screenshot', () => {
+    const geaendert = rule({ kind: 'add', target, value: 'Rohrzubehör', ...TEXT, mode: 'add' });
+    const ohneDatei = planWrites([geaendert], nachAnwenden, leerByName);
+    assert.strictEqual(ohneDatei.length, 0, 'so war es: Add sah den eigenen alten Wert');
+
+    const mitDatei = planWrites([geaendert], nachAnwenden, leerByName, [], datei);
+    assert.strictEqual(mitDatei.length, 2, 'gegen die Datei geprueft schreibt Add wieder');
+    assert.strictEqual(mitDatei[0]!.value, 'Rohrzubehör');
+  });
+
+  it('plant weiterhin nichts, wenn sich am Regelsatz nichts geändert hat', () => {
+    const unveraendert = rule({ kind: 'add', target, value: 'Rohrzubehoer', ...TEXT, mode: 'add' });
+    const w = planWrites([unveraendert], nachAnwenden, leerByName, [], datei);
+    assert.strictEqual(w.length, 0, 'der Wert steht schon so da — kein Schreibvorgang');
+  });
+
+  it('lässt Add weiterhin stehen, wo die DATEI schon einen Wert hatte', () => {
+    const ausDerDatei: PropReader = (_id, pset, prop) =>
+      (pset === target.psetName && prop === target.propName ? 'Vorbelegt' : null);
+    const r = rule({ kind: 'add', target, value: 'Neu', ...TEXT, mode: 'add' });
+    const w = planWrites([r], ausDerDatei, leerByName, [], ausDerDatei);
+    assert.strictEqual(w.length, 0, 'Add schuetzt Daten, die mit dem Modell kamen');
+  });
+
+  it('VERKETTUNG: eine spätere Add-Regel weicht der früheren weiterhin aus', () => {
+    // Genau die Semantik, an der die 95 importierten Regeln haengen.
+    const zuerst = { ...rule({ kind: 'add', target, value: 'Rohre', ...TEXT, mode: 'add' }), id: 'a' };
+    const danach = { ...rule({ kind: 'add', target, value: 'Rohrformteile', ...TEXT, mode: 'add' }), id: 'b' };
+    const w = planWrites([zuerst, danach], datei, leerByName, [], datei);
+    assert.strictEqual(w.length, 2, 'nur die erste Regel schreibt');
+    assert.deepStrictEqual(w.map((x) => x.ruleId), ['a', 'a']);
+    assert.deepStrictEqual(w.map((x) => x.value), ['Rohre', 'Rohre']);
+  });
+
+  it('VERKETTUNG: Overwrite greift innerhalb eines Durchlaufs weiterhin', () => {
+    const zuerst = { ...rule({ kind: 'add', target, value: 'Rohre', ...TEXT, mode: 'add' }), id: 'a' };
+    const danach = { ...rule({ kind: 'add', target, value: 'Endgueltig', ...TEXT, mode: 'overwrite' }), id: 'b' };
+    const w = planWrites([zuerst, danach], datei, leerByName, [], datei);
+    assert.deepStrictEqual(w.map((x) => x.value), ['Rohre', 'Rohre', 'Endgueltig', 'Endgueltig']);
+  });
+});

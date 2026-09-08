@@ -250,6 +250,23 @@ export function planWrites(
   baseReadByName: (entityId: number, propName: string) => string | null,
   /** Candidate objects for rules that resolve their own `match` conditions. */
   universe: readonly number[] = [],
+  /**
+   * What the FILE said, before any rule ever ran — used ONLY to decide the
+   * write mode. Without it, `add` ("only where empty") reads the model as it
+   * stands, which after a first apply contains the rule's OWN output, so
+   * editing an applied rule plans nothing at all and Apply goes dead.
+   *
+   * `add` is meant to protect data that came with the model, not to freeze a
+   * rule after its first run. Judging it against the file makes a re-apply
+   * depend on the current rule set alone rather than on apply history.
+   *
+   * Chaining is unaffected: within one pass the `live` layer still wins, so a
+   * rule that writes `5D_Typ` is still seen by the dozens of rules after it,
+   * and a later `add` still steps aside for an earlier rule's value.
+   *
+   * Defaults to `baseRead`, which is the previous behaviour.
+   */
+  fileRead?: PropReader,
 ): RuleWrite[] {
   const writes: RuleWrite[] = [];
 
@@ -269,6 +286,12 @@ export function planWrites(
   const readByName = (id: number, prop: string) => {
     const k = nameKey(id, prop);
     return liveByName.has(k) ? liveByName.get(k)! : baseReadByName(id, prop);
+  };
+  /** The value the write MODE is judged against — see `fileRead`. */
+  const readForMode: PropReader = (id, pset, prop) => {
+    const k = addrKey(id, pset, prop);
+    if (live.has(k)) return live.get(k)!;
+    return (fileRead ?? baseRead)(id, pset, prop);
   };
   let currentRuleId = '';
   const record = (w: Omit<RuleWrite, 'ruleId'>) => {
@@ -318,14 +341,14 @@ export function planWrites(
       if (!matches(rule, entityId)) continue;
       switch (a.kind) {
         case 'add': {
-          if (!allowedByMode(a.mode, read(entityId, a.target.psetName, a.target.propName))) break;
+          if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;
           const value = coerceValue(a.value, a.dataType);
           if (value === null) break;
           record({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
           break;
         }
         case 'compose': {
-          if (!allowedByMode(a.mode, read(entityId, a.target.psetName, a.target.propName))) break;
+          if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;
           const resolved = resolveTemplate(a.template, (name) => readByName(entityId, name));
           // An all-empty result means none of the referenced attributes exist
           // on this object — writing "" would just add noise.
@@ -340,7 +363,7 @@ export function planWrites(
           // look. The Mengenabfrage reads it by bare name, so the set does
           // not matter to it — only that the name is exactly this one.
           const target = { psetName: DEFAULT_TARGET_PSET, propName: COMPONENT_TYPE_PROPERTY };
-          if (!allowedByMode(a.mode, read(entityId, target.psetName, target.propName))) break;
+          if (!allowedByMode(a.mode, readForMode(entityId, target.psetName, target.propName))) break;
           if (!a.value) break;
           record({ entityId, op: 'set', ...target, value: a.value, valueType: PropertyValueType.Label });
           break;
@@ -352,7 +375,7 @@ export function planWrites(
             ? readByName(entityId, a.source.propName)
             : read(entityId, a.source.psetName, a.source.propName);
           if (value === null || value === '') break;
-          if (!allowedByMode(a.mode, read(entityId, a.target.psetName, a.target.propName))) break;
+          if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;
           record({ entityId, op: 'set', ...a.target, value, valueType: PropertyValueType.Label });
           break;
         }
