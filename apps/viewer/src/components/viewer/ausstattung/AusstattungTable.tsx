@@ -31,6 +31,7 @@ import {
   type AusstattungRow, type Auswahlgruppe, type RowKind,
 } from '@/lib/ausstattung/model';
 import type { RowResult } from '@/lib/ausstattung/evaluate';
+import { referenceNumber } from '@/lib/ausstattung/import';
 
 interface Props {
   rows: readonly AusstattungRow[];
@@ -102,8 +103,19 @@ function GroupPicker({
   );
 }
 
+/**
+ * Does our number agree with the one iTWO exported? Tolerant to the last
+ * digit the export wrote, so a rounding difference is not reported as a
+ * discrepancy — but anything larger is, because that is the point of having
+ * imported the reference at all.
+ */
+function agrees(ours: number, reference: number): boolean {
+  return Math.abs(ours - reference) <= Math.max(0.001, Math.abs(reference) * 1e-4);
+}
+
 /** The Menge cell: a number, or `—` with the reason behind it. */
-function QuantityCell({ result }: { result: RowResult | undefined }) {
+function QuantityCell({ result, reference }: { result: RowResult | undefined; reference?: string }) {
+  const ref = referenceNumber(reference);
   if (!result) return <span className="text-muted-foreground">—</span>;
 
   if (result.parseError) {
@@ -133,10 +145,13 @@ function QuantityCell({ result }: { result: RowResult | undefined }) {
     );
   }
 
+  const abweichung = ref !== null && !agrees(result.value, ref);
   const notes = [
     `${result.matched.toLocaleString('de-DE')} Objekte`,
     result.skipped > 0 ? `${result.skipped.toLocaleString('de-DE')} ohne Wert` : null,
     result.unresolved > 0 ? `${result.unresolved.toLocaleString('de-DE')} ohne Bauteiltyp` : null,
+    ref !== null && !abweichung ? `stimmt mit iTWO überein (${reference})` : null,
+    abweichung ? `iTWO: ${reference} — Abweichung ${(result.value - ref).toLocaleString('de-DE', { maximumFractionDigits: 3 })}` : null,
   ].filter(Boolean).join(' · ');
 
   return (
@@ -144,10 +159,12 @@ function QuantityCell({ result }: { result: RowResult | undefined }) {
       <TooltipTrigger asChild>
         <span
           className={cn(
-            'tabular-nums',
+            'inline-flex items-center gap-1 tabular-nums',
             (result.skipped > 0 || result.unresolved > 0) && 'underline decoration-dotted',
+            abweichung && 'text-destructive',
           )}
         >
+          {abweichung && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
           {result.value.toLocaleString('de-DE', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
         </span>
       </TooltipTrigger>
@@ -262,7 +279,7 @@ export function AusstattungTable({ rows, gruppen, results, onEdit, onRemove, onA
                 <EditableCell value={row.me} onCommit={(v) => onEdit(row.schluessel, { me: v })} />
               </TableCell>
               <TableCell className="text-right">
-                <QuantityCell result={results.get(row.schluessel)} />
+                <QuantityCell result={results.get(row.schluessel)} reference={row.referenzMenge} />
               </TableCell>
               <TableCell className="whitespace-nowrap text-muted-foreground">
                 {formatTlPfad(row) || <Badge variant="ghost" className="px-1 py-0 text-[10px]">{KIND_LABEL[kind]}</Badge>}

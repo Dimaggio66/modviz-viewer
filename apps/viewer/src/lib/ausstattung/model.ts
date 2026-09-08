@@ -55,6 +55,13 @@ export interface AusstattungRow {
   /** LV reference, both empty when the row is not a position. */
   tlk: string;
   lv: string;
+  /**
+   * The quantity iTWO itself computed for this row, as written in the import,
+   * kept verbatim. Never used as an input — it is the yardstick our own
+   * result is measured against, which is the whole reason to import a table
+   * that already has its numbers in it.
+   */
+  referenzMenge?: string;
 }
 
 export interface AusstattungProject {

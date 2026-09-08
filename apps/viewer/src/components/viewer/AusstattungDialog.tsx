@@ -20,8 +20,8 @@
  * one implementation, one place for a bug to be.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Layers, Plus, Table2, TriangleAlert, Workflow } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Layers, Plus, Table2, TriangleAlert, Upload, Workflow, X } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -33,6 +33,7 @@ import {
   type AusstattungProject, type AusstattungRow, type Auswahlgruppe, type LvPosition,
 } from '@/lib/ausstattung/model';
 import { evaluateProject, lvRollupKey } from '@/lib/ausstattung/evaluate';
+import { parseCsv, parseXlsx, sheetToProject, type ImportResult } from '@/lib/ausstattung/import';
 import { loadAusstattung, saveAusstattung } from '@/lib/ausstattung/store';
 import type { QtoContext } from '@/lib/quantities/qto-query';
 import { AusstattungTable } from './ausstattung/AusstattungTable';
@@ -57,6 +58,8 @@ export function AusstattungDialog({
 }: Props) {
   const [project, setProject] = useState<AusstattungProject>(emptyProject);
   const [persisted, setPersisted] = useState(true);
+  const [summary, setSummary] = useState<(ImportResult & { file: string }) | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) setProject(loadAusstattung(projectKey));
@@ -138,6 +141,37 @@ export function AusstattungDialog({
   const removePosition = useCallback((tlk: string, lv: string) => {
     patch({ ...project, positionen: project.positionen.filter((p) => !(p.tlk === tlk && p.lv === lv)) });
   }, [patch, project]);
+
+  /**
+   * Reads an exported table and REPLACES the project with it. Replacing
+   * rather than merging is deliberate: the key is the identity, so a merge
+   * would silently overwrite hand-edited rows wherever the keys happen to
+   * line up, and there would be no way to tell afterwards which is which.
+   */
+  const handleImport = useCallback(async (file: File) => {
+    try {
+      const sheet = file.name.toLowerCase().endsWith('.xlsx')
+        ? await parseXlsx(await file.arrayBuffer())
+        : parseCsv(await file.text());
+      const result = sheetToProject(sheet);
+      // Groups the sheet named are kept; conditions already written for a
+      // group of the same name survive the import.
+      const merged = result.project.gruppen.map((g) => {
+        const existing = project.gruppen.find((old) => old.name === g.name);
+        return existing?.bedingung ? existing : g;
+      });
+      patch({ ...result.project, gruppen: merged });
+      setSummary({ ...result, file: file.name });
+    } catch (err) {
+      setSummary({
+        project: emptyProject(),
+        warnings: [`Datei konnte nicht gelesen werden: ${err instanceof Error ? err.message : String(err)}`],
+        mapping: {},
+        withReference: 0,
+        file: file.name,
+      });
+    }
+  }, [patch, project.gruppen]);
 
   const addGruppe = useCallback(() => {
     const taken = new Set(project.gruppen.map((g) => g.name));
@@ -226,8 +260,59 @@ export function AusstattungDialog({
               <Button variant="outline" size="sm" onClick={addPosition} className="text-xs">
                 <Plus className="mr-1.5 h-3.5 w-3.5" /> LV-Position
               </Button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv,.xlsx,text/csv"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void handleImport(file);
+                }}
+              />
+              <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()} className="text-xs">
+                <Upload className="mr-1.5 h-3.5 w-3.5" /> Import (CSV / Excel)
+              </Button>
             </div>
           </div>
+
+          {summary && (
+            <div className="flex items-start gap-3 border-b bg-muted/40 px-4 py-2.5 text-xs">
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="font-medium">
+                  {summary.file}: {summary.project.rows.length.toLocaleString('de-DE')} Zeile(n),{' '}
+                  {summary.project.gruppen.length} Gruppe(n),{' '}
+                  {summary.project.positionen.length} LV-Position(en)
+                  {summary.withReference > 0
+                    && ` · ${summary.withReference.toLocaleString('de-DE')} mit iTWO-Menge zum Abgleich`}
+                </p>
+                {Object.keys(summary.mapping).length > 0 && (
+                  <p className="text-muted-foreground">
+                    Spalten:{' '}
+                    {Object.entries(summary.mapping)
+                      .map(([field, col]) => `${field} → ${col}`)
+                      .join(' · ')}
+                  </p>
+                )}
+                {summary.warnings.map((w) => (
+                  <p key={w} className="flex items-start gap-1 text-amber-600 dark:text-amber-500">
+                    <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span>{w}</span>
+                  </p>
+                ))}
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Import-Meldung schließen"
+                onClick={() => setSummary(null)}
+                className="h-6 w-6 shrink-0"
+              >
+                <X className="h-3 w-3" />
+              </Button>
+            </div>
+          )}
 
           <TabsContent value="ausstattung" className="mt-0 min-h-0 flex-1 overflow-auto">
             <AusstattungTable
