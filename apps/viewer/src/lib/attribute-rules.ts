@@ -22,6 +22,20 @@
 
 import { PropertyValueType } from '@ifc-lite/data';
 import { compileValueMatch } from './value-query.js';
+import { COMPONENT_TYPE_ATTRIBUTE } from './quantities/component-types.js';
+
+/**
+ * The property set a new attribute goes into unless the user says otherwise.
+ * `5D` is what this project's own mapping XML writes into — every attribute
+ * it produces is a `5D_*` one — so anything else would be a default nobody
+ * wants.
+ */
+export const DEFAULT_TARGET_PSET = '5D';
+
+/** The attribute "Bauteiltyp festlegen" writes. The Mengenabfrage's
+ *  `Bauteiltyp` condition reads exactly this name, so the two must not drift:
+ *  it is defined once, next to the reader. */
+export const COMPONENT_TYPE_PROPERTY = COMPONENT_TYPE_ATTRIBUTE;
 
 /**
  * How an action treats an attribute that already has a value — RIBiTWO's
@@ -109,14 +123,24 @@ export interface RuleConditionSnapshot {
   value: string;
 }
 
-/** The five attribute actions of the assistant (§6.8.1.2). "Bauteiltyp
- *  festlegen" is RIB-internal (cpiComponentType) and deliberately omitted. */
+/**
+ * The assistant's actions, matching RIB's five tabs: Bauteiltyp festlegen,
+ * Attribut hinzufügen, kopieren, umbenennen, entfernen.
+ *
+ * `compose` has no counterpart in RIB and is no longer offered when building a
+ * rule. It stays in the union — and keeps being evaluated — because rules
+ * stored before it was retired must go on working; dropping the case would
+ * turn a saved project into silent no-ops.
+ */
 export type RuleAction =
   | { kind: 'add'; target: PropRef; value: string; dataType: DataType; unit: string; mode: WriteMode }
   | { kind: 'compose'; target: PropRef; template: string; dataType: DataType; unit: string; mode: WriteMode }
   | { kind: 'copy'; source: PropRef; target: PropRef; mode: WriteMode }
   | { kind: 'rename'; source: PropRef; propName: string }
-  | { kind: 'delete'; targets: PropRef[] };
+  | { kind: 'delete'; targets: PropRef[] }
+  /** RIB's "Bauteiltyp festlegen": writes `cpiComponentType`, which decides
+   *  what a Mengenabfrage's `Bauteiltyp=='…'` condition sees. */
+  | { kind: 'componentType'; value: string; mode: WriteMode };
 
 /**
  * A condition the rule evaluates ITSELF, at apply time — how an imported
@@ -310,6 +334,17 @@ export function planWrites(
           record({ entityId, op: 'set', ...a.target, value, valueType: propertyValueTypeOf(a.dataType) });
           break;
         }
+        case 'componentType': {
+          // The component type is one attribute with a fixed name, written
+          // into the same set as everything else so there is one place to
+          // look. The Mengenabfrage reads it by bare name, so the set does
+          // not matter to it — only that the name is exactly this one.
+          const target = { psetName: DEFAULT_TARGET_PSET, propName: COMPONENT_TYPE_PROPERTY };
+          if (!allowedByMode(a.mode, read(entityId, target.psetName, target.propName))) break;
+          if (!a.value) break;
+          record({ entityId, op: 'set', ...target, value: a.value, valueType: PropertyValueType.Label });
+          break;
+        }
         case 'copy': {
           // An imported mapping addresses its source by bare name ("take
           // ifcTypeObjectName"), so an empty set means "whichever set has it".
@@ -370,6 +405,7 @@ export const refKeyOf = (r: PropRef) => `${r.psetName}|${r.propName}`;
  */
 export function ruleTargetRefs(rule: AttributeRule): PropRef[] {
   const a = rule.action;
+  if (a.kind === 'componentType') return [{ psetName: DEFAULT_TARGET_PSET, propName: COMPONENT_TYPE_PROPERTY }];
   return a.kind === 'add' || a.kind === 'compose' || a.kind === 'copy' ? [a.target]
     : a.kind === 'rename' ? [{ psetName: a.source.psetName, propName: a.propName }, a.source]
     : a.targets;
@@ -410,6 +446,7 @@ export function describeAction(a: RuleAction): string {
     case 'copy':    return `${at(a.target)} ← ${at(a.source)}`;
     case 'rename':  return `${at(a.source)} → ${a.propName}`;
     case 'delete':  return a.targets.map(at).join(', ');
+    case 'componentType': return `Bauteiltyp = "${a.value}"`;
   }
 }
 
@@ -420,6 +457,7 @@ export const ACTION_LABELS: Record<RuleAction['kind'], string> = {
   copy: 'Copy attribute',
   rename: 'Rename attribute',
   delete: 'Delete attribute',
+  componentType: 'Bauteiltyp festlegen',
 };
 
 // ── Rules table (RIBiTWO's "Attributregeln" grid) ────────────────────────────
@@ -534,6 +572,15 @@ export function applyRuleEdit(rule: AttributeRule, row: RuleTableRow, field: Rul
       if (field !== 'attribute' || i < 0 || i >= a.targets.length) return rule;
       return { ...rule, action: { ...a, targets: a.targets.map((x, k) => (k === i ? parseRef(t) : x)) } };
     }
+    case 'componentType': {
+      // Address and data type are fixed; only what is written and how.
+      if (field === 'value') return { ...rule, action: { ...a, value: t } };
+      if (field === 'mode') {
+        const mode = MODE_BY_SHORT.get(t);
+        return mode ? { ...rule, action: { ...a, mode } } : rule;
+      }
+      return rule;
+    }
   }
 }
 
@@ -575,6 +622,12 @@ export function ruleTableRows(rules: readonly AttributeRule[]): RuleTableRow[] {
         break;
       case 'delete':
         a.targets.forEach((t, ti) => out({ attribute: formatRef(t), mode: 'Delete', targetIndex: ti, editable: ['attribute'] }));
+        break;
+      case 'componentType':
+        // The address is fixed, so only the value and the mode are editable —
+        // showing them as text keeps the grid readable next to the others.
+        out({ attribute: DEFAULT_TARGET_PSET, name: COMPONENT_TYPE_PROPERTY, type: DATA_TYPE_LABELS.text,
+          value: a.value, mode: MODE_SHORT[a.mode], editable: ['value', 'mode'] });
         break;
     }
   });

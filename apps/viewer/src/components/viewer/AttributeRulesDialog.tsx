@@ -86,7 +86,11 @@ const PROGRESS_CHUNK = 400;
 /** Delay before the write preview is recomputed while you type. */
 const PREVIEW_DEBOUNCE_MS = 350;
 
-const KINDS: ActionKind[] = ['add', 'compose', 'copy', 'rename', 'delete'];
+// RIB's five tabs, in RIB's order. "Add from values" (`compose`) is no longer
+// offered: it has no counterpart in RIB, and the XML import never produced one,
+// so only a hand-built rule could use it. Rules already saved with it keep
+// working — the action is still evaluated, just not creatable.
+const KINDS: ActionKind[] = ['componentType', 'add', 'copy', 'rename', 'delete'];
 
 /** Where a new rule takes its objects from — RIBiTWO's "Alle Objekte" menu. */
 export type RuleScope = 'all' | 'filter' | 'selection';
@@ -257,6 +261,10 @@ export function AttributeRulesDialog({
         const targets = form.deleteKeys.map((k) => refByKey.get(k)).filter((r): r is PropRef => !!r);
         return targets.length > 0 ? { kind, targets } : null;
       }
+      case 'componentType':
+        // Address and data type are fixed for this action, so the form only
+        // has to have picked a type.
+        return form.componentType ? { kind, value: form.componentType, mode } : null;
     }
   }, [kind, form, refByKey]);
 
@@ -312,6 +320,12 @@ export function AttributeRulesDialog({
 
   const toggleRule = (id: string) => commit(rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
   const removeRule = (id: string) => commit(rules.filter((r) => r.id !== id));
+  /** Same path as a single removal, so the rollback of what those rules wrote
+   *  is worked out exactly the same way. */
+  const removeRules = (ids: readonly string[]) => {
+    const drop = new Set(ids);
+    commit(rules.filter((r) => !drop.has(r.id)));
+  };
   const moveRule = (id: string, delta: number) => {
     const i = rules.findIndex((r) => r.id === id);
     const to = i + delta;
@@ -800,7 +814,7 @@ export function AttributeRulesDialog({
           {/* ── Tab 2: the collected rules ── */}
           <TabsContent value="table" className="mt-0 flex min-h-0 flex-1 flex-col">
             <div className="scrollbar-thin min-h-0 flex-1 overflow-auto">
-              <RulesTable rules={rules} onToggle={toggleRule} onMove={moveRule} onRemove={removeRule} onEdit={editRule} />
+              <RulesTable rules={rules} onToggle={toggleRule} onMove={moveRule} onRemove={removeRule} onRemoveMany={removeRules} onEdit={editRule} />
             </div>
           </TabsContent>
         </Tabs>

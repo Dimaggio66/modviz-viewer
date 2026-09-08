@@ -15,6 +15,7 @@
 
 import { useMemo } from 'react';
 import { Search } from 'lucide-react';
+import { COMPONENT_TYPES } from '@/lib/quantities/component-types';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ComboInput } from '@/components/ui/combo-input';
 import { Input } from '@/components/ui/input';
@@ -26,7 +27,7 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import {
-  DATA_TYPE_LABELS, UNITS, WRITE_MODE_LABELS, templateTokens,
+  COMPONENT_TYPE_PROPERTY, DATA_TYPE_LABELS, DEFAULT_TARGET_PSET, UNITS, WRITE_MODE_LABELS, templateTokens,
   type DataType, type PropRef, type RuleAction, type WriteMode,
 } from '@/lib/attribute-rules';
 
@@ -49,6 +50,8 @@ export interface ActionForm {
   /** Attributes ticked for deletion (`refKey`s) and the list's filter box. */
   deleteKeys: string[];
   deleteFilter: string;
+  /** Chosen Bauteiltyp for "Bauteiltyp festlegen". */
+  componentType: string;
 }
 
 /**
@@ -56,14 +59,22 @@ export interface ActionForm {
  * set. RIBiTWO's dialog has no such field (its CPI attributes are flat), so the
  * set is pre-filled and kept out of the way: the primary fields are the
  * attribute name and its value, matching what the manual asks for.
+ *
+ * The default is `5D`, which is where this project's own mapping writes: every
+ * attribute its XML produces is a `5D_*` one.
  */
-export const DEFAULT_PSET = 'Pset_ModViz';
+export const DEFAULT_PSET = DEFAULT_TARGET_PSET;
 
 export const EMPTY_ACTION_FORM: ActionForm = {
   psetName: DEFAULT_PSET, propName: '', value: '', template: '',
+  // Text and "no unit" are what nearly every attribute needs, and they are
+  // what RIB pre-selects — an empty type field is a question nobody wants.
   dataType: 'text', unit: '', mode: 'addOverwrite',
-  sourceKey: '', newName: '', deleteKeys: [], deleteFilter: '',
+  sourceKey: '', newName: '', deleteKeys: [], deleteFilter: '', componentType: '',
 };
+
+/** Placeholder shown in an empty text field, matching RIB's own wording. */
+export const INPUT_PLACEHOLDER = '<Eingabe...>';
 
 /** PropRef -> one Select/checkbox value. JSON-encoded rather than joined on a
  *  separator because a set or property name may contain any character. */
@@ -100,7 +111,7 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
       value={form.propName}
       onChange={(v) => patch({ propName: v })}
       options={attributeNames as string[]}
-      placeholder="5D_Bauteilname"
+      placeholder={INPUT_PLACEHOLDER}
       className="h-8 text-xs"
       maxRendered={500}
       aria-label="Attribute name"
@@ -169,12 +180,35 @@ export function ActionEditor({ kind, form, patch, propertyRefs, psetNames, attri
   ));
 
   switch (kind) {
+    case 'componentType':
+      return (
+        <div className="flex flex-col gap-3">
+          {field('Bauteiltyp', (
+            <Select value={form.componentType} onValueChange={(v) => patch({ componentType: v })}>
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue placeholder="Bitte wählen…" />
+              </SelectTrigger>
+              <SelectContent className="max-h-72">
+                {COMPONENT_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          ), (
+            <p className="text-[11px] text-muted-foreground">
+              Schreibt das Attribut <code className="font-mono">{COMPONENT_TYPE_PROPERTY}</code> in
+              das Set <code className="font-mono">{DEFAULT_PSET}</code>. Genau diesen Wert liest eine
+              Mengenabfrage in <code className="font-mono">Bauteil:=&quot;Bauteiltyp==&apos;…&apos;&quot;</code>.
+            </p>
+          ))}
+          {modeField}
+        </div>
+      );
+
     case 'add':
       return (
         <div className="flex flex-col gap-3">
           {nameField}
           {field('Value', (
-            <Input value={form.value} onChange={(e) => patch({ value: e.target.value })} placeholder="Innenstützen" className="h-8 text-xs" />
+            <Input value={form.value} onChange={(e) => patch({ value: e.target.value })} placeholder={INPUT_PLACEHOLDER} className="h-8 text-xs" />
           ))}
           {typeAndUnit}
           {modeField}

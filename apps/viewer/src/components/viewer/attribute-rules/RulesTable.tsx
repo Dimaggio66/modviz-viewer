@@ -10,8 +10,8 @@
  * rows carry the per-rule controls: enable/disable, reorder, delete.
  */
 
-import { useEffect, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ArrowDown, ArrowUp, Check, Trash2, X } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -33,6 +33,8 @@ interface Props {
   onToggle: (id: string) => void;
   onMove: (id: string, delta: number) => void;
   onRemove: (id: string) => void;
+  /** Delete several rules at once — the ticked ones, or all of them. */
+  onRemoveMany: (ids: readonly string[]) => void;
   /** Commit an in-place cell edit. */
   onEdit: (row: RuleTableRow, field: RuleEditField, text: string) => void;
 }
@@ -85,7 +87,16 @@ function EditableChoice({
   );
 }
 
-export function RulesTable({ rules, onToggle, onMove, onRemove, onEdit }: Props) {
+export function RulesTable({ rules, onToggle, onMove, onRemove, onRemoveMany, onEdit }: Props) {
+  /** Ticked rules. Kept as ids, not indices, so reordering cannot move the
+   *  selection onto a different rule between ticking and deleting. */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  /** A deletion of several rules asks once — it cannot be undone from here. */
+  const [confirming, setConfirming] = useState<'selection' | 'all' | null>(null);
+
+  const present = useMemo(() => new Set(rules.map((r) => r.id)), [rules]);
+  const ticked = useMemo(() => [...selected].filter((id) => present.has(id)), [selected, present]);
+
   if (rules.length === 0) {
     return (
       <div className="px-5 py-10 text-center">
@@ -99,12 +110,86 @@ export function RulesTable({ rules, onToggle, onMove, onRemove, onEdit }: Props)
 
   const rows = ruleTableRows(rules);
   const byId = new Map(rules.map((r, i) => [r.id, { rule: r, index: i }]));
+  const allTicked = ticked.length === rules.length;
+
+  const toggleOne = (id: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+
+  const removeMany = (ids: readonly string[]) => {
+    onRemoveMany(ids);
+    setSelected(new Set());
+    setConfirming(null);
+  };
 
   return (
-    <Table>
-      <TableHeader className="sticky top-0 z-10 bg-background">
+    <>
+      <div className="sticky top-0 z-20 flex items-center gap-2 border-b bg-background px-3 py-1.5 text-xs">
+        <span className="text-muted-foreground">
+          {ticked.length > 0
+            ? `${ticked.length} von ${rules.length} ausgewählt`
+            : `${rules.length} Regel(n)`}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          {confirming === null ? (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={ticked.length === 0}
+                onClick={() => setConfirming('selection')}
+                className="h-7 text-xs text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 className="mr-1.5 h-3 w-3" /> Auswahl löschen
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setConfirming('all')}
+                className="h-7 text-xs text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 className="mr-1.5 h-3 w-3" /> Alle löschen
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="text-destructive">
+                {confirming === 'all'
+                  ? `Alle ${rules.length} Regeln löschen?`
+                  : `${ticked.length} Regel(n) löschen?`}
+              </span>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => removeMany(confirming === 'all' ? rules.map((r) => r.id) : ticked)}
+                className="h-7 text-xs"
+              >
+                Löschen
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirming(null)} className="h-7 text-xs">
+                Abbrechen
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+      <Table>
+      {/* Sticks below the selection bar above, which is 33px tall. */}
+      <TableHeader className="sticky top-[33px] z-10 bg-background">
         <TableRow>
-          <TableHead className="w-10">#</TableHead>
+          <TableHead className="w-16">
+            <div className="flex items-center gap-1.5">
+              <Checkbox
+                checked={allTicked}
+                onCheckedChange={() => setSelected(allTicked ? new Set() : new Set(rules.map((r) => r.id)))}
+                aria-label={allTicked ? 'Auswahl aufheben' : 'Alle Regeln auswählen'}
+              />
+              <span>#</span>
+            </div>
+          </TableHead>
           <TableHead className="w-20">In/Out</TableHead>
           <TableHead>Attribute / query</TableHead>
           <TableHead>Name</TableHead>
@@ -123,7 +208,16 @@ export function RulesTable({ rules, onToggle, onMove, onRemove, onEdit }: Props)
             const idx = entry?.index ?? 0;
             return (
               <TableRow key={`g-${row.ruleId}`} className="bg-muted/40 hover:bg-muted/40">
-                <TableCell className="font-semibold">{row.number}</TableCell>
+                <TableCell className="font-semibold">
+                  <div className="flex items-center gap-1.5">
+                    <Checkbox
+                      checked={selected.has(row.ruleId)}
+                      onCheckedChange={() => toggleOne(row.ruleId)}
+                      aria-label={`Regel ${row.number} auswählen`}
+                    />
+                    <span>{row.number}</span>
+                  </div>
+                </TableCell>
                 <TableCell colSpan={6}>
                   <div className="flex items-center gap-2">
                     <Checkbox
@@ -202,7 +296,8 @@ export function RulesTable({ rules, onToggle, onMove, onRemove, onEdit }: Props)
             </TableRow>
           );
         })}
-      </TableBody>
-    </Table>
+        </TableBody>
+      </Table>
+    </>
   );
 }

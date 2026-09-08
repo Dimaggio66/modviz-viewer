@@ -17,6 +17,8 @@ import {
   refKeyOf,
   type AttributeRule,
   type PropReader,
+  COMPONENT_TYPE_PROPERTY,
+  DEFAULT_TARGET_PSET,
 } from './attribute-rules.js';
 
 /** Two objects: 1 already carries Pset_A.Status, 2 does not. */
@@ -254,5 +256,55 @@ describe('describeAction', () => {
     assert.strictEqual(describeAction({ kind: 'add', target: { psetName: 'P', propName: 'A' }, value: 'v', ...TEXT, mode: 'add' }), 'P.A = "v"');
     assert.strictEqual(describeAction({ kind: 'rename', source: { psetName: 'P', propName: 'A' }, propName: 'B' }), 'P.A → B');
     assert.strictEqual(describeAction({ kind: 'delete', targets: [{ psetName: 'P', propName: 'A' }] }), 'P.A');
+  });
+});
+
+describe('Bauteiltyp festlegen', () => {
+  it('schreibt cpiComponentType in das Standard-Set', () => {
+    const w = planWrites(
+      [rule({ kind: 'componentType', value: 'Wall', mode: 'addOverwrite' })],
+      read, readByName,
+    );
+    assert.strictEqual(w.length, 2, 'beide Objekte');
+    assert.deepStrictEqual(
+      { pset: w[0]!.psetName, prop: w[0]!.propName, value: w[0]!.value },
+      { pset: DEFAULT_TARGET_PSET, prop: COMPONENT_TYPE_PROPERTY, value: 'Wall' },
+    );
+    assert.strictEqual(w[0]!.valueType, PropertyValueType.Label);
+  });
+
+  it('ohne gewählten Typ wird nichts geschrieben', () => {
+    const w = planWrites(
+      [rule({ kind: 'componentType', value: '', mode: 'addOverwrite' })],
+      read, readByName,
+    );
+    assert.strictEqual(w.length, 0, 'lieber nichts als ein leerer Bauteiltyp');
+  });
+
+  it('achtet auf den Schreibmodus wie jede andere Aktion', () => {
+    const vorhanden: PropReader = (id, pset, prop) =>
+      pset === DEFAULT_TARGET_PSET && prop === COMPONENT_TYPE_PROPERTY ? 'Default' : read(id, pset, prop);
+    const nurLeere = planWrites(
+      [rule({ kind: 'componentType', value: 'Wall', mode: 'add' })],
+      vorhanden, readByName,
+    );
+    assert.strictEqual(nurLeere.length, 0, 'Add schreibt nur, wo noch nichts steht');
+  });
+
+  it('nennt seine Zieladresse, damit ein Rücknehmen sie findet', () => {
+    const r = rule({ kind: 'componentType', value: 'Slab', mode: 'addOverwrite' });
+    const stale = staleTargetRefs([r], []);
+    assert.deepStrictEqual(
+      stale.map(refKeyOf),
+      [refKeyOf({ psetName: DEFAULT_TARGET_PSET, propName: COMPONENT_TYPE_PROPERTY })],
+    );
+  });
+
+  it('erscheint als eigene Zeile in der Regeltabelle', () => {
+    const rows = ruleTableRows([rule({ kind: 'componentType', value: 'Column', mode: 'add' })]);
+    const out = rows.find((r) => r.kind === 'out')!;
+    assert.strictEqual(out.name, COMPONENT_TYPE_PROPERTY);
+    assert.strictEqual(out.value, 'Column');
+    assert.deepStrictEqual(out.editable, ['value', 'mode']);
   });
 });
