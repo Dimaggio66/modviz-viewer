@@ -36,6 +36,7 @@ import { evaluateProject, lvRollupKey } from '@/lib/ausstattung/evaluate';
 import { parseCsv, parseXlsx, sheetToProject, type ImportResult } from '@/lib/ausstattung/import';
 import { loadAusstattung, saveAusstattung } from '@/lib/ausstattung/store';
 import type { QtoContext } from '@/lib/quantities/qto-query';
+import { buildHierarchy, type RelationshipSource } from '@/lib/quantities/hierarchy';
 import { AusstattungTable } from './ausstattung/AusstattungTable';
 import { GruppenTable } from './ausstattung/GruppenTable';
 import { LvTable } from './ausstattung/LvTable';
@@ -51,10 +52,14 @@ interface Props {
   readAttribute: (entityId: number, name: string) => string | null;
   /** The element's IFC class, the fallback for Bauteiltyp. */
   ifcClassOf?: (entityId: number) => string | null;
+  /** Reads the containment relationships — what a `;` chain steps into and
+   *  what a `$` prefix looks up through. Without it both say so and yield no
+   *  number, rather than quietly answering as if nothing were nested. */
+  relationships?: RelationshipSource | null;
 }
 
 export function AusstattungDialog({
-  open, onOpenChange, projectKey, universe, readAttribute, ifcClassOf,
+  open, onOpenChange, projectKey, universe, readAttribute, ifcClassOf, relationships,
 }: Props) {
   const [project, setProject] = useState<AusstattungProject>(emptyProject);
   const [persisted, setPersisted] = useState(true);
@@ -70,9 +75,18 @@ export function AusstattungDialog({
     setPersisted(saveAusstattung(projectKey, next));
   }, [projectKey]);
 
+  /** Built once per store: the maps are shared by every row in the pass. */
+  const hierarchy = useMemo(() => buildHierarchy(relationships), [relationships]);
+
   const ctxFor = useCallback(
-    (ids: readonly number[]): QtoContext => ({ entityIds: ids, readAttribute, ifcClassOf }),
-    [readAttribute, ifcClassOf],
+    (ids: readonly number[]): QtoContext => ({
+      entityIds: ids,
+      readAttribute,
+      ifcClassOf,
+      childrenOf: hierarchy?.childrenOf,
+      ancestorsOf: hierarchy?.ancestorsOf,
+    }),
+    [readAttribute, ifcClassOf, hierarchy],
   );
 
   /** Row quantities and the LV roll-ups, from the pure module so the same

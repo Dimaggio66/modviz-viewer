@@ -447,3 +447,76 @@ describe('Subjekt-Schreibweisen aus den Handbüchern', () => {
     assert.match(r.unsupported[0]!, /Eltern-Objekt/);
   });
 });
+
+describe('Eltern-Attribut mit $ auflösen', () => {
+  // Objekt 1 traegt Holz selbst; Objekt 2 erbt es von seinem Eltern-Objekt 10;
+  // Objekt 3 hat es nirgends. Das ist das Beispiel aus BIM Qualifier 6.8.1.7.
+  const werte: Record<number, Record<string, string>> = {
+    1: { MaterialName: 'Holz' },
+    10: { MaterialName: 'Holz' },
+    3: {},
+    20: {},
+  };
+  const eltern: Record<number, number[]> = { 2: [10], 3: [20] };
+  const ctx: QtoContext = {
+    entityIds: [1, 2, 3],
+    readAttribute: (id, name) => werte[id]?.[name] ?? null,
+    ancestorsOf: (id) => eltern[id] ?? [],
+  };
+
+  it('findet den Wert am Objekt und am Eltern-Objekt', () => {
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName=='Holz'")`, ctx);
+    assert.equal(r.value, 2, 'das eigene und das geerbte');
+    assert.deepEqual(r.matchedIds, [1, 2]);
+  });
+
+  it('lässt den eigenen Wert gewinnen, wenn beide etwas sagen', () => {
+    const streit: QtoContext = {
+      ...ctx,
+      entityIds: [2],
+      readAttribute: (id, name) => (id === 2 ? (name === 'MaterialName' ? 'Stahl' : null) : werte[id]?.[name] ?? null),
+    };
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName=='Holz'")`, streit);
+    assert.equal(r.value, 0, 'das Eltern-Objekt sagt Holz, das Objekt selbst Stahl');
+  });
+
+  it('unterscheidet sich von @, das nur am Objekt sucht', () => {
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="@MaterialName=='Holz'")`, ctx);
+    assert.equal(r.value, 1, 'nur Objekt 1 traegt es selbst');
+  });
+
+  it('sagt weiterhin Bescheid, wenn keine Hierarchie übergeben wurde', () => {
+    const ohne = ctxOf({ 1: {} });
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="$MaterialName=='Holz'")`, ohne);
+    assert.equal(r.value, null);
+    assert.match(r.unsupported[0]!, /keine Hierarchie/);
+  });
+});
+
+describe('Tiefensuche zählt jedes Objekt einmal', () => {
+  it('verdoppelt nicht, wenn die Nachfahren schon im Geltungsbereich sind', () => {
+    // Am echten Modell wurden aus 508 Oeffnungen 1.016, weil der Geltungs-
+    // bereich das ganze Modell war und die Nachfahren angehaengt statt
+    // hinzugefuegt wurden.
+    const typ: Record<number, string> = { 1: 'Wall', 2: 'Opening', 3: 'Opening' };
+    const ctx: QtoContext = {
+      entityIds: [1, 2, 3],
+      readAttribute: (id, name) => (name === 'cpiComponentType' ? typ[id] ?? null : null),
+      childrenOf: (id) => (id === 1 ? [2, 3] : []),
+    };
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="Bauteiltyp=='Opening';")`, ctx);
+    assert.equal(r.value, 2, 'zwei Oeffnungen, nicht vier');
+    assert.deepEqual(r.matchedIds, [2, 3]);
+  });
+
+  it('findet mit Tiefensuche auch, was nicht im Geltungsbereich stand', () => {
+    const typ: Record<number, string> = { 1: 'Wall', 2: 'Opening', 3: 'Opening' };
+    const ctx: QtoContext = {
+      entityIds: [1], // nur die Wand ist im Bereich
+      readAttribute: (id, name) => (name === 'cpiComponentType' ? typ[id] ?? null : null),
+      childrenOf: (id) => (id === 1 ? [2, 3] : []),
+    };
+    const r = run(`QTO(Typ:="Stückzahl";ME:="St";Bauteil:="Bauteiltyp=='Opening';")`, ctx);
+    assert.equal(r.value, 2, 'dafuer ist die Tiefensuche da');
+  });
+});

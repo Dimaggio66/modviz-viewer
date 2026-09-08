@@ -1168,6 +1168,7 @@ export function ObjectFilterPanel() {
         universe={modelSummary.objectIds}
         readAttribute={readAttributeByName}
         ifcClassOf={ifcClassOf}
+        relationships={activeStore?.relationships ?? null}
       />
 
       <AttributeRulesDialog

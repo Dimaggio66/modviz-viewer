@@ -369,6 +369,8 @@ export interface QtoContext {
   readAttribute: (entityId: number, name: string) => string | null;
   /** Direct children in the component hierarchy — what a `;` steps into. */
   childrenOf?: (entityId: number) => readonly number[];
+  /** Every ancestor, nearest first — what a `$` prefix looks up through. */
+  ancestorsOf?: (entityId: number) => readonly number[];
   /** The element's IFC class, the FALLBACK for Bauteiltyp when the mapping
    *  wrote no `cpiComponentType`. */
   ifcClassOf?: (entityId: number) => string | null;
@@ -453,11 +455,21 @@ function testComparison(cmp: Comparison, id: number, ctx: QtoContext, unsupporte
     return matchValue(cmp, ctx.readAttribute(id, cmp.subject.name));
   }
   if (cmp.subject.kind === 'inherited') {
-    // Answering this means walking up to the parent objects, which needs the
-    // hierarchy the context does not carry yet — the same gap as the
-    // Tiefensuche. Reported by name rather than guessed at.
-    unsupported.add(`Attribut $${cmp.subject.name} (auch am Eltern-Objekt)`);
-    return false;
+    // "sowohl am Objekt direkt als auch bei einem Eltern-Objekt": the object's
+    // own value wins, and only its absence sends the lookup upwards. Nearest
+    // ancestor first, so the closest container decides.
+    const own = ctx.readAttribute(id, cmp.subject.name);
+    if (own !== null) return matchValue(cmp, own);
+    if (!ctx.ancestorsOf) {
+      unsupported.add(`Attribut $${cmp.subject.name} (auch am Eltern-Objekt, keine Hierarchie übergeben)`);
+      return false;
+    }
+    for (const up of ctx.ancestorsOf(id)) {
+      const inherited = ctx.readAttribute(up, cmp.subject.name);
+      if (inherited !== null) return matchValue(cmp, inherited);
+    }
+    // Nowhere on the object or above it — absent, which `!=` still satisfies.
+    return matchValue(cmp, null);
   }
   // Bauteiltyp: what the mapping wrote wins, the IFC class is the fallback.
   if (cmp.subject.name.toLowerCase() === 'bauteiltyp') {
@@ -517,7 +529,18 @@ function descend(
 function selectByFilter(filter: BauteilFilter, ctx: QtoContext, unsupported: Set<string>, unresolved: Set<number>): number[] {
   const deep = filter.depthSearch;
   let current: number[] = [...ctx.entityIds];
-  if (deep) current = current.concat(descend(current, ctx, true, unsupported));
+  if (deep) {
+    // The descendants must be ADDED to the scope, not appended blindly: when
+    // the scope is already the whole model they are all in it, and a plain
+    // concat counted every one of them twice. Caught against a real model —
+    // 508 openings became 1,016.
+    const seen = new Set(current);
+    for (const id of descend(current, ctx, true, unsupported)) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      current.push(id);
+    }
+  }
   for (let i = 0; i < filter.levels.length; i++) {
     if (i > 0) current = descend(current, ctx, deep, unsupported);
     const level = filter.levels[i]!;
