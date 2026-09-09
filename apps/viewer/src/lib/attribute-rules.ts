@@ -49,7 +49,7 @@ export type WriteMode = 'add' | 'overwrite' | 'addOverwrite';
 export const WRITE_MODE_LABELS: Record<WriteMode, string> = {
   add: 'Add — only where empty',
   addOverwrite: 'Add and overwrite — always',
-  overwrite: 'Overwrite — only where set',
+  overwrite: 'Overwrite — always',
 };
 
 /** RIBiTWO's *Datentyp* list, mapped onto the store's PropertyValueType. */
@@ -230,8 +230,17 @@ export function templateTokens(template: string): string[] {
 function allowedByMode(mode: WriteMode, current: string | null): boolean {
   const isSet = current !== null && current !== '';
   switch (mode) {
-    case 'add':          return !isSet;
-    case 'overwrite':    return isSet;
+    case 'add': return !isSet;
+    // RIBiTWO's "Überschreiben" CREATES the attribute — it does not require an
+    // existing value. Read the other way round ("only where already set"), an
+    // attribute that no `Add` ever writes could never come into being, and the
+    // Heizung mapping has exactly such a case: `5D_Systemklassifizierung` is
+    // written by two Overwrite outputs and nothing else, yet iTWO shows it
+    // filled on the same model with the same rules, while we showed nothing.
+    // That makes `overwrite` and `addOverwrite` behave alike; the redundancy
+    // is RIBiTWO's, whose exporter writes "always" as an Add/Overwrite PAIR —
+    // two checkboxes, not three choices.
+    case 'overwrite':
     case 'addOverwrite': return true;
   }
 }

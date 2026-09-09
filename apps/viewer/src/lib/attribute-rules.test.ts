@@ -88,9 +88,27 @@ describe('planWrites — write modes', () => {
     assert.deepStrictEqual(w.map((x) => x.entityId), [2]);
   });
 
-  it('overwrite: only objects that already have one', () => {
+  it('overwrite: every object — it CREATES the attribute as well', () => {
+    // Belegt am selben Modell mit demselben Regelsatz: iTWO fuellt
+    // `5D_Systemklassifizierung`, das nur von zwei Overwrite-Ausgaben
+    // geschrieben wird und von keinem einzigen Add. Waere "nur wo schon ein
+    // Wert steht" richtig, koennte es nie entstehen.
     const w = planWrites([rule({ kind: 'add', target, value: 'Final', ...TEXT, mode: 'overwrite' })], read, readByName);
-    assert.deepStrictEqual(w.map((x) => x.entityId), [1]);
+    assert.deepStrictEqual(w.map((x) => x.entityId), [1, 2]);
+  });
+
+  it('overwrite legt auch beim Kopieren ein noch unbekanntes Attribut an', () => {
+    // Genau die Form aus der Heizungs-Mapping-Datei:
+    //   <out property="HLS\Systemklassifizierung"
+    //        name="5D_Systemklassifizierung" mode="Overwrite" />
+    const w = planWrites([rule({
+      kind: 'copy',
+      source: { psetName: 'Pset_A', propName: 'Status' },
+      target: { psetName: '5D', propName: '5D_Neu' },
+      mode: 'overwrite',
+    })], read, readByName);
+    assert.deepStrictEqual(w.map((x) => x.entityId), [1], 'nur Objekt 1 traegt die Quelle');
+    assert.strictEqual(w[0]?.propName, '5D_Neu');
   });
 
   it('addOverwrite: every object', () => {
