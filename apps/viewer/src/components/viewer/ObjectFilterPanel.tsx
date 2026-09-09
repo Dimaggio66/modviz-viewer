@@ -60,6 +60,7 @@ import { AttributeRulesDialog } from './AttributeRulesDialog';
 import { AusstattungDialog } from './AusstattungDialog';
 import { projectKeyFor } from '@/lib/attribute-rules-store';
 import { isTypeEntityName } from '@/lib/ifc-type-entity';
+import { valueText } from '@/lib/value-text';
 import type { PropRef } from '@/lib/attribute-rules';
 import { judgeOverlay } from '@/lib/search/attribute-liveness';
 
@@ -524,7 +525,7 @@ export function ObjectFilterPanel() {
       if (!bucket) { bucket = new Set(); idx.set(name, bucket); }
       if (bucket.size < 5000) bucket.add(v);
     };
-    const str = (v: unknown) => (v === undefined || v === null ? null : String(v));
+    const str = (v: unknown) => (v === undefined || v === null ? null : valueText(v));
     const typeSets = new Map<number, Array<{ properties?: Array<{ name: string; value: unknown }> }>>();
     for (const id of ids) {
       for (const set of activeStore.getProperties?.(id) ?? []) {
@@ -739,7 +740,7 @@ export function ObjectFilterPanel() {
             for (const set of s.getProperties?.(id) ?? []) {
               if (!propRow.setNames.includes(set.name)) continue;
               for (const p of set.properties ?? []) {
-                if (p.name === propRow.propName) return p.value === undefined || p.value === null ? '' : String(p.value);
+                if (p.name === propRow.propName) return valueText(p.value);
               }
             }
             return '';
@@ -1028,7 +1029,7 @@ export function ObjectFilterPanel() {
     for (const set of sets) {
       for (const p of set.properties ?? []) {
         if (p.name === name && p.value !== undefined && p.value !== null && p.value !== '') {
-          return String(p.value);
+          return valueText(p.value);
         }
       }
     }

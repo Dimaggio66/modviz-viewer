@@ -10,6 +10,7 @@
 
 import { groupingColumnIds, type CellValue, type ColumnDefinition, type ListRow, type ListGrouping } from '@ifc-lite/lists';
 import { buildNestedGroupBuckets, compareCells, orderGroups, type GroupSort, type OrderableGroup } from '@/lib/lists/group-sort';
+import { valueText } from '@/lib/value-text';
 
 // Re-exported so existing consumers keep importing the list-table barrel.
 export { compareCells, orderGroups };
@@ -39,8 +40,12 @@ export function formatCellValue(value: CellValue): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'number') {
-    if (Number.isInteger(value)) return value.toLocaleString();
-    return value.toFixed(4).replace(/\.?0+$/, '');
+    // Smooth first, then decide: 125.00000000000001 is an integer once the
+    // conversion residue is gone, and toFixed(4) would have flattened a
+    // volume of 0.005598 m3 to 0.0056.
+    const text = valueText(value);
+    const n = Number(text);
+    return Number.isInteger(n) ? n.toLocaleString() : text;
   }
   return String(value);
 }

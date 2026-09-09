@@ -47,6 +47,7 @@ import {
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
+import { valueText } from '@/lib/value-text';
 import { ifcClassOf, isTypeEntityName } from '@/lib/ifc-type-entity';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
@@ -190,7 +191,7 @@ export function AttributeRulesDialog({
       for (const set of store.getProperties?.(first) ?? []) {
         for (const p of set.properties ?? []) {
           if (p.value === undefined || p.value === null || p.value === '') continue;
-          out.push({ label: p.name, value: String(p.value) });
+          out.push({ label: p.name, value: valueText(p.value) });
         }
       }
       return out.sort((a, b) => a.label.localeCompare(b.label));
@@ -391,7 +392,7 @@ export function AttributeRulesDialog({
 
   const readers = useMemo(() => {
     type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
-    const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v));
+    const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : valueText(v));
 
     /**
      * Property sets a property may be inherited from: the ones the object

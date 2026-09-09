@@ -32,6 +32,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
 import { ifcClassOf, isTypeEntityName } from '@/lib/ifc-type-entity';
+import { valueText } from '@/lib/value-text';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { useIfc } from '@/hooks/useIfc';
 import { configureMutationView } from '@/utils/configureMutationView';
@@ -106,7 +107,7 @@ function attributesFromOverlayEntity(entity: NewEntity): Array<{ name: string; v
       if (value === '$' || value.length === 0) continue;
       display = value;
     } else if (typeof value === 'number') {
-      display = String(value);
+      display = valueText(value);
     } else if (typeof value === 'boolean') {
       display = value ? 'true' : 'false';
     } else {
