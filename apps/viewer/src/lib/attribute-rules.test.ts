@@ -524,3 +524,49 @@ describe('Zaehler je Regel', () => {
     assert.strictEqual(planWrites([r], read, readByName, [1, 2]).length, 2);
   });
 });
+
+describe('Ein zweiter Lauf darf die spezielle Regel nicht ueberschreiben', () => {
+  /** Die Kette aus der Heizungs-Mapping-Datei: erst "2er Bogen", dann der
+   *  allgemeine "Bogen", beide mode "add". Objekt 1 hat 5D_Typ = "2er Bogen". */
+  const regeln = (): AttributeRule[] => [
+    {
+      id: 'speziell', conditions: [], entityIds: [], match: [{ attribute: '5D_Typ', value: '*2er Bogen*' }],
+      action: { kind: 'add', target: { psetName: '5D', propName: '5D_Bauteilname' },
+        value: '2er Bogen', ...TEXT, mode: 'add' },
+      enabled: true,
+    },
+    {
+      id: 'allgemein', conditions: [], entityIds: [], match: [{ attribute: '5D_Typ', value: '*Bogen*' }],
+      action: { kind: 'add', target: { psetName: '5D', propName: '5D_Bauteilname' },
+        value: 'Bogen', ...TEXT, mode: 'add' },
+      enabled: true,
+    },
+  ];
+
+  /** Modell: 5D_Typ steht fest, 5D_Bauteilname kommt aus `bereits`. */
+  const modell = (bereits: string | null) => {
+    const eff: PropReader = (_id, pset, prop) =>
+      (pset === '5D' && prop === '5D_Bauteilname' ? bereits : null);
+    const effByName = (_id: number, prop: string) =>
+      (prop === '5D_Typ' ? '2er Bogen' : prop === '5D_Bauteilname' ? bereits : null);
+    // Die Datei kennt keine 5D_*-Attribute — so ist es im echten Modell auch.
+    const datei: PropReader = () => null;
+    return { eff, effByName, datei };
+  };
+
+  it('erster Lauf: die spezielle Regel gewinnt', () => {
+    const { eff, effByName, datei } = modell(null);
+    const w = planWrites(regeln(), eff, effByName, [1], datei);
+    assert.deepStrictEqual(w.map((x) => x.value), ['2er Bogen'],
+      'die allgemeine Regel tritt zurueck, weil die spezielle geschrieben hat');
+  });
+
+  it('zweiter Lauf: sie gewinnt WIEDER, obwohl sie nichts zu schreiben hat', () => {
+    // Frueher stand hier "Bogen": die spezielle Regel hatte nichts zu tun,
+    // landete damit nicht in der live-Schicht, und die allgemeine Regel sah
+    // das Attribut gegen die Datei als leer an.
+    const { eff, effByName, datei } = modell('2er Bogen');
+    const w = planWrites(regeln(), eff, effByName, [1], datei);
+    assert.deepStrictEqual(w, [], 'nichts zu tun — und vor allem kein "Bogen"');
+  });
+});

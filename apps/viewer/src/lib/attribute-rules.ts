@@ -375,6 +375,16 @@ export function planWrites(
     const current = read(w.entityId, w.psetName, w.propName);
     if (w.op === 'set' && current === String(w.value ?? '')) {
       if (currentStat) currentStat.unchanged += 1;
+      // Nothing to write — but the later rules still have to SEE this value.
+      // `add` is judged against the file (so editing an applied rule is not
+      // frozen by its own output), and the file never has a `5D_*` attribute,
+      // so without this the next rule reads the attribute as empty and
+      // overwrites what this one just confirmed. That is why a re-apply used
+      // to turn `5D_Bauteilname = "2er Bogen"` back into "Bogen": the
+      // specific rule matched, had nothing to write, and the general
+      // `*Bogen*` rule after it then took over.
+      putLive(w.entityId, addrKey(w.psetName, w.propName), current, live);
+      putLive(w.entityId, w.propName, current, liveByName);
       return;
     }
     if (w.op === 'delete' && current === null) return;
