@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { isTypeEntityName } from './ifc-type-entity.js';
+import { ifcClassOf, isTypeEntityName } from './ifc-type-entity.js';
 
 describe('Typ-Entitaet erkennen', () => {
   it('nimmt die gewoehnlichen *Type-Klassen', () => {
@@ -44,5 +44,29 @@ describe('Typ-Entitaet erkennen', () => {
     assert.equal(isTypeEntityName(null), false);
     assert.equal(isTypeEntityName(undefined), false);
     assert.equal(isTypeEntityName('Unknown'), false);
+  });
+});
+
+describe('IFC-Klasse eines Objekts', () => {
+  const store = (indexKlasse: string | undefined, schemaKlasse: string | undefined) => ({
+    entityIndex: { byId: { get: () => (indexKlasse === undefined ? undefined : { type: indexKlasse }) } },
+    entities: { getTypeName: () => schemaKlasse },
+  });
+
+  it('nimmt den Index, wenn das Schema "Unknown" sagt', () => {
+    // Genau der gemessene Fall: im Browser antwortet getTypeName fuer die
+    // Typobjekte "Unknown", der Index kennt sie als IFCPIPEFITTINGTYPE.
+    assert.equal(ifcClassOf(store('IFCPIPEFITTINGTYPE', 'Unknown'), 410663), 'IFCPIPEFITTINGTYPE');
+    assert.equal(isTypeEntityName(ifcClassOf(store('IFCPIPEFITTINGTYPE', 'Unknown'), 410663)), true);
+  });
+
+  it('faellt auf das Schema zurueck, wenn der Index nichts hat', () => {
+    assert.equal(ifcClassOf(store(undefined, 'IfcWallType'), 1), 'IfcWallType');
+  });
+
+  it('vertraegt einen Store ohne Index und ohne Schema', () => {
+    assert.equal(ifcClassOf(store(undefined, undefined), 1), '');
+    assert.equal(ifcClassOf(null, 1), '');
+    assert.equal(ifcClassOf(undefined, 1), '');
   });
 });

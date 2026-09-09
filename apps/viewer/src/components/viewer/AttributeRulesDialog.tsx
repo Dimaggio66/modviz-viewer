@@ -46,7 +46,7 @@ import {
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
-import { isTypeEntityName } from '@/lib/ifc-type-entity';
+import { ifcClassOf, isTypeEntityName } from '@/lib/ifc-type-entity';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
   type ActionForm, type ActionKind,
@@ -413,7 +413,7 @@ export function AttributeRulesDialog({
       // `TGA Content Sanitär` the whole `Text` set of every fitting type
       // hangs there, `CAx Typ = "2er Bogen"` among it, and losing it turned
       // `5D_Typ` into the raw `Familie:Typ` string for most of the model.
-      if (store && isTypeEntityName(store.entities?.getTypeName?.(entityId))) {
+      if (store && isTypeEntityName(ifcClassOf(store, entityId))) {
         const ofType = extractTypeEntityOwnProperties(store, entityId) as Sets;
         if (ofType.length > 0) return ofType;
       }
