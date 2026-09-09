@@ -745,7 +745,11 @@ export function ObjectFilterPanel() {
             return '';
           };
           if (t === NONE_LABEL) attrFilters.push({ accessor, test: (v) => v === '' });
-          else if (test) attrFilters.push({ accessor, test });
+          // A query never matches an ABSENT value. The accessor answers `''`
+          // for an object that does not carry the attribute, and `*` compiles
+          // to `^.*$`, which matches the empty string — so `5D_DN = *` came
+          // back with all 754 objects instead of the 120 that have it.
+          else if (test) attrFilters.push({ accessor, test: (v) => v !== '' && test(v) });
           else {
             const allowed = new Set(rawValuesOf(row, t).map((x) => x.toLowerCase()));
             attrFilters.push({ accessor, test: (v) => allowed.has(v.toLowerCase()) });
