@@ -429,3 +429,43 @@ describe('IFC-Klasse in Bedingungen', () => {
     assert.equal(planWrites([r], read, readByName, [1]).length, 0);
   });
 });
+
+describe('cpiID ist unsere ifcGuid', () => {
+  const GUID = '2RAUXetKHBCA_0N2jUYzjx';
+  const read: PropReader = () => null;
+  const readByName = (_id: number, prop: string) => (prop === 'ifcGuid' ? GUID : null);
+
+  const regel = (attribut: string, wert: string): AttributeRule => ({
+    id: 'r', conditions: [], entityIds: [], match: [{ attribute: attribut, value: wert }],
+    action: { kind: 'add', target: { psetName: '5D', propName: 'X' }, value: 'ja', dataType: 'text', unit: '', mode: 'add' },
+    enabled: true,
+  });
+
+  it('loest eine Bedingung auf cpiID ueber die GlobalId auf', () => {
+    assert.equal(planWrites([regel('cpiID', GUID)], read, readByName, [1]).length, 1);
+  });
+
+  it('trifft nicht die falsche GlobalId', () => {
+    assert.equal(planWrites([regel('cpiID', 'ein-anderer-guid')], read, readByName, [1]).length, 0);
+  });
+
+  it('kopiert cpiID als Quelle', () => {
+    const r: AttributeRule = {
+      id: 'r', conditions: [], entityIds: [], match: [],
+      action: { kind: 'copy', source: { psetName: '', propName: 'cpiID' },
+        target: { psetName: '5D', propName: '5D_Guid' }, mode: 'add' },
+      enabled: true,
+    };
+    const w = planWrites([r], read, readByName, [1]);
+    assert.equal(w.length, 1);
+    assert.equal(w[0]?.value, GUID);
+  });
+
+  it('laesst dem Modell den Vortritt, wenn es selbst ein cpiID traegt', () => {
+    // Nach einem RIB-Roundtrip kann das Attribut wirklich am Objekt stehen.
+    const eigen = (_id: number, prop: string) =>
+      (prop === 'cpiID' ? 'eigener-wert' : prop === 'ifcGuid' ? GUID : null);
+    assert.equal(planWrites([regel('cpiID', 'eigener-wert')], read, eigen, [1]).length, 1);
+    assert.equal(planWrites([regel('cpiID', GUID)], read, eigen, [1]).length, 0);
+  });
+});

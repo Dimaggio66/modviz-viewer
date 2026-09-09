@@ -253,6 +253,20 @@ function allowedByMode(mode: WriteMode, current: string | null): boolean {
  * property by NAME across whatever set carries it, which is what the
  * `@Attr{…}` templates address (they name an attribute, not a set).
  */
+/**
+ * Names a RIBiTWO mapping file uses for things this viewer calls something
+ * else, lower-cased on the left.
+ *
+ * `cpiID` is the id RIB's CPI import gives every object, and for an IFC import
+ * that is the GlobalId — the same value our `ifcGuid` answers. Nothing here
+ * knew the name, so a rule keyed on it matched no object at all. Mapping files
+ * mostly write `cpiID="*"` ("every object"), which the importer already drops,
+ * so this is about the rules that name a concrete id.
+ */
+const MAPPING_ALIASES: Record<string, string> = {
+  cpiid: 'ifcGuid',
+};
+
 /** Attributes whose value is an IFC class name, and which therefore have the
  *  two spellings `IfcPipeFitting` (ours) and `PIPEFITTING` (RIBiTWO's). */
 function isIfcClassCondition(attribute: string): boolean {
@@ -301,7 +315,13 @@ export function planWrites(
   };
   const readByName = (id: number, prop: string) => {
     const k = nameKey(id, prop);
-    return liveByName.has(k) ? liveByName.get(k)! : baseReadByName(id, prop);
+    if (liveByName.has(k)) return liveByName.get(k)!;
+    const direct = baseReadByName(id, prop);
+    if (direct !== null) return direct;
+    // The model itself wins; only when it has nothing under RIBiTWO's own name
+    // do we answer with what that name means here.
+    const alias = MAPPING_ALIASES[prop.toLowerCase()];
+    return alias ? baseReadByName(id, alias) : null;
   };
   /** The value the write MODE is judged against — see `fileRead`. */
   const readForMode: PropReader = (id, pset, prop) => {
