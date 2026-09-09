@@ -850,7 +850,7 @@ export function AttributeRulesDialog({
                 {persisted ? (
                   <><Check className="h-3 w-3 text-primary" /> Saved with the project</>
                 ) : (
-                  <span className="text-red-500">Rules could not be saved (browser storage unavailable)</span>
+                  <span className="text-red-500">Rules could not be saved in full — see the console</span>
                 )}
               </span>
             )}

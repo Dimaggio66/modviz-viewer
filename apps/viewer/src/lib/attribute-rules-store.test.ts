@@ -124,3 +124,23 @@ describe('attribute-rules-store', () => {
     assert.strictEqual(projectKeyFor('a.ifc', 100), projectKeyFor('a.ifc', 100));
   });
 });
+
+describe('Regelanzahl', () => {
+  beforeEach(() => { installStorage(); });
+
+  it('haelt eine ganze importierte Mapping-Datei', () => {
+    // Attributregeln Heizung 1+2 sind zusammen 339 Regeln, ein Projekt mit
+    // mehreren Importen kam auf 539. Bei 200 fielen die uebrigen lautlos weg.
+    const viele = Array.from({ length: 539 }, (_, i) => rule(`r${i}`, []));
+    assert.strictEqual(saveRules(KEY, viele), true);
+    assert.strictEqual(loadRules(KEY).length, 539);
+    assert.strictEqual(loadRules(KEY)[538]?.id, 'r538', 'die letzte Regel ueberlebt');
+  });
+
+  it('meldet es, wenn doch abgeschnitten werden muss', () => {
+    const zuViele = Array.from({ length: __internal.MAX_RULES_PER_PROJECT + 1 }, (_, i) => rule(`r${i}`, []));
+    assert.strictEqual(saveRules(KEY, zuViele), false, 'kein "gespeichert" fuer einen Teil');
+    assert.strictEqual(loadRules(KEY).length, __internal.MAX_RULES_PER_PROJECT);
+    assert.strictEqual(saveApplied(KEY, zuViele), false);
+  });
+});

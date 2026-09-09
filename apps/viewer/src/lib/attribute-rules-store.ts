@@ -24,7 +24,19 @@ import type { AttributeRule } from './attribute-rules.js';
 const STORAGE_KEY = 'ifc-lite:attribute-rules';
 /** Guard against filling storage with a giant id list (~8 bytes per id). */
 const MAX_IDS_PER_RULE = 200_000;
-const MAX_RULES_PER_PROJECT = 200;
+/**
+ * Upper bound on rules per project. 200 was chosen when a rule was something
+ * you collected by hand from the filter, a handful at a time. An imported
+ * RIBiTWO mapping is nothing like that: `Attributregeln Heizung 1+2` alone is
+ * 339 rules, and a project that had accumulated several imports reached 539.
+ * The old bound silently dropped everything past the 200th — the rules stayed
+ * in the open dialog and were gone after the next load.
+ *
+ * The real limit is the browser's storage quota, which `writeEntry` already
+ * catches. This is only here so a pathological input cannot try to serialise
+ * something absurd first.
+ */
+const MAX_RULES_PER_PROJECT = 5_000;
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -103,11 +115,20 @@ export function loadApplied(projectKey: string): AttributeRule[] {
   return sane(readCatalog(ls)[projectKey]?.applied);
 }
 
-function trim(rules: readonly AttributeRule[]): AttributeRule[] {
-  return rules.slice(0, MAX_RULES_PER_PROJECT).map((r) => ({
-    ...r,
-    entityIds: r.entityIds.length > MAX_IDS_PER_RULE ? r.entityIds.slice(0, MAX_IDS_PER_RULE) : r.entityIds,
-  }));
+/** Trimmed rules, and whether anything had to be dropped — a caller must not
+ *  report a partial save as a save. */
+function trim(rules: readonly AttributeRule[]): { rules: AttributeRule[]; dropped: number } {
+  const dropped = Math.max(0, rules.length - MAX_RULES_PER_PROJECT);
+  if (dropped > 0) {
+    console.warn(`[ifc-lite] ${dropped} of ${rules.length} attribute rules exceed the per-project limit of ${MAX_RULES_PER_PROJECT} and were not stored.`);
+  }
+  return {
+    dropped,
+    rules: rules.slice(0, MAX_RULES_PER_PROJECT).map((r) => ({
+      ...r,
+      entityIds: r.entityIds.length > MAX_IDS_PER_RULE ? r.entityIds.slice(0, MAX_IDS_PER_RULE) : r.entityIds,
+    })),
+  };
 }
 
 /** Read-modify-write one project entry, leaving the other field intact. */
@@ -135,12 +156,14 @@ function writeEntry(projectKey: string, patch: (e: { rules: AttributeRule[]; app
  * the caller must not claim the rules were saved in that case.
  */
 export function saveRules(projectKey: string, rules: readonly AttributeRule[]): boolean {
-  return writeEntry(projectKey, (e) => { e.rules = trim(rules); });
+  const t = trim(rules);
+  return writeEntry(projectKey, (e) => { e.rules = t.rules; }) && t.dropped === 0;
 }
 
 /** Record what the just-finished apply put into the model. */
 export function saveApplied(projectKey: string, applied: readonly AttributeRule[]): boolean {
-  return writeEntry(projectKey, (e) => { e.applied = trim(applied); });
+  const t = trim(applied);
+  return writeEntry(projectKey, (e) => { e.applied = t.rules; }) && t.dropped === 0;
 }
 
 /** Drop every saved rule for one project, including the applied snapshot. */
