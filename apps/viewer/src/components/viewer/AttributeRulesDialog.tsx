@@ -46,6 +46,7 @@ import {
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
+import { isTypeEntityName } from '@/lib/ifc-type-entity';
 import {
   ActionEditor, EMPTY_ACTION_FORM, refKey,
   type ActionForm, type ActionKind,
@@ -415,7 +416,7 @@ export function AttributeRulesDialog({
       // this, every attribute that lives only on the type is invisible here
       // and a rule built on it matches nothing.
       const typeName = store.entities?.getTypeName?.(entityId) ?? '';
-      return typeName.endsWith('Type') ? (extractTypeEntityOwnProperties(store, entityId) as Sets) : own;
+      return isTypeEntityName(typeName) ? (extractTypeEntityOwnProperties(store, entityId) as Sets) : own;
     };
     const typeSetCache = new Map<number, Sets>();
     const baseSets = (entityId: number) => {

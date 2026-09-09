@@ -9,6 +9,7 @@ import {
   extractTypeEntityOwnProperties,
   type IfcDataStore,
 } from '@ifc-lite/parser';
+import { isTypeEntityName } from '@/lib/ifc-type-entity';
 
 /**
  * Resolve an entity's BASE (pre-overlay) value for one of the IfcRoot /
@@ -55,7 +56,7 @@ export function configureMutationView(
   if (dataStore.source?.length > 0) {
     mutationView.setOnDemandExtractor((entityId: number) => {
       const typeName = dataStore.entities?.getTypeName(entityId) ?? '';
-      if (typeName.endsWith('Type')) {
+      if (isTypeEntityName(typeName)) {
         return extractTypeEntityOwnProperties(dataStore, entityId);
       }
       return extractPropertiesOnDemand(dataStore, entityId);
