@@ -757,6 +757,19 @@ export function ObjectFilterPanel() {
           for (const s of row.setNames) andRules.push(Rule.property(s, row.propName, 'isNotSet', ''));
           continue;
         }
+        if (t === '*') {
+          // `*` asks whether the attribute HAS a value — RIBiTWO reads it that
+          // way and so does the rule engine. Enumerating the row's known
+          // values only does the same job while that list is complete, and for
+          // an attribute a rule has just created it need not be. An empty list
+          // then fell through the `continue` below, dropping the condition
+          // altogether: `5D_DN = *` answered with all 754 objects where iTWO
+          // showed the 120 that carry it.
+          const present: FilterRule[] = [];
+          for (const s of row.setNames) present.push(Rule.property(s, row.propName, 'isSet', ''));
+          addGroup(present);
+          continue;
+        }
         const vals = test ? resolveOptionValues(row.options, test) : rawValuesOf(row, t);
         if (vals.length === 0) continue;
         const group: FilterRule[] = [];
