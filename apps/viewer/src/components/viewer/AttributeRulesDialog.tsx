@@ -405,18 +405,22 @@ export function AttributeRulesDialog({
     // columnar table empty by design (issue #577).
     const baseCache = new Map<number, Sets>();
     const ownSets = (entityId: number): Sets => {
+      // A TYPE entity's own HasPropertySets are not exposed through the
+      // occurrence extractor, so ask the type extractor FIRST. Asking it last
+      // — only once the occurrence paths came back empty — made the answer
+      // depend on what those paths happen to return for a type entity, and
+      // whatever that is, it is not the type's property sets. In
+      // `TGA Content Sanitär` the whole `Text` set of every fitting type
+      // hangs there, `CAx Typ = "2er Bogen"` among it, and losing it turned
+      // `5D_Typ` into the raw `Familie:Typ` string for most of the model.
+      if (store && isTypeEntityName(store.entities?.getTypeName?.(entityId))) {
+        const ofType = extractTypeEntityOwnProperties(store, entityId) as Sets;
+        if (ofType.length > 0) return ofType;
+      }
       const table = store?.properties;
       const fromTable = table && table.count !== 0 ? table.getForEntity?.(entityId) : undefined;
       if (fromTable && fromTable.length > 0) return fromTable;
-      const own = store?.getProperties?.(entityId) ?? [];
-      if (own.length > 0 || !store) return own;
-      // A TYPE entity's own HasPropertySets are not exposed through the
-      // occurrence extractor — `getProperties` returns nothing for it (the
-      // same reason configureMutationView installs a separate path). Without
-      // this, every attribute that lives only on the type is invisible here
-      // and a rule built on it matches nothing.
-      const typeName = store.entities?.getTypeName?.(entityId) ?? '';
-      return isTypeEntityName(typeName) ? (extractTypeEntityOwnProperties(store, entityId) as Sets) : own;
+      return store?.getProperties?.(entityId) ?? [];
     };
     const typeSetCache = new Map<number, Sets>();
     const baseSets = (entityId: number) => {
