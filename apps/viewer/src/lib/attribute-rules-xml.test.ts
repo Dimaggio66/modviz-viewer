@@ -75,7 +75,12 @@ describe('importMappingXml', () => {
         <out property="RevitTypeName" name="5D_Typ" mode="Add" />
       </map>`), 'P');
     assert.strictEqual(rules.length, 2);
-    assert.deepStrictEqual(rules.map((r) => r.match), [[], []], 'cpiID="*" is not a real condition');
+    // `cpiID="*"` is kept: `*` means "has a value", and cpiID is the GlobalId,
+    // so it selects every object that carries one — not quite every object.
+    assert.deepStrictEqual(
+      rules.map((r) => r.match),
+      [[{ attribute: 'cpiID', value: '*' }], [{ attribute: 'cpiID', value: '*' }]],
+    );
   });
 
   it('ANDs several <in> and decodes entities', () => {
@@ -103,11 +108,13 @@ describe('importMappingXml', () => {
 });
 
 describe('imported mappings chain', () => {
-  /** One object whose only base attribute is the Revit type name. */
+  /** One object with the Revit type name and, like every IfcRoot, a GlobalId —
+   *  `cpiID="*"` is a real condition and asks for exactly that. */
   const base = new Map<string, string>([['1|Andere|Typenname', 'IST_ALG_STB-240']]);
   const read: PropReader = (id, pset, prop) => base.get(`${id}|${pset}|${prop}`) ?? null;
   const readByName = (id: number, prop: string) =>
-    [...base].find(([k]) => k.startsWith(`${id}|`) && k.endsWith(`|${prop}`))?.[1] ?? null;
+    (prop === 'ifcGuid' ? '2RAUXetKHBCA_0N2jUYzjx' : null)
+    ?? [...base].find(([k]) => k.startsWith(`${id}|`) && k.endsWith(`|${prop}`))?.[1] ?? null;
 
   it('a later rule matches what an earlier rule wrote', () => {
     // Rule 1 copies Andere\Typenname into 5D_Typ; rule 2 keys off 5D_Typ.
@@ -127,6 +134,20 @@ describe('imported mappings chain', () => {
       [['5D_Typ', 'IST_ALG_STB-240'], ['5D_Bauteilname', 'Innenstützen']],
       'the second rule only fires if it can see the first rule\'s output',
     );
+  });
+
+  it('cpiID="*" verlangt eine GlobalId und ueberspringt Objekte ohne', () => {
+    // RIBiTWO liest `*` als "hat einen Wert". In DHL_Leer_R2026 stehen zwei
+    // IfcTypeProduct ohne GlobalId — die laesst iTWO aus, wir schrieben sie an.
+    const { rules } = importMappingXml(wrap(`
+      <map source="Project">
+        <in property="cpiID" datatype="xs:ID" value="*" />
+        <out property="5D_X" value="ja" mode="Add" />
+      </map>`), 'P');
+    assert.strictEqual(planWrites(rules, read, readByName, [1]).length, 1, 'mit GlobalId');
+    const ohneGuid = (_id: number, prop: string) =>
+      (prop === 'Typenname' ? 'IST_ALG_STB-240' : null);
+    assert.strictEqual(planWrites(rules, read, ohneGuid, [1]).length, 0, 'ohne GlobalId');
   });
 
   it('a rule whose condition no object satisfies writes nothing', () => {

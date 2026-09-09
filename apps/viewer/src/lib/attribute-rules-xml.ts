@@ -155,9 +155,11 @@ export function importMappingXml(xml: string, defaultPset = 'Pset_ModViz'): Impo
       const a = attrsOf(tag[0]);
       const property = a.property?.trim();
       if (!property) continue;
-      // `value="*"` on the id column is RIBiTWO's "every object" — it selects
-      // nothing in particular, so it would only cost a scan.
-      if (property.toLowerCase() === 'cpiid' && (a.value ?? '*').trim() === '*') continue;
+      // `cpiID="*"` was dropped here as "every object". It is not quite that:
+      // `*` means the attribute must HAVE a value, and cpiID is the GlobalId,
+      // so it selects every object that carries one. Nearly always the whole
+      // model — but `DHL_Leer_R2026` holds two IfcTypeProduct without a
+      // GlobalId, which RIBiTWO would skip and we were writing to.
       match.push({ attribute: property, value: (a.value ?? '*').trim() || '*' });
     }
 
