@@ -204,6 +204,20 @@ export interface RuleWrite {
   valueType?: PropertyValueType;
 }
 
+/**
+ * Per-rule counters, filled only when `planWrites` is handed a map.
+ *
+ * `matched` is how many objects the rule's CONDITION selected, `wrote` how
+ * many writes its ACTION then produced. The gap between the two is where a
+ * rule that "does nothing" actually stops: no match at all means the condition
+ * is wrong, matched-but-nothing-written means the source was empty or the
+ * write mode stepped aside.
+ */
+export interface RulePlanStat {
+  matched: number;
+  wrote: number;
+}
+
 /** Reads the current value of one (pset, prop) for an entity, or null. */
 export type PropReader = (entityId: number, psetName: string, propName: string) => string | null;
 
@@ -297,6 +311,8 @@ export function planWrites(
    * Defaults to `baseRead`, which is the previous behaviour.
    */
   fileRead?: PropReader,
+  /** Filled per rule id when given — see {@link RulePlanStat}. */
+  stats?: Map<string, RulePlanStat>,
 ): RuleWrite[] {
   const writes: RuleWrite[] = [];
 
@@ -345,6 +361,7 @@ export function planWrites(
     return (fileRead ?? baseRead)(id, pset, prop);
   };
   let currentRuleId = '';
+  let currentStat: RulePlanStat | null = null;
   const record = (w: Omit<RuleWrite, 'ruleId'>) => {
     // Only plan what actually CHANGES. Re-applying a rule set whose result is
     // already in the model must be a no-op, not 23k identical writes: each one
@@ -356,6 +373,7 @@ export function planWrites(
     putLive(w.entityId, addrKey(w.psetName, w.propName), v, live);
     putLive(w.entityId, w.propName, v, liveByName);
     writes.push({ ...w, ruleId: currentRuleId });
+    if (currentStat) currentStat.wrote += 1;
   };
 
   /**
@@ -416,6 +434,11 @@ export function planWrites(
   for (const rule of rules) {
     if (!rule.enabled) continue;
     currentRuleId = rule.id;
+    currentStat = null;
+    if (stats) {
+      currentStat = { matched: 0, wrote: 0 };
+      stats.set(rule.id, currentStat);
+    }
     const a = rule.action;
     const conds = compileConditions(rule);
     // A rule that carries its own conditions resolves them against the whole
@@ -428,6 +451,7 @@ export function planWrites(
       : rule.entityIds;
     for (const entityId of candidates) {
       if (!matches(conds, entityId)) continue;
+      if (currentStat) currentStat.matched += 1;
       switch (a.kind) {
         case 'add': {
           if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;

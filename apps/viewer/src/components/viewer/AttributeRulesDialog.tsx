@@ -42,7 +42,7 @@ import { useViewerStore } from '@/store';
 import {
   ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, refKeyOf, staleTargetRefs,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
-  type RuleEditField, type RuleMatch, type RuleTableRow,
+  type RuleEditField, type RuleMatch, type RulePlanStat, type RuleTableRow,
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
@@ -489,9 +489,9 @@ export function AttributeRulesDialog({
    * freeze a rule after its first run.
    */
   const plan = useCallback(
-    (rules: readonly AttributeRule[]) =>
+    (rules: readonly AttributeRule[], stats?: Map<string, RulePlanStat>) =>
       (store && rules.length > 0
-        ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe, readers.read)
+        ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe, readers.read, stats)
         : []),
     [store, readers, universe],
   );
@@ -567,7 +567,13 @@ export function AttributeRulesDialog({
       // object filter forever.
       let reverted = 0;
       const stale = rollbackTargets;
-      const liveWrites = plan(pending);
+      // Per-rule counters for the run, printed once when it is done. A rule
+      // that writes nothing is the hard thing to diagnose from the table
+      // alone: the count there is only the writes, so "0" reads the same
+      // whether the condition matched nobody or matched everybody and the
+      // source was empty. `matched` separates the two.
+      const stats = new Map<string, RulePlanStat>();
+      const liveWrites = plan(pending, stats);
       const total = stale.length + liveWrites.length;
       let done = 0;
       // Yield to the browser every so often, otherwise a 20k-write run blocks
@@ -627,6 +633,16 @@ export function AttributeRulesDialog({
       // whatever gets deleted or switched off in the meantime.
       saveApplied(projectKey, next.filter((r) => r.enabled));
       if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', sourceFilter: '', newName: '', deleteKeys: [] });
+      console.table(pending.map((r, i) => {
+        const st = stats.get(r.id) ?? { matched: 0, wrote: 0 };
+        return {
+          '#': i + 1,
+          Aktion: ACTION_LABELS[r.action.kind],
+          Bedingung: r.match ? describeConditions(r.match) : `${r.entityIds.length} objects from the filter`,
+          getroffen: st.matched,
+          geschrieben: st.wrote,
+        };
+      }));
       const undone = reverted > 0 ? `, ${reverted.toLocaleString()} rolled back` : '';
       toast.success(`Applied ${activeRuleCount} rule(s): ${ok.toLocaleString()} attribute write(s)${undone}.`);
     } finally {

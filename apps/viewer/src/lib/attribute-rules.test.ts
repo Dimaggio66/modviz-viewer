@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import { PropertyValueType } from '@ifc-lite/data';
 import {
   planWrites,
+  type RulePlanStat,
   resolveTemplate,
   templateTokens,
   describeAction,
@@ -467,5 +468,41 @@ describe('cpiID ist unsere ifcGuid', () => {
       (prop === 'cpiID' ? 'eigener-wert' : prop === 'ifcGuid' ? GUID : null);
     assert.equal(planWrites([regel('cpiID', 'eigener-wert')], read, eigen, [1]).length, 1);
     assert.equal(planWrites([regel('cpiID', GUID)], read, eigen, [1]).length, 0);
+  });
+});
+
+describe('Zaehler je Regel', () => {
+  // Zwei Objekte: 1 traegt Pset_A.Status, 2 nicht.
+  const ziel = { psetName: '5D', propName: 'X' };
+
+  it('trennt "Bedingung traf niemanden" von "Quelle war leer"', () => {
+    const kopie: AttributeRule = {
+      id: 'kopie', conditions: [], entityIds: [], match: [],
+      action: { kind: 'copy', source: { psetName: 'Pset_A', propName: 'Status' }, target: ziel, mode: 'add' },
+      enabled: true,
+    };
+    const nieTrifft: AttributeRule = {
+      id: 'nie', conditions: [], entityIds: [],
+      match: [{ attribute: 'Pset_A\Status', value: 'gibt-es-nicht' }],
+      action: { kind: 'add', target: ziel, value: 'y', ...TEXT, mode: 'addOverwrite' },
+      enabled: true,
+    };
+    const stats = new Map<string, RulePlanStat>();
+    planWrites([kopie, nieTrifft], read, readByName, [1, 2], undefined, stats);
+
+    // Die Kopie trifft beide Objekte, kann aber nur bei einem lesen.
+    assert.deepStrictEqual(stats.get('kopie'), { matched: 2, wrote: 1 },
+      'getroffen 2, geschrieben 1 — die Quelle fehlt auf Objekt 2');
+    // Die zweite Regel scheitert schon an der Bedingung.
+    assert.deepStrictEqual(stats.get('nie'), { matched: 0, wrote: 0 });
+  });
+
+  it('kostet nichts, wenn keine Map uebergeben wird', () => {
+    const r: AttributeRule = {
+      id: 'r', conditions: [], entityIds: [], match: [],
+      action: { kind: 'add', target: ziel, value: 'y', ...TEXT, mode: 'addOverwrite' },
+      enabled: true,
+    };
+    assert.strictEqual(planWrites([r], read, readByName, [1, 2]).length, 2);
   });
 });
