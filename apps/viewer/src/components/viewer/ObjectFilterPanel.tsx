@@ -59,6 +59,7 @@ import { toGlobalIdFromModels } from '@/store/globalId';
 import { AttributeRulesDialog } from './AttributeRulesDialog';
 import { AusstattungDialog } from './AusstattungDialog';
 import { projectKeyFor } from '@/lib/attribute-rules-store';
+import { isTypeEntityName } from '@/lib/ifc-type-entity';
 import type { PropRef } from '@/lib/attribute-rules';
 import { judgeOverlay } from '@/lib/search/attribute-liveness';
 
@@ -421,6 +422,13 @@ export function ObjectFilterPanel() {
     const objectIds: number[] = [];
     if (byType) {
       for (const [typeName, ids] of byType) {
+        // Type objects are templates, not elements — `isScopeTargetType` keeps
+        // them out for the same reason. Counting them doubled every quantity
+        // the moment their own property sets became readable: a fitting and
+        // its type carry the same `CAx Typ`, so `5D_Bauteilname = "2er Bogen"`
+        // matched 20 where the model holds 10, and the 3D view showed 10
+        // because a template has no geometry.
+        if (isTypeEntityName(typeName)) continue;
         if (isObjectDefinitionClass(typeName)) for (const id of ids) objectIds.push(id);
       }
     }
