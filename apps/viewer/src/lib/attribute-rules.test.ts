@@ -491,12 +491,30 @@ describe('Zaehler je Regel', () => {
     planWrites([kopie, nieTrifft], read, readByName, [1, 2], undefined, stats);
 
     // Die Kopie trifft beide Objekte, kann aber nur bei einem lesen.
-    assert.deepStrictEqual(stats.get('kopie'), { matched: 2, wrote: 1 },
+    assert.deepStrictEqual(stats.get('kopie'), { matched: 2, wrote: 1, sourceMissing: 1, unchanged: 0 },
       'getroffen 2, geschrieben 1 — die Quelle fehlt auf Objekt 2');
     // Die zweite Regel scheitert schon an der Bedingung.
-    assert.deepStrictEqual(stats.get('nie'), { matched: 0, wrote: 0 });
+    assert.deepStrictEqual(stats.get('nie'), { matched: 0, wrote: 0, sourceMissing: 0, unchanged: 0 });
   });
 
+
+  it('trennt "schreibt nichts" von "steht schon so drin"', () => {
+    // Der Fall, der die Diagnose blockierte: eine Regel schrieb 0, und das
+    // konnte "Quelle nicht gefunden" ODER "Wert ist schon da" heissen.
+    const schonDa: AttributeRule = {
+      id: 'da', conditions: [], entityIds: [], match: [],
+      action: { kind: 'add', target: { psetName: 'Pset_A', propName: 'Status' },
+        value: 'Draft', ...TEXT, mode: 'addOverwrite' },
+      enabled: true,
+    };
+    const stats = new Map<string, RulePlanStat>();
+    planWrites([schonDa], read, readByName, [1, 2], undefined, stats);
+    const st = stats.get('da')!;
+    assert.strictEqual(st.matched, 2);
+    assert.strictEqual(st.unchanged, 1, 'Objekt 1 traegt "Draft" bereits');
+    assert.strictEqual(st.wrote, 1, 'nur Objekt 2 aendert sich');
+    assert.strictEqual(st.sourceMissing, 0, 'kein Kopieren, also keine fehlende Quelle');
+  });
   it('kostet nichts, wenn keine Map uebergeben wird', () => {
     const r: AttributeRule = {
       id: 'r', conditions: [], entityIds: [], match: [],

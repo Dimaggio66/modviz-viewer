@@ -216,6 +216,12 @@ export interface RuleWrite {
 export interface RulePlanStat {
   matched: number;
   wrote: number;
+  /** Matched, but the attribute being copied had no value on the object. */
+  sourceMissing: number;
+  /** Matched and readable, but the value is already what the rule writes.
+   *  A re-apply is mostly this — without it, `wrote: 0` reads the same as a
+   *  rule whose source cannot be found at all. */
+  unchanged: number;
 }
 
 /** Reads the current value of one (pset, prop) for an entity, or null. */
@@ -367,7 +373,10 @@ export function planWrites(
     // already in the model must be a no-op, not 23k identical writes: each one
     // would cost a store update and an undo entry for nothing.
     const current = read(w.entityId, w.psetName, w.propName);
-    if (w.op === 'set' && current === String(w.value ?? '')) return;
+    if (w.op === 'set' && current === String(w.value ?? '')) {
+      if (currentStat) currentStat.unchanged += 1;
+      return;
+    }
     if (w.op === 'delete' && current === null) return;
     const v = w.op === 'delete' ? null : String(w.value ?? '');
     putLive(w.entityId, addrKey(w.psetName, w.propName), v, live);
@@ -436,7 +445,7 @@ export function planWrites(
     currentRuleId = rule.id;
     currentStat = null;
     if (stats) {
-      currentStat = { matched: 0, wrote: 0 };
+      currentStat = { matched: 0, wrote: 0, sourceMissing: 0, unchanged: 0 };
       stats.set(rule.id, currentStat);
     }
     const a = rule.action;
@@ -487,7 +496,10 @@ export function planWrites(
           const value = a.source.psetName === ''
             ? readByName(entityId, a.source.propName)
             : read(entityId, a.source.psetName, a.source.propName);
-          if (value === null || value === '') break;
+          if (value === null || value === '') {
+            if (currentStat) currentStat.sourceMissing += 1;
+            break;
+          }
           if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;
           record({ entityId, op: 'set', ...a.target, value, valueType: PropertyValueType.Label });
           break;

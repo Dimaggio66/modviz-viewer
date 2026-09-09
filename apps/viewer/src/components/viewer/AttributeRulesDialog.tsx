@@ -638,12 +638,14 @@ export function AttributeRulesDialog({
       saveApplied(projectKey, next.filter((r) => r.enabled));
       if (draftRule) patch({ propName: '', value: '', template: '', sourceKey: '', sourceFilter: '', newName: '', deleteKeys: [] });
       console.table(pending.map((r, i) => {
-        const st = stats.get(r.id) ?? { matched: 0, wrote: 0 };
+        const st = stats.get(r.id) ?? { matched: 0, wrote: 0, sourceMissing: 0, unchanged: 0 };
         return {
           '#': i + 1,
           Aktion: ACTION_LABELS[r.action.kind],
           Bedingung: r.match ? describeConditions(r.match) : `${r.entityIds.length} objects from the filter`,
           getroffen: st.matched,
+          ohneQuelle: st.sourceMissing,
+          unveraendert: st.unchanged,
           geschrieben: st.wrote,
         };
       }));
