@@ -41,6 +41,7 @@ import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
   ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, refKeyOf, staleTargetRefs,
+  DEFAULT_TARGET_PSET,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
   type RuleEditField, type RuleMatch, type RulePlanStat, type RuleTableRow,
 } from '@/lib/attribute-rules';
@@ -362,6 +363,32 @@ export function AttributeRulesDialog({
    * stores). Sets are cached per entity for one dialog session, since planning
    * re-reads the same entities for every rule.
    */
+  /**
+   * The property sets the rules themselves write into.
+   *
+   * RIBiTWO resolves a bare attribute name against its own set-less CPI
+   * attributes and the ifc-level parameters — NOT against the model's property
+   * sets. Measured on TGA Content Sanitär: searching the model's sets gave
+   * `5D_Durchmesser` on 126 objects with the values 0 / 21.3 / 33.7 / 100,
+   * because a bare `Dämmungsstärke außen` found `Isolierung\Dämmungsstärke
+   * außen = 0` and blocked the later, qualified rule. Not searching them gives
+   * 122 objects and 15, 20, 25, 42.4, 50, 70, 80, 90, 100, 125, 150, 200, 250
+   * — iTWO's count and iTWO's values, exactly.
+   *
+   * Our `5D_*` have to live in a set because IFC has no set-less property, so
+   * those sets stay readable by bare name; only the model's own do not.
+   */
+  const outputPsets = useMemo(() => {
+    const out = new Set<string>([DEFAULT_TARGET_PSET]);
+    for (const r of rules) {
+      const a = r.action;
+      if (a.kind === 'add' || a.kind === 'compose' || a.kind === 'copy') out.add(a.target.psetName);
+      else if (a.kind === 'rename') out.add(a.source.psetName);
+      else if (a.kind === 'delete') for (const t of a.targets) out.add(t.psetName);
+    }
+    return out;
+  }, [rules]);
+
   const readers = useMemo(() => {
     type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
     const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v));
@@ -392,6 +419,8 @@ export function AttributeRulesDialog({
       };
       const readByName = (entityId: number, prop: string): string | null => {
         for (const set of setsOf(entityId)) {
+          // Only what the rules themselves wrote — see `outputPsets`.
+          if (!outputPsets.has(set.name)) continue;
           for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
         }
         // Not a property: mapping files also name ifc-level parameters here.
@@ -465,7 +494,7 @@ export function AttributeRulesDialog({
     return { read: base.read, readByName: base.readByName, effective };
     // `open` is a dependency so each time the dialog opens it starts from
     // fresh values rather than a cache filled before the last apply.
-  }, [store, open, readIfcParam, modelId, getMutationView]);
+  }, [store, open, readIfcParam, modelId, getMutationView, outputPsets]);
   readersRef.current = readers;
 
   /**
