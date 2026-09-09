@@ -304,18 +304,30 @@ export function planWrites(
   // produced — the mapping files depend on it (`5D_Typ` is created by one rule
   // and matched by dozens after it). Keyed by address and, separately, by bare
   // name, since conditions address attributes both ways.
-  const live = new Map<string, string | null>();
-  const liveByName = new Map<string, string | null>();
-  const addrKey = (id: number, pset: string, prop: string) => `${id}|${pset}|${prop}`;
-  const nameKey = (id: number, prop: string) => `${id}|${prop}`;
+  //
+  // Nested by entity rather than keyed on a `${id}|${prop}` string: a full
+  // apply asks 33 million times, and building and hashing that many keys cost
+  // more than the lookups they serve.
+  const live = new Map<number, Map<string, string | null>>();
+  const liveByName = new Map<number, Map<string, string | null>>();
+  const addrKey = (pset: string, prop: string) => `${pset}\u0000${prop}`;
+  const putLive = (id: number, key: string, value: string | null, into: typeof live) => {
+    let m = into.get(id);
+    if (!m) { m = new Map(); into.set(id, m); }
+    m.set(key, value);
+  };
 
   const read: PropReader = (id, pset, prop) => {
-    const k = addrKey(id, pset, prop);
-    return live.has(k) ? live.get(k)! : baseRead(id, pset, prop);
+    const m = live.get(id);
+    if (m !== undefined) {
+      const k = addrKey(pset, prop);
+      if (m.has(k)) return m.get(k)!;
+    }
+    return baseRead(id, pset, prop);
   };
   const readByName = (id: number, prop: string) => {
-    const k = nameKey(id, prop);
-    if (liveByName.has(k)) return liveByName.get(k)!;
+    const m = liveByName.get(id);
+    if (m !== undefined && m.has(prop)) return m.get(prop)!;
     const direct = baseReadByName(id, prop);
     if (direct !== null) return direct;
     // The model itself wins; only when it has nothing under RIBiTWO's own name
@@ -325,8 +337,11 @@ export function planWrites(
   };
   /** The value the write MODE is judged against — see `fileRead`. */
   const readForMode: PropReader = (id, pset, prop) => {
-    const k = addrKey(id, pset, prop);
-    if (live.has(k)) return live.get(k)!;
+    const m = live.get(id);
+    if (m !== undefined) {
+      const k = addrKey(pset, prop);
+      if (m.has(k)) return m.get(k)!;
+    }
     return (fileRead ?? baseRead)(id, pset, prop);
   };
   let currentRuleId = '';
@@ -338,26 +353,53 @@ export function planWrites(
     if (w.op === 'set' && current === String(w.value ?? '')) return;
     if (w.op === 'delete' && current === null) return;
     const v = w.op === 'delete' ? null : String(w.value ?? '');
-    live.set(addrKey(w.entityId, w.psetName, w.propName), v);
-    liveByName.set(nameKey(w.entityId, w.propName), v);
+    putLive(w.entityId, addrKey(w.psetName, w.propName), v, live);
+    putLive(w.entityId, w.propName, v, liveByName);
     writes.push({ ...w, ruleId: currentRuleId });
   };
 
-  /** `Pset\Property` addresses one set; a bare name is looked up across sets. */
-  const readAttribute = (id: number, attribute: string): string | null => {
-    const sep = attribute.indexOf('\\');
-    return sep >= 0
-      ? read(id, attribute.slice(0, sep), attribute.slice(sep + 1))
-      : readByName(id, attribute);
+  /**
+   * A condition with everything that depends only on the RULE worked out:
+   * the split address, whether it asks for absence, the compiled matcher, and
+   * whether it names an IFC class.
+   *
+   * All of that used to be redone for every object. `compileValueMatch` builds
+   * regexes for a `*` or `||` value, and a mapping file is mostly those — with
+   * 417 conditions over 79,493 objects that is 27 million compilations for 417
+   * distinct answers.
+   */
+  interface Compiled {
+    /** null for a bare name, which is looked up across sets. */
+    psetName: string | null;
+    propName: string;
+    absent: boolean;
+    test: (value: string) => boolean;
+    ifcClass: boolean;
+  }
+
+  const compileConditions = (rule: AttributeRule): Compiled[] | null => {
+    if (!rule.match || rule.match.length === 0) return null;
+    return rule.match.map((c) => {
+      const sep = c.attribute.indexOf('\\');
+      return {
+        psetName: sep >= 0 ? c.attribute.slice(0, sep) : null,
+        propName: sep >= 0 ? c.attribute.slice(sep + 1) : c.attribute,
+        absent: meansAbsent(c.value),
+        test: compileValueMatch(c.value),
+        ifcClass: isIfcClassCondition(c.attribute),
+      };
+    });
   };
 
-  const matches = (rule: AttributeRule, id: number): boolean => {
-    if (!rule.match || rule.match.length === 0) return true;
-    return rule.match.every((c) => {
-      const value = readAttribute(id, c.attribute);
-      if (meansAbsent(c.value)) return value === null || value === '';
+  const matches = (conds: Compiled[] | null, id: number): boolean => {
+    if (conds === null) return true;
+    return conds.every((c) => {
+      const value = c.psetName === null
+        ? readByName(id, c.propName)
+        : read(id, c.psetName, c.propName);
+      if (c.absent) return value === null || value === '';
       if (value === null) return false;
-      const test = compileValueMatch(c.value);
+      const test = c.test;
       if (test(value)) return true;
       // RIBiTWO names the IFC class WITHOUT the `Ifc` prefix — its mapping
       // files say `ifcType="PIPEFITTING"` where we answer `IfcPipeFitting`.
@@ -367,7 +409,7 @@ export function planWrites(
       // IfcPipeFitting that should become `5D_Kategorie = Rohrformteile`.
       // Both spellings are accepted, so a rule collected from the object
       // filter (which stores `IfcCovering`) keeps working too.
-      return isIfcClassCondition(c.attribute) && /^ifc/i.test(value) && test(value.slice(3));
+      return c.ifcClass && /^ifc/i.test(value) && test(value.slice(3));
     });
   };
 
@@ -375,16 +417,17 @@ export function planWrites(
     if (!rule.enabled) continue;
     currentRuleId = rule.id;
     const a = rule.action;
+    const conds = compileConditions(rule);
     // A rule that carries its own conditions resolves them against the whole
     // model (or a narrower snapshot when it also has one). The discriminator is
-    // whether `match` EXISTS, not whether it has entries: an imported mapping
-    // whose only <in> was `cpiID="*"` has no conditions left and still means
-    // "every object".
+    // whether `match` EXISTS, not whether it has entries: a rule collected
+    // from the object filter with no condition at all still means "every
+    // object in scope".
     const candidates = rule.match !== undefined
       ? (rule.entityIds.length > 0 ? rule.entityIds : universe)
       : rule.entityIds;
     for (const entityId of candidates) {
-      if (!matches(rule, entityId)) continue;
+      if (!matches(conds, entityId)) continue;
       switch (a.kind) {
         case 'add': {
           if (!allowedByMode(a.mode, readForMode(entityId, a.target.psetName, a.target.propName))) break;
