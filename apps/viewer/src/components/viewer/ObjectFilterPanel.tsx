@@ -47,6 +47,7 @@ import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import {
+  type FilterValueSchema,
   discoverFilterSchema,
   discoverFilterValues,
   discoverPropertyAndQuantitySchema,
@@ -77,6 +78,12 @@ function isObjectDefinitionClass(typeName: string): boolean {
   objectDefinitionCache.set(upper, result);
   return result;
 }
+
+/** Stand-in while the value lists are still being collected. */
+const NO_VALUES: FilterValueSchema = {
+  materials: [], classificationSystems: [], classifications: [],
+  predefinedTypes: [], propertyValues: new Map(), quantityValues: new Map(),
+};
 
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
@@ -600,10 +607,51 @@ export function ObjectFilterPanel() {
     return false;
   }, [activeStore, activeModelId, getMutationView, modelSummary.objectIds]);
 
+  /**
+   * The value lists, collected AFTER the model is on screen.
+   *
+   * `discoverFilterValues` extracts every property of up to 100,000 objects
+   * straight from the source bytes — regex, UTF-8 decode, attribute parse, per
+   * object. On a 985 MB model with 84,298 objects that is seconds of main
+   * thread, and it ran inside the rows memo: the geometry progress bar sat at
+   * 60% while the workers idled, waiting for a thread busy building dropdown
+   * contents nobody had opened yet.
+   *
+   * An idle callback keeps the lists complete — the point of collecting them —
+   * and takes the work off the path that blocks the first render. The rows
+   * appear at once with their attribute names; the values follow.
+   */
+  const [discoveredValues, setDiscoveredValues] = useState<FilterValueSchema | null>(null);
+  useEffect(() => {
+    setDiscoveredValues(null);
+    const store = activeStore;
+    if (!store) return;
+    let cancelled = false;
+    const collect = () => { if (!cancelled) setDiscoveredValues(discoverFilterValues(store)); };
+    type Idle = {
+      requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
+      cancelIdleCallback?: (h: number) => void;
+    };
+    const g = globalThis as unknown as Idle;
+    // The timeout is the guarantee: on a machine that never goes idle the
+    // values would otherwise never arrive.
+    const handle = g.requestIdleCallback
+      ? g.requestIdleCallback(collect, { timeout: 5000 })
+      : (setTimeout(collect, 0) as unknown as number);
+    return () => {
+      cancelled = true;
+      if (g.requestIdleCallback && g.cancelIdleCallback) g.cancelIdleCallback(handle);
+      else clearTimeout(handle as unknown as ReturnType<typeof setTimeout>);
+    };
+  }, [activeStore]);
+
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
-    const values = discoverFilterValues(activeStore);
+    // A copy: the overlay pass below writes into `propertyValues`, and
+    // `discoveredValues` is state.
+    const collected = discoveredValues ?? NO_VALUES;
+    const values: FilterValueSchema = { ...collected, propertyValues: new Map(collected.propertyValues) };
     const out: Row[] = [];
 
     const ifcTypeSource = modelSummary.ifcTypes.length > 0 ? modelSummary.ifcTypes : schema.ifcTypes;
@@ -688,7 +736,7 @@ export function ObjectFilterPanel() {
 
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
-  }, [activeStore, modelSummary.ifcTypes, attributeValues, mutationOverlay, stillCarried]);
+  }, [activeStore, discoveredValues, modelSummary.ifcTypes, attributeValues, mutationOverlay, stillCarried]);
 
   /**
    * Compile the entries into match sources. `skipId` leaves one row out — that
