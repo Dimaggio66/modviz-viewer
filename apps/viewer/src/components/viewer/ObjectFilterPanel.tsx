@@ -54,6 +54,7 @@ import {
   discoverPropertyAndQuantitySchema,
   propValueKey,
 } from '@/lib/search/filter-schema';
+import { buildPropertyIndex, type PropertyIndex } from '@/lib/search/property-index';
 import { Rule, type FilterRule, type NumericOp } from '@/lib/search/filter-rules';
 import { evaluateFilterRulesFederated } from '@/lib/search/filter-evaluate';
 import { compileQuery, isQueryExpr } from '@/lib/value-query';
@@ -90,6 +91,8 @@ const NO_VALUES: FilterValueSchema = {
 interface Discovered {
   values: FilterValueSchema;
   psetQto: PsetQtoSchema;
+  /** Candidate lookup for property rules. `null` on stores it cannot index. */
+  index: PropertyIndex | null;
 }
 
 const NO_PSET_QTO: PsetQtoSchema = { psets: [], qtos: [] };
@@ -657,6 +660,7 @@ export function ObjectFilterPanel() {
       setDiscovered({
         values: discoverFilterValues(store),
         psetQto: discoverPropertyAndQuantitySchema(store),
+        index: buildPropertyIndex(store),
       });
     };
     type Idle = {
@@ -905,20 +909,36 @@ export function ObjectFilterPanel() {
     cancelled: () => boolean,
   ): Promise<number[] | null> => {
     if (!activeStore) return null;
-    const modelArg = [{ id: activeModelId ?? 'default', store: activeStore }];
+    // Absent until the post-load collection has run — the filter then works
+    // exactly as it did before, only slower.
+    const index = discovered?.index ?? null;
+    const modelId = activeModelId ?? 'default';
+    const modelArg = [{ id: modelId, store: activeStore }];
     let ids: number[] | null = null;
     const intersect = (next: number[]) => {
       if (ids === null) { ids = next; return; }
       const set = new Set(next);
       ids = ids.filter((x) => set.has(x));
     };
+    /**
+     * Hand the evaluator the objects that can possibly carry the queried
+     * properties, so it stops reading the whole model out of the source bytes
+     * for every property rule. It still checks each rule per entity — this
+     * only shrinks what it walks.
+     */
+    const options = (rules: FilterRule[], combinator: 'AND' | 'OR') => {
+      const candidates = index?.narrow(rules, combinator);
+      return candidates
+        ? { limit: 200_000, candidateExpressIdsByModel: new Map([[modelId, candidates]]) }
+        : { limit: 200_000 };
+    };
     if (c.andRules.length > 0) {
-      const res = await evaluateFilterRulesFederated(modelArg, c.andRules, 'AND', { limit: 200_000 });
+      const res = await evaluateFilterRulesFederated(modelArg, c.andRules, 'AND', options(c.andRules, 'AND'));
       if (cancelled()) return null;
       intersect(res.map((m) => m.expressId));
     }
     for (const grp of c.orGroups) {
-      const res = await evaluateFilterRulesFederated(modelArg, grp, 'OR', { limit: 200_000 });
+      const res = await evaluateFilterRulesFederated(modelArg, grp, 'OR', options(grp, 'OR'));
       if (cancelled()) return null;
       intersect(res.map((m) => m.expressId));
     }
@@ -927,7 +947,7 @@ export function ObjectFilterPanel() {
       ids = universe.filter((id) => c.attrFilters.every((f) => f.test(f.accessor(activeStore, id))));
     }
     return cancelled() ? null : ids ?? [];
-  }, [activeStore, activeModelId, modelSummary.objectIds]);
+  }, [activeStore, activeModelId, modelSummary.objectIds, discovered]);
 
   // Build match sources from the entries and isolate the intersection —
   // debounced so typing doesn't thrash. Stale runs are discarded.
