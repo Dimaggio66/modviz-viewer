@@ -195,6 +195,18 @@ export interface GeorefMutationData {
   mapConversion?: Partial<MapConversion>;
 }
 
+/** One property write or removal, for {@link MutationSlice.applyPropertyEdits}. */
+export type PropertyEdit =
+  | {
+      op: 'set';
+      entityId: number;
+      psetName: string;
+      propName: string;
+      value: PropertyValue;
+      valueType?: PropertyValueType;
+    }
+  | { op: 'delete'; entityId: number; psetName: string; propName: string };
+
 export interface MutationSlice {
   // State
   /** Mutation views per model */
@@ -294,6 +306,20 @@ export interface MutationSlice {
     psetName: string,
     propName: string
   ) => Mutation | null;
+  /**
+   * Apply many property edits as ONE store update.
+   *
+   * `setProperty` rebuilds the undo stack per call — `[...stack, mutation]` —
+   * so a run of N writes copies N²/2 entries. Applying an imported RIBiTWO rule
+   * set to 420_Krankenhaus_BaWue.ifc means 521,383 writes: measured at 100,000
+   * that pattern alone costs 15.5 s against 0.0 s in bundles, and it grows with
+   * the square, allocating roughly a terabyte of arrays for the collector on
+   * the way. The actual write into the view is 0.1 s per 100,000.
+   *
+   * Returns one entry per edit, in order, so a caller can still tell which
+   * ones took (a delete of something absent yields null).
+   */
+  applyPropertyEdits: (modelId: string, edits: readonly PropertyEdit[]) => Array<Mutation | null>;
   /** Create a new property set */
   createPropertySet: (
     modelId: string,
@@ -1233,6 +1259,56 @@ export const createMutationSlice: StateCreator<
     get().mirrorPropertyEdit(modelId, entityId, psetName, propName, value, valueType);
 
     return mutation;
+  },
+
+  applyPropertyEdits: (modelId, edits) => {
+    // Collab role gate before the local commit — see setProperty.
+    if (!get().canCollabEdit()) return edits.map(() => null);
+    const view = get().mutationViews.get(modelId);
+    if (!view) return edits.map(() => null);
+
+    const results: Array<Mutation | null> = [];
+    const landed: Mutation[] = [];
+    for (const edit of edits) {
+      const mutation = edit.op === 'set'
+        ? view.setProperty(edit.entityId, edit.psetName, edit.propName, edit.value, edit.valueType ?? PropertyValueType.String)
+        : view.deleteProperty(edit.entityId, edit.psetName, edit.propName);
+      results.push(mutation ?? null);
+      if (mutation) landed.push(mutation);
+    }
+    if (landed.length === 0) return results;
+
+    // The one place the stack is copied, for the whole batch.
+    set((state) => {
+      const newUndoStacks = new Map(state.undoStacks);
+      const stack = newUndoStacks.get(modelId) || [];
+      newUndoStacks.set(modelId, [...stack, ...landed]);
+
+      const newRedoStacks = new Map(state.redoStacks);
+      newRedoStacks.set(modelId, []);
+
+      const newDirty = new Set(state.dirtyModels);
+      newDirty.add(modelId);
+
+      return {
+        undoStacks: newUndoStacks,
+        redoStacks: newRedoStacks,
+        dirtyModels: newDirty,
+        // A signal, not a count — every consumer keys a memo on it.
+        mutationVersion: state.mutationVersion + 1,
+      };
+    });
+
+    // Mirrored one by one: the CRDT records edits, not batches. Both mirrors
+    // are no-ops outside a collab session and outside the room's own model.
+    for (const edit of edits) {
+      if (edit.op === 'set') {
+        get().mirrorPropertyEdit(modelId, edit.entityId, edit.psetName, edit.propName, edit.value, edit.valueType ?? PropertyValueType.String);
+      } else {
+        get().mirrorPropertyDelete(modelId, edit.entityId, edit.psetName, edit.propName);
+      }
+    }
+    return results;
   },
 
   deleteProperty: (modelId, entityId, psetName, propName) => {

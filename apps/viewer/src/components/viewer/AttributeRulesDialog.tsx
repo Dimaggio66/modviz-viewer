@@ -39,6 +39,7 @@ import { toast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
+import type { PropertyEdit } from '@/store/slices/mutationSlice';
 import {
   ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, planWritesStepwise, refKeyOf, staleTargetRefs,
   DEFAULT_TARGET_PSET,
@@ -105,10 +106,9 @@ export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
   universe, readIfcParam, onProgress, selectedIds,
 }: AttributeRulesDialogProps) {
-  const { setProperty, deleteProperty, getMutationView, registerMutationView } = useViewerStore(
+  const { applyPropertyEdits, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
-      setProperty: s.setProperty,
-      deleteProperty: s.deleteProperty,
+      applyPropertyEdits: s.applyPropertyEdits,
       getMutationView: s.getMutationView,
       registerMutationView: s.registerMutationView,
     })),
@@ -665,36 +665,64 @@ export function AttributeRulesDialog({
       };
       await tick('Rolling back removed rules…');
 
+      /** Send one bundle to the store and count what landed. */
+      const flush = async (batch: PropertyEdit[], label: string) => {
+        if (batch.length === 0) return [];
+        const results = applyPropertyEdits(modelId, batch);
+        batch.length = 0;
+        await tick(label);
+        return results;
+      };
+
+      const rollbackBatch: PropertyEdit[] = [];
       for (const t of stale) {
         // `readers.read` goes through the parsed store, never the overlay, so
         // it answers with the pre-rule value even after the rule wrote.
         const base = readers.read(t.entityId, t.psetName, t.propName);
         const now = readers.effective.read(t.entityId, t.psetName, t.propName);
         done += 1;
-        if (done % PROGRESS_CHUNK === 0) await tick('Rolling back removed rules…');
         // Already back at its base state — nothing to undo here.
-        if (now === base) continue;
-        const result = base === null
-          ? deleteProperty(modelId, t.entityId, t.psetName, t.propName)
-          : setProperty(modelId, t.entityId, t.psetName, t.propName, base, PropertyValueType.Label);
-        if (result) reverted += 1;
+        if (now !== base) {
+          rollbackBatch.push(base === null
+            ? { op: 'delete', entityId: t.entityId, psetName: t.psetName, propName: t.propName }
+            : { op: 'set', entityId: t.entityId, psetName: t.psetName, propName: t.propName, value: base, valueType: PropertyValueType.Label });
+        }
+        if (rollbackBatch.length >= PROGRESS_CHUNK) {
+          for (const r of await flush(rollbackBatch, 'Rolling back removed rules…')) if (r) reverted += 1;
+        }
       }
+      for (const r of await flush(rollbackBatch, 'Rolling back removed rules…')) if (r) reverted += 1;
       // ONE plan for all rules: a rule must see what the earlier ones wrote
       // (`5D_Typ` is produced by one rule and matched by dozens after it), so
       // planning per rule to count them would silently break every chain.
       // Each write carries its rule id instead.
       for (const r of pending) if (r.enabled) counts.set(r.id, 0);
       await tick('Applying rules…');
+      // Bundled, and the rule ids kept alongside so each write is still
+      // attributed to the rule that produced it.
+      const batch: PropertyEdit[] = [];
+      const batchRules: string[] = [];
+      const settle = async () => {
+        if (batch.length === 0) return;
+        const results = applyPropertyEdits(modelId, batch);
+        for (let i = 0; i < results.length; i++) {
+          if (!results[i]) continue;
+          counts.set(batchRules[i], (counts.get(batchRules[i]) ?? 0) + 1);
+          ok += 1;
+        }
+        batch.length = 0;
+        batchRules.length = 0;
+        await tick('Applying rules…');
+      };
       for (const w of liveWrites) {
-        const result = w.op === 'set'
-          ? setProperty(modelId, w.entityId, w.psetName, w.propName, w.value ?? '', w.valueType ?? PropertyValueType.Label)
-          : deleteProperty(modelId, w.entityId, w.psetName, w.propName);
+        batch.push(w.op === 'set'
+          ? { op: 'set', entityId: w.entityId, psetName: w.psetName, propName: w.propName, value: w.value ?? '', valueType: w.valueType ?? PropertyValueType.Label }
+          : { op: 'delete', entityId: w.entityId, psetName: w.psetName, propName: w.propName });
+        batchRules.push(w.ruleId);
         done += 1;
-        if (done % PROGRESS_CHUNK === 0) await tick('Applying rules…');
-        if (!result) continue;
-        counts.set(w.ruleId, (counts.get(w.ruleId) ?? 0) + 1);
-        ok += 1;
+        if (batch.length >= PROGRESS_CHUNK) await settle();
       }
+      await settle();
       onProgress?.({ done: total, total, label: 'Applying rules…' });
       if (ok === 0 && reverted === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
@@ -732,7 +760,7 @@ export function AttributeRulesDialog({
       setApplying(false);
       onProgress?.(null);
     }
-  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, setProperty, deleteProperty, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
