@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import { PropertyValueType } from '@ifc-lite/data';
 import {
   planWrites,
+  planWritesStepwise,
   type RulePlanStat,
   resolveTemplate,
   templateTokens,
@@ -568,5 +569,46 @@ describe('Ein zweiter Lauf darf die spezielle Regel nicht ueberschreiben', () =>
     const { eff, effByName, datei } = modell('2er Bogen');
     const w = planWrites(regeln(), eff, effByName, [1], datei);
     assert.deepStrictEqual(w, [], 'nichts zu tun — und vor allem kein "Bogen"');
+  });
+});
+
+describe('planWritesStepwise', () => {
+  const drei: AttributeRule[] = [
+    { ...rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Eins' }, value: 'a', dataType: 'text', unit: '', mode: 'overwrite' }), id: 'a' },
+    { ...rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Zwei' }, value: 'b', dataType: 'text', unit: '', mode: 'overwrite' }), id: 'b', enabled: false },
+    { ...rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Drei' }, value: 'c', dataType: 'text', unit: '', mode: 'overwrite' }), id: 'c' },
+  ];
+
+  it('haelt nach jeder aktiven Regel an', () => {
+    // Die abgeschaltete zaehlt nicht mit — sie macht keine Arbeit, an der sich
+    // anzuhalten lohnte.
+    const steps = planWritesStepwise(drei, read, readByName);
+    const gezaehlt: number[] = [];
+    let step = steps.next();
+    while (!step.done) { gezaehlt.push(step.value); step = steps.next(); }
+    assert.deepEqual(gezaehlt, [1, 2]);
+  });
+
+  it('liefert dasselbe wie der Lauf am Stueck', () => {
+    const steps = planWritesStepwise(drei, read, readByName);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    assert.deepEqual(step.value, planWrites(drei, read, readByName));
+  });
+
+  it('haelt die Verkettung ueber die Haltepunkte hinweg', () => {
+    // Regel 2 liest, was Regel 1 geschrieben hat. Ginge diese Schicht beim
+    // Anhalten verloren, kaeme genau das heraus, was der Dialog zeigt: eine
+    // Regel, die nichts findet.
+    const kette: AttributeRule[] = [
+      { ...rule({ kind: 'add', target: { psetName: 'Pset_A', propName: 'Typ' }, value: '2er Bogen', dataType: 'text', unit: '', mode: 'overwrite' }), id: '1' },
+      { ...rule({ kind: 'copy', source: { psetName: 'Pset_A', propName: 'Typ' }, target: { psetName: 'Pset_B', propName: 'Kopie' }, mode: 'overwrite' }), id: '2' },
+    ];
+    const steps = planWritesStepwise(kette, read, readByName);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    const kopien = step.value.filter((w) => w.propName === 'Kopie');
+    assert.equal(kopien.length, 2);
+    assert.equal(kopien[0].value, '2er Bogen');
   });
 });

@@ -40,10 +40,10 @@ import { cn } from '@/lib/utils';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import {
-  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, refKeyOf, staleTargetRefs,
+  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, planWritesStepwise, refKeyOf, staleTargetRefs,
   DEFAULT_TARGET_PSET,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
-  type RuleEditField, type RuleMatch, type RulePlanStat, type RuleTableRow,
+  type RuleEditField, type RuleMatch, type RulePlanStat, type RuleTableRow, type RuleWrite,
 } from '@/lib/attribute-rules';
 import { loadApplied, loadRules, saveApplied, saveRules } from '@/lib/attribute-rules-store';
 import { importMappingXml } from '@/lib/attribute-rules-xml';
@@ -88,6 +88,9 @@ const PROGRESS_CHUNK = 400;
 
 /** Delay before the write preview is recomputed while you type. */
 const PREVIEW_DEBOUNCE_MS = 350;
+/** How long one preview slice may hold the frame. Half of a 60 Hz budget, so
+ *  the dialog keeps painting while the plan is still being computed. */
+const PREVIEW_FRAME_BUDGET_MS = 8;
 
 // RIB's five tabs, in RIB's order. "Add from values" (`compose`) is no longer
 // offered: it has no counterpart in RIB, and the XML import never produced one,
@@ -389,6 +392,8 @@ export function AttributeRulesDialog({
     }
     return out;
   }, [rules]);
+  const outputPsetsRef = useRef(outputPsets);
+  outputPsetsRef.current = outputPsets;
 
   const readers = useMemo(() => {
     type Sets = Array<{ name: string; properties?: Array<{ name: string; value: unknown }> }>;
@@ -420,8 +425,12 @@ export function AttributeRulesDialog({
       };
       const readByName = (entityId: number, prop: string): string | null => {
         for (const set of setsOf(entityId)) {
-          // Only what the rules themselves wrote — see `outputPsets`.
-          if (!outputPsets.has(set.name)) continue;
+          // Only what the rules themselves wrote — see `outputPsets`. Read
+          // through the ref: as a DEPENDENCY it rebuilt this whole memo, and
+          // with it the caches below, on every rule edit — 490,317 property
+          // sets re-read from the file, 7.1 s on the hospital model, for a
+          // Set whose CONTENTS almost never change.
+          if (!outputPsetsRef.current.has(set.name)) continue;
           for (const p of set.properties ?? []) if (p.name === prop) return str(p.value);
         }
         // Not a property: mapping files also name ifc-level parameters here.
@@ -495,7 +504,7 @@ export function AttributeRulesDialog({
     return { read: base.read, readByName: base.readByName, effective };
     // `open` is a dependency so each time the dialog opens it starts from
     // fresh values rather than a cache filled before the last apply.
-  }, [store, open, readIfcParam, modelId, getMutationView, outputPsets]);
+  }, [store, open, readIfcParam, modelId, getMutationView]);
   readersRef.current = readers;
 
   /**
@@ -530,7 +539,45 @@ export function AttributeRulesDialog({
     [store, readers, universe],
   );
 
-  const writes = useMemo(() => plan(previewRules), [plan, previewRules]);
+  /**
+   * The preview, computed a rule at a time between frames.
+   *
+   * It used to be a memo around `planWrites`. With the 339 rules imported from
+   * RIBiTWO over 84,298 objects that is 10.2 s in one synchronous piece, and
+   * Chrome put up "this page is not responding" — with the dialog open and
+   * nothing to click.
+   *
+   * `requestAnimationFrame` rather than `requestIdleCallback`: the dialog is
+   * open and being used, so this must not wait for a thread that never goes
+   * idle. A budget per frame keeps it from becoming the same block in slow
+   * motion, and the whole run is abandoned the moment the rules change.
+   */
+  const [writes, setWrites] = useState<RuleWrite[]>([]);
+  useEffect(() => {
+    // `open` because this component stays mounted when the dialog is closed —
+    // without it the preview would keep running in the background, for a
+    // number nobody is looking at.
+    if (!open || !store || previewRules.length === 0) { setWrites([]); return; }
+    const steps = planWritesStepwise(
+      previewRules,
+      readers.effective.read,
+      readers.effective.readByName,
+      universe,
+      readers.read,
+    );
+    let handle = 0;
+    let cancelled = false;
+    const pump = () => {
+      if (cancelled) return;
+      const until = performance.now() + PREVIEW_FRAME_BUDGET_MS;
+      let step = steps.next();
+      while (!step.done && performance.now() < until) step = steps.next();
+      if (step.done) { setWrites(step.value); return; }
+      handle = requestAnimationFrame(pump);
+    };
+    handle = requestAnimationFrame(pump);
+    return () => { cancelled = true; cancelAnimationFrame(handle); };
+  }, [open, store, previewRules, readers, universe]);
 
   const activeRuleCount = pending.filter((r) => r.enabled).length;
 
