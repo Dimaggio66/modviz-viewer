@@ -128,3 +128,45 @@ describe('applyPropertyEdits', () => {
     assert.deepEqual(h.state().applyPropertyEdits('unbekannt', [setzen(1)]), [null]);
   });
 });
+
+describe('applyPropertyEdits — aufgeschoben', () => {
+  it('laesst den Store waehrend des Laufs vollstaendig in Ruhe', () => {
+    // Der eigentliche Punkt: jede Store-Aenderung laesst den Objektfilter
+    // saemtliche bisherigen Mutationen neu durchlaufen. Bei 1.933 Buendeln
+    // ist das die Rechenarbeit, die 10 % eines Laufs vier Minuten kosten liess.
+    const h = buildSlice();
+    const vorher = h.sets();
+    for (let i = 0; i < 5; i++) {
+      h.state().applyPropertyEdits('m1', Array.from({ length: 400 }, (_, k) => setzen(i * 400 + k)), true);
+    }
+    assert.equal(h.sets() - vorher, 0);
+    assert.equal(h.calls.length, 2000, 'geschrieben wird trotzdem, sofort');
+  });
+
+  it('spiegelt auch aufgeschoben sofort — das CRDT darf nicht warten', () => {
+    const h = buildSlice();
+    h.state().applyPropertyEdits('m1', [setzen(1), setzen(2)], true);
+    assert.deepEqual(h.mirrored, ['edit', 'edit']);
+  });
+
+  it('traegt am Ende alles in einer einzigen Aenderung nach', () => {
+    const h = buildSlice();
+    const alle = [];
+    for (let i = 0; i < 3; i++) {
+      for (const r of h.state().applyPropertyEdits('m1', [setzen(i), setzen(i + 100)], true)) if (r) alle.push(r);
+    }
+    const vorher = h.sets();
+    h.state().recordPropertyMutations('m1', alle);
+    assert.equal(h.sets() - vorher, 1);
+    const stack = (h.state() as unknown as { undoStacks: Map<string, unknown[]> }).undoStacks.get('m1');
+    assert.equal(stack?.length, 6);
+    assert.equal((h.state() as unknown as { mutationVersion: number }).mutationVersion, 1);
+  });
+
+  it('macht aus einer leeren Nachtragung keine Aenderung', () => {
+    const h = buildSlice();
+    const vorher = h.sets();
+    h.state().recordPropertyMutations('m1', []);
+    assert.equal(h.sets() - vorher, 0);
+  });
+});

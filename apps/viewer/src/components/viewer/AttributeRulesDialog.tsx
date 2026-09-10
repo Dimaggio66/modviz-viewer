@@ -25,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ListPlus, Sparkles, Table2, Upload, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { PropertyValueType, RelationshipType } from '@ifc-lite/data';
-import { MutablePropertyView } from '@ifc-lite/mutations';
+import { MutablePropertyView, type Mutation } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { extractTypeEntityOwnProperties } from '@ifc-lite/parser';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -92,6 +92,10 @@ const PREVIEW_DEBOUNCE_MS = 350;
 /** How long one preview slice may hold the frame. Half of a 60 Hz budget, so
  *  the dialog keeps painting while the plan is still being computed. */
 const PREVIEW_FRAME_BUDGET_MS = 8;
+/** Smallest gap between two progress repaints during an apply. Each one
+ *  re-renders the panel behind the bar, and 1,933 of them buy nothing a
+ *  five-per-second bar does not already show. */
+const PROGRESS_PAINT_MS = 200;
 
 // RIB's five tabs, in RIB's order. "Add from values" (`compose`) is no longer
 // offered: it has no counterpart in RIB, and the XML import never produced one,
@@ -106,9 +110,10 @@ export function AttributeRulesDialog({
   open, onOpenChange, conditions, entityIds, modelId, store, propertyRefs, projectKey,
   universe, readIfcParam, onProgress, selectedIds,
 }: AttributeRulesDialogProps) {
-  const { applyPropertyEdits, getMutationView, registerMutationView } = useViewerStore(
+  const { applyPropertyEdits, recordPropertyMutations, getMutationView, registerMutationView } = useViewerStore(
     useShallow((s) => ({
       applyPropertyEdits: s.applyPropertyEdits,
+      recordPropertyMutations: s.recordPropertyMutations,
       getMutationView: s.getMutationView,
       registerMutationView: s.registerMutationView,
     })),
@@ -657,18 +662,37 @@ export function AttributeRulesDialog({
       const liveWrites = plan(pending, stats);
       const total = stale.length + liveWrites.length;
       let done = 0;
+      /**
+       * Everything this run wrote, recorded in the store ONCE at the end.
+       *
+       * Not per bundle: a store update changes `mutationCount`, and the object
+       * filter's overlay memo answers that by walking every mutation made so
+       * far — then its rows rebuild behind it. Over a 773,209-write apply in
+       * bundles of 400 that is on the order of 7.5e8 iterations of work nobody
+       * sees, and it is why 10% of a run took four minutes while the writes
+       * themselves measure 11 s.
+       */
+      const recorded: Mutation[] = [];
+      let lastPaint = 0;
       // Yield to the browser every so often, otherwise a 20k-write run blocks
-      // the main thread and the progress bar never paints a single frame.
-      const tick = async (label: string) => {
-        onProgress?.({ done, total, label });
+      // the main thread and the progress bar never paints a single frame. The
+      // yield is cheap; the `onProgress` behind it re-renders the panel, so it
+      // is rationed by time rather than by bundle.
+      const tick = async (label: string, force = false) => {
+        const now = Date.now();
+        if (force || now - lastPaint >= PROGRESS_PAINT_MS) {
+          lastPaint = now;
+          onProgress?.({ done, total, label });
+        }
         await new Promise((r) => setTimeout(r, 0));
       };
-      await tick('Rolling back removed rules…');
+      await tick('Rolling back removed rules…', true);
 
-      /** Send one bundle to the store and count what landed. */
+      /** Write one bundle into the model and keep what landed. */
       const flush = async (batch: PropertyEdit[], label: string) => {
         if (batch.length === 0) return [];
-        const results = applyPropertyEdits(modelId, batch);
+        const results = applyPropertyEdits(modelId, batch, true);
+        for (const r of results) if (r) recorded.push(r);
         batch.length = 0;
         await tick(label);
         return results;
@@ -718,9 +742,11 @@ export function AttributeRulesDialog({
       const batchRules: string[] = [];
       const settle = async () => {
         if (batch.length === 0) return;
-        const results = applyPropertyEdits(modelId, batch);
+        const results = applyPropertyEdits(modelId, batch, true);
         for (let i = 0; i < results.length; i++) {
-          if (!results[i]) continue;
+          const mutation = results[i];
+          if (!mutation) continue;
+          recorded.push(mutation);
           counts.set(batchRules[i], (counts.get(batchRules[i]) ?? 0) + 1);
           ok += 1;
         }
@@ -737,6 +763,9 @@ export function AttributeRulesDialog({
         if (batch.length >= PROGRESS_CHUNK) await settle();
       }
       await settle();
+      // The single store update for the whole run — undo stack, dirty flag,
+      // version. Everything watching the model wakes up here, once.
+      recordPropertyMutations(modelId, recorded);
       onProgress?.({ done: total, total, label: 'Applying rules…' });
       if (ok === 0 && reverted === 0) {
         toast.error('No attribute could be written (the model may be read-only in this session).');
@@ -774,7 +803,7 @@ export function AttributeRulesDialog({
       setApplying(false);
       onProgress?.(null);
     }
-  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, recordPropertyMutations, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

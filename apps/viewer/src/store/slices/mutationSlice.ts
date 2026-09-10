@@ -319,7 +319,28 @@ export interface MutationSlice {
    * Returns one entry per edit, in order, so a caller can still tell which
    * ones took (a delete of something absent yields null).
    */
-  applyPropertyEdits: (modelId: string, edits: readonly PropertyEdit[]) => Array<Mutation | null>;
+  applyPropertyEdits: (
+    modelId: string,
+    edits: readonly PropertyEdit[],
+    /**
+     * Leave the store alone: write into the model, return the mutations, and
+     * record nothing. The caller MUST hand what it collected to
+     * {@link MutationSlice.recordPropertyMutations} when its run is over.
+     *
+     * For a long run this is the difference between minutes and seconds, and
+     * not because of the writes. Every store update changes `mutationCount`,
+     * which the object filter's overlay memo watches — and that memo walks
+     * EVERY mutation made so far. Committing per bundle therefore costs
+     * bundles x mutations-so-far: about 7.5e8 iterations over a 773,209-write
+     * apply, plus a rebuild of the filter's rows behind each one.
+     */
+    defer?: boolean,
+  ) => Array<Mutation | null>;
+  /**
+   * Put a finished run's mutations on the undo stack in ONE store update.
+   * The other half of `applyPropertyEdits(..., defer)`.
+   */
+  recordPropertyMutations: (modelId: string, mutations: readonly Mutation[]) => void;
   /** Create a new property set */
   createPropertySet: (
     modelId: string,
@@ -1261,7 +1282,7 @@ export const createMutationSlice: StateCreator<
     return mutation;
   },
 
-  applyPropertyEdits: (modelId, edits) => {
+  applyPropertyEdits: (modelId, edits, defer = false) => {
     // Collab role gate before the local commit — see setProperty.
     if (!get().canCollabEdit()) return edits.map(() => null);
     const view = get().mutationViews.get(modelId);
@@ -1276,13 +1297,28 @@ export const createMutationSlice: StateCreator<
       results.push(mutation ?? null);
       if (mutation) landed.push(mutation);
     }
-    if (landed.length === 0) return results;
 
-    // The one place the stack is copied, for the whole batch.
+    // Mirrored one by one: the CRDT records edits, not batches. Both mirrors
+    // are no-ops outside a collab session and outside the room's own model.
+    for (const edit of edits) {
+      if (edit.op === 'set') {
+        get().mirrorPropertyEdit(modelId, edit.entityId, edit.psetName, edit.propName, edit.value, edit.valueType ?? PropertyValueType.String);
+      } else {
+        get().mirrorPropertyDelete(modelId, edit.entityId, edit.psetName, edit.propName);
+      }
+    }
+
+    if (!defer && landed.length > 0) get().recordPropertyMutations(modelId, landed);
+    return results;
+  },
+
+  recordPropertyMutations: (modelId, mutations) => {
+    if (mutations.length === 0) return;
+    // The one place the stack is copied, for the whole run.
     set((state) => {
       const newUndoStacks = new Map(state.undoStacks);
       const stack = newUndoStacks.get(modelId) || [];
-      newUndoStacks.set(modelId, [...stack, ...landed]);
+      newUndoStacks.set(modelId, [...stack, ...mutations]);
 
       const newRedoStacks = new Map(state.redoStacks);
       newRedoStacks.set(modelId, []);
@@ -1298,17 +1334,6 @@ export const createMutationSlice: StateCreator<
         mutationVersion: state.mutationVersion + 1,
       };
     });
-
-    // Mirrored one by one: the CRDT records edits, not batches. Both mirrors
-    // are no-ops outside a collab session and outside the room's own model.
-    for (const edit of edits) {
-      if (edit.op === 'set') {
-        get().mirrorPropertyEdit(modelId, edit.entityId, edit.psetName, edit.propName, edit.value, edit.valueType ?? PropertyValueType.String);
-      } else {
-        get().mirrorPropertyDelete(modelId, edit.entityId, edit.psetName, edit.propName);
-      }
-    }
-    return results;
   },
 
   deleteProperty: (modelId, entityId, psetName, propName) => {
