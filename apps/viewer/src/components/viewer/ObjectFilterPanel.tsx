@@ -48,6 +48,7 @@ import { cn } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import {
   type FilterValueSchema,
+  type PsetQtoSchema,
   discoverFilterSchema,
   discoverFilterValues,
   discoverPropertyAndQuantitySchema,
@@ -84,6 +85,14 @@ const NO_VALUES: FilterValueSchema = {
   materials: [], classificationSystems: [], classifications: [],
   predefinedTypes: [], propertyValues: new Map(), quantityValues: new Map(),
 };
+
+/** Everything the rows need that has to be dug out of the file itself. */
+interface Discovered {
+  values: FilterValueSchema;
+  psetQto: PsetQtoSchema;
+}
+
+const NO_PSET_QTO: PsetQtoSchema = { psets: [], qtos: [] };
 
 /** ComboInput option for "property is absent" → maps to the isNotSet rule. */
 const NONE_LABEL = '<Not set>';
@@ -389,10 +398,13 @@ const FilterRow = memo(function FilterRow({
 });
 
 export function ObjectFilterPanel() {
-  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection, getMutationView, mutationCount, selectedEntityIds } = useViewerStore(
+  const { models, activeModelId, isolateEntities, clearIsolation, setSelectedEntityIds, clearSelection, getMutationView, mutationCount, selectedEntityIds, loading, geometryStreamingActive } = useViewerStore(
     useShallow((s) => ({
       models: s.models,
       activeModelId: s.activeModelId,
+      // The gate on the discovery below — it must not run during a load.
+      loading: s.loading,
+      geometryStreamingActive: s.geometryStreamingActive,
       isolateEntities: s.isolateEntities,
       clearIsolation: s.clearIsolation,
       setSelectedEntityIds: s.setSelectedEntityIds,
@@ -608,33 +620,52 @@ export function ObjectFilterPanel() {
   }, [activeStore, activeModelId, getMutationView, modelSummary.objectIds]);
 
   /**
-   * The value lists, collected AFTER the model is on screen.
+   * The pset/quantity names and their value lists — collected once the model
+   * has finished loading, never during.
    *
-   * `discoverFilterValues` extracts every property of up to 100,000 objects
-   * straight from the source bytes — regex, UTF-8 decode, attribute parse, per
-   * object. On a 985 MB model with 84,298 objects that is seconds of main
-   * thread, and it ran inside the rows memo: the geometry progress bar sat at
-   * 60% while the workers idled, waiting for a thread busy building dropdown
-   * contents nobody had opened yet.
+   * Both passes read the file itself: `discoverPropertyAndQuantitySchema`
+   * walks every entity in the on-demand pset map and
+   * `discoverFilterValues` up to 100,000 objects, each one a regex over the
+   * source bytes, a UTF-8 decode and an attribute parse. They ran inside the
+   * rows memo, on the first render — which falls in the middle of the load. A
+   * trace of a 985 MB model with 84,298 objects:
    *
-   * An idle callback keeps the lists complete — the point of collecting them —
-   * and takes the work off the path that blocks the first render. The rows
-   * appear at once with their attribute names; the values follow.
+   *     18.182 ms  rows memo
+   *       10.259 ms  discoverFilterValues
+   *        7.772 ms  discoverPropertyAndQuantitySchema
+   *
+   * Eighteen seconds of main thread spent building dropdown contents nobody
+   * had opened, while the geometry workers sat at 65% idle waiting for a
+   * thread. The progress bar stopped near 60%.
+   *
+   * The gate is the load flags, not idleness. `requestIdleCallback`'s timeout
+   * fires whether or not the thread ever went idle, so during a minutes-long
+   * load it simply moved the same block five seconds later — the bar then
+   * stopped near 68% instead. Idleness only decides WHEN afterwards.
+   *
+   * Note the panel is mounted even when the left column is collapsed to zero
+   * width, so this cost was paid with the filter closed too.
    */
-  const [discoveredValues, setDiscoveredValues] = useState<FilterValueSchema | null>(null);
+  const [discovered, setDiscovered] = useState<Discovered | null>(null);
   useEffect(() => {
-    setDiscoveredValues(null);
+    setDiscovered(null);
     const store = activeStore;
-    if (!store) return;
+    if (!store || loading || geometryStreamingActive) return;
     let cancelled = false;
-    const collect = () => { if (!cancelled) setDiscoveredValues(discoverFilterValues(store)); };
+    const collect = () => {
+      if (cancelled) return;
+      setDiscovered({
+        values: discoverFilterValues(store),
+        psetQto: discoverPropertyAndQuantitySchema(store),
+      });
+    };
     type Idle = {
       requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
       cancelIdleCallback?: (h: number) => void;
     };
     const g = globalThis as unknown as Idle;
     // The timeout is the guarantee: on a machine that never goes idle the
-    // values would otherwise never arrive.
+    // lists would otherwise never arrive.
     const handle = g.requestIdleCallback
       ? g.requestIdleCallback(collect, { timeout: 5000 })
       : (setTimeout(collect, 0) as unknown as number);
@@ -643,14 +674,14 @@ export function ObjectFilterPanel() {
       if (g.requestIdleCallback && g.cancelIdleCallback) g.cancelIdleCallback(handle);
       else clearTimeout(handle as unknown as ReturnType<typeof setTimeout>);
     };
-  }, [activeStore]);
+  }, [activeStore, loading, geometryStreamingActive]);
 
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
     // A copy: the overlay pass below writes into `propertyValues`, and
     // `discoveredValues` is state.
-    const collected = discoveredValues ?? NO_VALUES;
+    const collected = discovered?.values ?? NO_VALUES;
     const values: FilterValueSchema = { ...collected, propertyValues: new Map(collected.propertyValues) };
     const out: Row[] = [];
 
@@ -674,7 +705,7 @@ export function ObjectFilterPanel() {
     // Group properties/quantities by NAME across their psets — ONE row per
     // attribute with the UNION of every value the model carries (RIBiTWO-style),
     // instead of a separate row per (set, name).
-    const { psets, qtos } = discoverPropertyAndQuantitySchema(activeStore);
+    const { psets, qtos } = discovered?.psetQto ?? NO_PSET_QTO;
     /** (set, property) pairs a rule has removed from every object. Filled by
      *  the overlay pass below, which runs before `group` is called. */
     const deadRefs = new Set<string>();
@@ -736,7 +767,7 @@ export function ObjectFilterPanel() {
 
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
-  }, [activeStore, discoveredValues, modelSummary.ifcTypes, attributeValues, mutationOverlay, stillCarried]);
+  }, [activeStore, discovered, modelSummary.ifcTypes, attributeValues, mutationOverlay, stillCarried]);
 
   /**
    * Compile the entries into match sources. `skipId` leaves one row out — that
