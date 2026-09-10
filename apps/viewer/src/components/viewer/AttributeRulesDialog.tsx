@@ -41,7 +41,7 @@ import { configureMutationView } from '@/utils/configureMutationView';
 import { useViewerStore } from '@/store';
 import type { PropertyEdit } from '@/store/slices/mutationSlice';
 import {
-  ACTION_LABELS, applyRuleEdit, describeConditions, planWrites, planWritesStepwise, refKeyOf, staleTargetRefs,
+  ACTION_LABELS, applyRuleEdit, describeConditions, planWritesStepwise, refKeyOf, staleTargetRefs,
   DEFAULT_TARGET_PSET,
   type AttributeRule, type PropRef, type RuleAction, type RuleConditionSnapshot,
   type RuleEditField, type RuleMatch, type RulePlanStat, type RuleTableRow, type RuleWrite,
@@ -96,6 +96,9 @@ const PREVIEW_FRAME_BUDGET_MS = 8;
  *  re-renders the panel behind the bar, and 1,933 of them buy nothing a
  *  five-per-second bar does not already show. */
 const PROGRESS_PAINT_MS = 200;
+/** How long the planning may hold the thread between two yields. Long enough
+ *  that the yields cost nothing, short enough that the bar keeps moving. */
+const PLAN_SLICE_MS = 60;
 /**
  * Above this many (rule x object) evaluations the write preview is not
  * computed while you wait.
@@ -549,14 +552,6 @@ export function AttributeRulesDialog({
    * Apply went dead. `add` protects what came with the model; it must not
    * freeze a rule after its first run.
    */
-  const plan = useCallback(
-    (rules: readonly AttributeRule[], stats?: Map<string, RulePlanStat>) =>
-      (store && rules.length > 0
-        ? planWrites(rules, readers.effective.read, readers.effective.readByName, universe, readers.read, stats)
-        : []),
-    [store, readers, universe],
-  );
-
   /**
    * The preview, computed a rule at a time between frames.
    *
@@ -658,6 +653,11 @@ export function AttributeRulesDialog({
     // Close the assistant right away: the run reports its own progress, and
     // watching a frozen dialog says nothing about how far it has got.
     onOpenChange(false);
+    // Let the close actually paint. `onOpenChange` only schedules a render, and
+    // everything below runs synchronously for seconds — the planning alone is
+    // 19 s on the imported rule set — so without this yield React never gets
+    // the frame and the dialog sits there, frozen, until the run is over.
+    await new Promise((r) => setTimeout(r, 0));
     try {
       // `setProperty` needs a mutation view registered for the model; create
       // one lazily the same way the zone write-back does.
@@ -684,7 +684,37 @@ export function AttributeRulesDialog({
       // whether the condition matched nobody or matched everybody and the
       // source was empty. `matched` separates the two.
       const stats = new Map<string, RulePlanStat>();
-      const liveWrites = plan(pending, stats);
+
+      /**
+       * Planning, in the progress bar rather than in a frozen dialog.
+       *
+       * It is the bigger half of an apply — 19 s of the 30 s on the imported
+       * rule set — and it used to run as one synchronous call, before the first
+       * paint. The same generator the preview drives yields here, so the bar
+       * moves and the window is gone while it works.
+       */
+      const enabledRules = pending.filter((r) => r.enabled).length;
+      onProgress?.({ done: 0, total: enabledRules, label: 'Planning rules…' });
+      const steps = planWritesStepwise(
+        pending,
+        readers.effective.read,
+        readers.effective.readByName,
+        universe,
+        readers.read,
+        stats,
+      );
+      let slice = Date.now();
+      let step = steps.next();
+      while (!step.done) {
+        if (Date.now() - slice >= PLAN_SLICE_MS) {
+          onProgress?.({ done: step.value, total: enabledRules, label: 'Planning rules…' });
+          await new Promise((r) => setTimeout(r, 0));
+          slice = Date.now();
+        }
+        step = steps.next();
+      }
+      const liveWrites = step.value;
+
       const total = stale.length + liveWrites.length;
       let done = 0;
       /**
@@ -828,7 +858,7 @@ export function AttributeRulesDialog({
       setApplying(false);
       onProgress?.(null);
     }
-  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, recordPropertyMutations, previewSkipped, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, recordPropertyMutations, previewSkipped, commit, patch, onOpenChange, onProgress, rollbackTargets]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -578,9 +578,11 @@ export function* planWritesStepwise(
 /**
  * Drain {@link planWritesStepwise} in one go.
  *
- * The apply path uses this: it already walks every object afterwards to write
- * the values, so a plan that yields would buy it nothing. The PREVIEW is what
- * needs the steps — see the dialog.
+ * No caller in the viewer any more: both the preview and the apply drive the
+ * generator, because on a real rule set the plan takes longer than a frame and
+ * the apply used to run it before its dialog could even close. What is left is
+ * the reference the stepwise tests check themselves against — the two must
+ * produce the same writes, and saying so is easier with this in hand.
  */
 export function planWrites(
   rules: readonly AttributeRule[],
