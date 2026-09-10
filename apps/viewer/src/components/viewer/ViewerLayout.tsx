@@ -17,6 +17,7 @@ import { KeyboardShortcutsDialog, useKeyboardShortcutsDialog, type InfoDialogTab
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useActionLogger } from '@/hooks/useActionLogger';
 import { usePrivacyDisclosure } from '@/hooks/usePrivacyDisclosure';
+import { useSourceCompression } from '@/hooks/useSourceCompression';
 import { isSafeMode } from '@/lib/safe-mode';
 import { ShieldAlert, Grip } from 'lucide-react';
 import { usePanelDetachDrag } from '@/hooks/usePanelDetachDrag';
@@ -82,6 +83,9 @@ export function ViewerLayout() {
   useActionLogger();
   // Show the RFC §06 §7 privacy disclosure on first launch.
   usePrivacyDisclosure();
+  // Deflate a big model's source once the load is done — it is the largest
+  // single thing the tab holds, and it is what OOMs a second viewer tab.
+  useSourceCompression();
   const shortcutsDialog = useKeyboardShortcutsDialog();
 
   // Auto-load a model from ?model=<URL>. Used by the landing-page iframe to drop a
