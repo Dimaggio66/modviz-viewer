@@ -109,3 +109,23 @@ describe('Eigenschafts-Index — Kandidatenauswahl', () => {
     assert.equal(buildPropertyIndex(ohneGraph), null);
   });
 });
+
+describe('Eigenschafts-Index — wer traegt es in der Datei', () => {
+  it('nennt die Traeger, sortiert', () => {
+    const i = index([['P', 'a', [5, 1, 3]]]);
+    assert.deepEqual([...i.carriers('P', 'a')], [1, 3, 5]);
+  });
+
+  it('antwortet auf ein Attribut, das die Datei nicht kennt, mit leer', () => {
+    // Das ist eine Auskunft, keine Ratlosigkeit: die Eimer sind vollstaendig,
+    // also traegt es wirklich niemand. Der Objektfilter spart sich damit den
+    // Griff in die Datei fuer jedes einzelne Objekt.
+    const i = index([['5D', 'DN', [1]]]);
+    assert.equal(i.carriers('Pset_ModViz', '5D_Kategorie').length, 0);
+  });
+
+  it('faltet auch hier die Gross- und Kleinschreibung', () => {
+    const i = index([['Pset_A', 'DN', [9]]]);
+    assert.deepEqual([...i.carriers('pset_a', 'dn')], [9]);
+  });
+});

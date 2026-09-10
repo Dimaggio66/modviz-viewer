@@ -680,6 +680,9 @@ export function ObjectFilterPanel() {
     };
   }, [activeStore, loading, geometryStreamingActive]);
 
+  /** The file's property index, once the post-load collection has run. */
+  const index = discovered?.index ?? null;
+
   const rows = useMemo<Row[]>(() => {
     if (!activeStore) return [];
     const schema = discoverFilterSchema(activeStore);
@@ -812,6 +815,24 @@ export function ObjectFilterPanel() {
         const overlaid = row.setNames.some((s) => mutationOverlay.has(propValueKey(s, row.propName)));
         if (overlaid) {
           const propRow = row;
+          /**
+           * The objects whose FILE carries this attribute — everything else can
+           * skip the fallback read below.
+           *
+           * That read asks the model for an object's property sets, which
+           * parses them out of the (block-compressed) source. For an attribute
+           * the rules invented, `Pset_ModViz.5D_Kategorie` in this model, the
+           * file has it nowhere: 84,298 objects were read to find 0, measured
+           * at 6.6 s. The index answers the same question in 0 ms, and because
+           * its buckets are complete over the file, "not in there" is an
+           * answer rather than a guess.
+           *
+           * `null` while the post-load collection has not run — then the read
+           * happens as it always did.
+           */
+          const fileCarriers = index
+            ? new Set<number>(propRow.setNames.flatMap((n) => [...index.carriers(n, propRow.propName)]))
+            : null;
           const accessor: Accessor = (s, id) => {
             for (const setName of propRow.setNames) {
               const entry = mutationOverlay.get(propValueKey(setName, propRow.propName));
@@ -820,6 +841,7 @@ export function ObjectFilterPanel() {
               // sibling set may still carry it), otherwise the written value.
               if (v !== undefined && v !== null && v !== '') return v;
             }
+            if (fileCarriers !== null && !fileCarriers.has(id)) return '';
             for (const set of s.getProperties?.(id) ?? []) {
               if (!propRow.setNames.includes(set.name)) continue;
               for (const p of set.properties ?? []) {
@@ -901,7 +923,7 @@ export function ObjectFilterPanel() {
       // 'inert' rows contribute nothing yet.
     }
     return { andRules, orGroups, attrFilters };
-  }, [rows, selections, mutationOverlay]);
+  }, [rows, selections, mutationOverlay, index]);
 
   /** Run compiled sources down to the intersected id list; null if cancelled. */
   const runMatch = useCallback(async (
