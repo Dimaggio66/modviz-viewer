@@ -96,6 +96,19 @@ const PREVIEW_FRAME_BUDGET_MS = 8;
  *  re-renders the panel behind the bar, and 1,933 of them buy nothing a
  *  five-per-second bar does not already show. */
 const PROGRESS_PAINT_MS = 200;
+/**
+ * Above this many (rule x object) evaluations the write preview is not
+ * computed while you wait.
+ *
+ * The preview exists to fill one label and to enable the Apply button. For a
+ * hand-built rule or two that costs nothing. For the 339 rules imported from
+ * RIBiTWO against 84,298 objects it is 28.6 million evaluations — 19 s of CPU,
+ * spread over roughly twice that in wall time because it only takes 8 ms of
+ * each frame, and the dialog stutters throughout. The apply then plans exactly
+ * the same thing again and reports what it wrote, so the number is not lost,
+ * only shown afterwards instead of before.
+ */
+const PREVIEW_EVAL_BUDGET = 2_000_000;
 
 // RIB's five tabs, in RIB's order. "Add from values" (`compose`) is no longer
 // offered: it has no counterpart in RIB, and the XML import never produced one,
@@ -558,11 +571,20 @@ export function AttributeRulesDialog({
    * motion, and the whole run is abandoned the moment the rules change.
    */
   const [writes, setWrites] = useState<RuleWrite[]>([]);
+  /** True while the preview was too big to compute up front — see the budget. */
+  const [previewSkipped, setPreviewSkipped] = useState(false);
   useEffect(() => {
     // `open` because this component stays mounted when the dialog is closed —
     // without it the preview would keep running in the background, for a
     // number nobody is looking at.
-    if (!open || !store || previewRules.length === 0) { setWrites([]); return; }
+    if (!open || !store || previewRules.length === 0) { setWrites([]); setPreviewSkipped(false); return; }
+    const enabled = previewRules.filter((r) => r.enabled).length;
+    if (enabled * Math.max(universe.length, 1) > PREVIEW_EVAL_BUDGET) {
+      setWrites([]);
+      setPreviewSkipped(true);
+      return;
+    }
+    setPreviewSkipped(false);
     const steps = planWritesStepwise(
       previewRules,
       readers.effective.read,
@@ -628,7 +650,10 @@ export function AttributeRulesDialog({
    * Rules are planned one at a time so each can report its own write count.
    */
   const apply = useCallback(async () => {
-    if (!modelId || !store || (writes.length === 0 && rollbackCount === 0)) return;
+    if (!modelId || !store) return;
+    // With the preview skipped there is no `writes` to check against — the plan
+    // the apply builds below is the authority either way.
+    if (!previewSkipped && writes.length === 0 && rollbackCount === 0) return;
     setApplying(true);
     // Close the assistant right away: the run reports its own progress, and
     // watching a frozen dialog says nothing about how far it has got.
@@ -803,7 +828,7 @@ export function AttributeRulesDialog({
       setApplying(false);
       onProgress?.(null);
     }
-  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, recordPropertyMutations, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
+  }, [modelId, store, writes, rollbackCount, projectKey, pending, rules, readers, activeRuleCount, getMutationView, registerMutationView, applyPropertyEdits, recordPropertyMutations, previewSkipped, commit, patch, onOpenChange, onProgress, rollbackTargets, plan]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1008,12 +1033,14 @@ export function AttributeRulesDialog({
         <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
           <div className="flex min-w-0 flex-col gap-0.5">
             <span className="text-xs text-muted-foreground">
-              {writes.length > 0 || rollbackCount > 0
-                ? [
-                    writes.length > 0 ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)` : null,
-                    rollbackCount > 0 ? `${rollbackCount.toLocaleString()} to roll back` : null,
-                  ].filter(Boolean).join(' · ')
-                : 'Nothing to apply yet'}
+              {previewSkipped
+                ? `${activeRuleCount} rule(s) · writes are counted while applying`
+                : writes.length > 0 || rollbackCount > 0
+                  ? [
+                      writes.length > 0 ? `${activeRuleCount} rule(s) · ${writes.length.toLocaleString()} attribute write(s)` : null,
+                      rollbackCount > 0 ? `${rollbackCount.toLocaleString()} to roll back` : null,
+                    ].filter(Boolean).join(' · ')
+                  : 'Nothing to apply yet'}
             </span>
             {rules.length > 0 && (
               <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -1027,7 +1054,7 @@ export function AttributeRulesDialog({
           </div>
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-            <Button type="button" onClick={() => { void apply(); }} disabled={(writes.length === 0 && rollbackCount === 0) || applying}>
+            <Button type="button" onClick={() => { void apply(); }} disabled={(!previewSkipped && writes.length === 0 && rollbackCount === 0) || applying}>
               {applying ? 'Applying…' : 'Apply now'}
             </Button>
           </div>
