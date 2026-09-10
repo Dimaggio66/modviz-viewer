@@ -131,6 +131,27 @@ export class MutablePropertyView {
    * the caller chose to add.
    */
   private entityAliases: Map<number, number> = new Map();
+  /**
+   * The last entity whose BASE property sets were read, and what they were.
+   *
+   * One entry, not a map: the base never changes during a session, but holding
+   * every entity's psets would be hundreds of megabytes on the models this
+   * matters for — and those are exactly the models that already sit at the
+   * renderer's memory ceiling.
+   *
+   * One entry is enough because `setProperty` alone asks twice (once through
+   * `getPropertyValue`, once for the CREATE/UPDATE classification), and because
+   * a rule apply now hands its writes over sorted by entity. Before that, a
+   * single apply re-extracted the same object's psets out of the source about
+   * eighteen times — 773,209 writes over 84,298 objects, with the source
+   * block-compressed since #2183 was wired up, so every one of those inflated
+   * blocks first.
+   *
+   * Every caller treats the result as read-only; checked, and it is why the
+   * cached array can be handed out directly rather than copied.
+   */
+  private baseCacheId: number = -1;
+  private baseCacheValue: PropertySet[] | null = null;
   private nextAllocatedId: number = 0;
   private mutationHistory: Mutation[] = [];
   private modelId: string;
@@ -278,10 +299,11 @@ export class MutablePropertyView {
    */
   private getBasePropertiesForEntity(entityId: number): PropertySet[] {
     const baseId = this.resolveBaseEntityId(entityId);
+    if (baseId === this.baseCacheId && this.baseCacheValue !== null) return this.baseCacheValue;
     // Prefer on-demand extraction if available (client-side WASM parsing)
     if (this.onDemandExtractor) {
       // Normalize the result to PropertySet[] (globalId defaults to empty string)
-      return this.onDemandExtractor(baseId).map(pset => ({
+      return this.remember(baseId, this.onDemandExtractor(baseId).map(pset => ({
         name: pset.name,
         globalId: pset.globalId || '',
         properties: pset.properties.map(prop => ({
@@ -290,13 +312,19 @@ export class MutablePropertyView {
           value: prop.value as PropertyValue,
           dataType: prop.dataType,
         })),
-      }));
+      })));
     }
     // Fallback to pre-built property table
     if (this.baseTable) {
-      return this.baseTable.getForEntity(baseId);
+      return this.remember(baseId, this.baseTable.getForEntity(baseId));
     }
-    return [];
+    return this.remember(baseId, []);
+  }
+
+  private remember(baseId: number, psets: PropertySet[]): PropertySet[] {
+    this.baseCacheId = baseId;
+    this.baseCacheValue = psets;
+    return psets;
   }
 
   /**
@@ -1859,6 +1887,8 @@ export class MutablePropertyView {
     this.forgottenCreatedEntities.clear();
     this.forgottenEntityOverlay.clear();
     this.entityAliases.clear();
+    this.baseCacheId = -1;
+    this.baseCacheValue = null;
     this.nextAllocatedId = 0;
     this.mutationHistory = [];
   }

@@ -698,6 +698,20 @@ export function AttributeRulesDialog({
       // Each write carries its rule id instead.
       for (const r of pending) if (r.enabled) counts.set(r.id, 0);
       await tick('Applying rules…');
+      /**
+       * Written object by object, not rule by rule.
+       *
+       * The plan is built rule-major because rules chain, but APPLYING it in
+       * that order means the ~9 writes an object receives arrive spread across
+       * the whole run, and `MutablePropertyView` re-reads that object's base
+       * property sets out of the source for every one of them — twice per
+       * write. Grouped by entity, its one-entry cache answers all of them.
+       *
+       * The sort must stay stable, and `Array.prototype.sort` is: two writes to
+       * the SAME attribute keep the order the rules gave them, so a later rule
+       * still wins over an earlier one.
+       */
+      const ordered = [...liveWrites].sort((a, b) => a.entityId - b.entityId);
       // Bundled, and the rule ids kept alongside so each write is still
       // attributed to the rule that produced it.
       const batch: PropertyEdit[] = [];
@@ -714,7 +728,7 @@ export function AttributeRulesDialog({
         batchRules.length = 0;
         await tick('Applying rules…');
       };
-      for (const w of liveWrites) {
+      for (const w of ordered) {
         batch.push(w.op === 'set'
           ? { op: 'set', entityId: w.entityId, psetName: w.psetName, propName: w.propName, value: w.value ?? '', valueType: w.valueType ?? PropertyValueType.Label }
           : { op: 'delete', entityId: w.entityId, psetName: w.psetName, propName: w.propName });
